@@ -1,0 +1,14 @@
+.DS_Store
+
+# Dependencies
+node_modules
+node_modules/
+
+# Runtime and local generated state
+.easy_exam_runtime/
+.codex_tmp_spreadsheet/
+__pycache__/
+server/__pycache__/
+
+# Build and output artifacts
+outputs/

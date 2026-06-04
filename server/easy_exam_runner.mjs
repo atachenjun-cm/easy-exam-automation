@@ -1,0 +1,1664 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import { chromium } from "playwright";
+
+const EZTEST_ADD_URL = "https://eztest.org/manager/schedule/session/wizard/add/";
+const EZTEST_LIST_URL = "https://eztest.org/manager/schedule/session/list/all/";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const pythonBin =
+  process.env.CODEX_PYTHON ||
+  "/Users/chen/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3";
+const subjectTemplateScript = path.join(__dirname, "fill_subject_template.py");
+
+function timestamp() {
+  return new Date().toISOString();
+}
+
+function event(type, payload = {}) {
+  return { type, ts: timestamp(), ...payload };
+}
+
+function parseDateTimeValue(value) {
+  const match = String(value || "").match(/(\d{4})[/-](\d{1,2})[/-](\d{1,2})\s+(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+  return {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: Number(match[4]),
+    minute: Number(match[5]),
+  };
+}
+
+async function ensureDir(dir) {
+  await fs.mkdir(dir, { recursive: true });
+}
+
+async function pause(ms = 500) {
+  await delay(ms);
+}
+
+async function isLoginPage(page) {
+  const hints = ["账号密码登录", "验证码登录", "请输入密码", "手机或邮箱", "请输入正确的手机或邮箱"];
+  for (const hint of hints) {
+    if ((await page.getByText(hint, { exact: false }).count()) > 0) {
+      return true;
+    }
+  }
+  return (await page.locator("input[type='password']").count()) > 0;
+}
+
+async function firstVisibleLocator(candidates, timeout = 15_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    for (const locator of candidates) {
+      try {
+        if ((await locator.count()) > 0 && (await locator.first().isVisible())) {
+          return locator.first();
+        }
+      } catch {}
+    }
+    await delay(250);
+  }
+  return null;
+}
+
+async function clearAndType(locator, value) {
+  await locator.click({ clickCount: 3 });
+  await locator.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+  await locator.fill("");
+  await locator.type(value, { delay: 0 });
+
+  let current = await locator.inputValue().catch(() => "");
+  if (current !== value) {
+    await locator.fill(value);
+    current = await locator.inputValue().catch(() => "");
+  }
+  if (current !== value) {
+    throw new Error("输入框回读校验失败，页面未接受输入值。");
+  }
+}
+
+async function performLogin(page, login, emit) {
+  if (!login?.url || !login?.username || !login?.password) {
+    return false;
+  }
+
+  if ((await isLoginPage(page)) || page.url().includes("/login")) {
+    emit(event("status", { status: "running", message: "正在登录页填写账号密码" }));
+  } else {
+    emit(event("status", { status: "running", message: "正在打开登录页" }));
+    await page.goto(login.url, { waitUntil: "domcontentloaded" });
+    await pause(1200);
+  }
+
+  if (!(await isLoginPage(page))) {
+    emit(event("log", { level: "success", message: "当前会话已处于登录态，跳过账号密码输入。" }));
+    return false;
+  }
+
+  const userLocator = await firstVisibleLocator([
+    page.getByPlaceholder("请输入手机或邮箱（必填）"),
+    page.getByPlaceholder("请输入手机或邮箱"),
+    page.locator("input[placeholder*='手机或邮箱']"),
+    page.locator("input[placeholder*='邮箱']"),
+    page.locator("input[placeholder*='账号']"),
+    page.locator("input[type='email']"),
+    page.locator("input[type='text']").first(),
+  ]);
+  const passwordLocator = await firstVisibleLocator([
+    page.getByPlaceholder("请输入密码（必填）"),
+    page.getByPlaceholder("请输入密码"),
+    page.locator("input[type='password']"),
+  ]);
+
+  if (!userLocator || !passwordLocator) {
+    throw new Error("未识别到登录页的账号或密码输入框。");
+  }
+
+  emit(event("log", { level: "success", message: "已识别登录页输入框，开始填写账号密码。" }));
+  emit(event("status", { status: "running", message: "正在填写账号密码" }));
+  await clearAndType(userLocator, login.username);
+  await clearAndType(passwordLocator, login.password);
+
+  const consent = await firstVisibleLocator([
+    page.locator("label:has-text('已阅读并同意') input[type='checkbox']"),
+    page.locator("input[type='checkbox']").first(),
+  ], 2000);
+  if (consent) {
+    try {
+      if (!(await consent.isChecked())) {
+        await consent.check();
+      }
+    } catch {}
+  }
+
+  const submitCandidates = [
+    page.getByRole("button", { name: "登录" }).first(),
+    page.getByRole("button", { name: "登 录" }).first(),
+    page.locator("button[type='submit']").first(),
+    page.locator("input[type='submit']").first(),
+  ];
+
+  let clicked = false;
+  for (const locator of submitCandidates) {
+    if ((await locator.count()) > 0) {
+      await locator.click();
+      clicked = true;
+      break;
+    }
+  }
+
+  if (!clicked) {
+    await passwordLocator.press("Enter");
+  }
+
+  emit(event("log", { level: "success", message: "已提交易考后台登录信息。" }));
+  emit(event("status", { status: "running", message: "已提交登录，等待后台跳转" }));
+  const loginDeadline = Date.now() + 12_000;
+  while (Date.now() < loginDeadline) {
+    if (!(await isLoginPage(page))) {
+      return true;
+    }
+    await delay(500);
+  }
+  return true;
+}
+
+async function isAddWizardPage(page) {
+  if (await isLoginPage(page)) {
+    return false;
+  }
+  const hasExamName =
+    (await page.getByText("考试名称", { exact: false }).count()) > 0 ||
+    (await page.getByPlaceholder("考试名称").count()) > 0;
+  const hasBasicStep = (await page.getByText("基本信息", { exact: false }).count()) > 0;
+  const hasTimeFields =
+    (await page.getByPlaceholder("开始时间").count()) > 0 || (await page.getByPlaceholder("结束时间").count()) > 0;
+  return hasBasicStep && (hasExamName || hasTimeFields);
+}
+
+async function waitForBasicInfoReady(page, timeout = 20_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await isAddWizardPage(page)) {
+      return true;
+    }
+    await delay(500);
+  }
+  return false;
+}
+
+async function openNewExamFromExamNav(page, emit) {
+  if (await isAddWizardPage(page)) {
+    return true;
+  }
+
+  const examNav = page.getByText("考试", { exact: true }).first();
+  if ((await examNav.count()) > 0 && (await examNav.isVisible().catch(() => false))) {
+    emit(event("log", { level: "success", message: "已登录后台，正在点击“考试”。" }));
+    await examNav.click();
+    await pause(1200);
+  }
+
+  const newExamButton = page.getByText("新建考试", { exact: false }).first();
+  if ((await newExamButton.count()) > 0 && (await newExamButton.isVisible().catch(() => false))) {
+    emit(event("log", { level: "success", message: "已找到“新建考试”，正在进入基本信息页。" }));
+    await newExamButton.click();
+    await pause(1500);
+    return true;
+  }
+
+  return false;
+}
+
+async function enterNewExamFromCurrentPage(page, emit) {
+  const newExamButton = page.getByText("新建考试", { exact: false }).first();
+  if ((await newExamButton.count()) > 0 && (await newExamButton.isVisible().catch(() => false))) {
+    emit(event("log", { level: "success", message: "已找到“新建考试”，正在进入基本信息页。" }));
+    await newExamButton.click();
+    return true;
+  }
+  return false;
+}
+
+async function waitForLogin(page, emit, login) {
+  if (await waitForBasicInfoReady(page, 5_000)) {
+    return;
+  }
+
+  let triedAutoLogin = false;
+  if ((await isLoginPage(page)) || page.url().includes("/login")) {
+    if (login?.url && login?.username && login?.password) {
+      emit(event("log", { level: "success", message: "检测到登录页，开始自动登录易考后台。" }));
+      await performLogin(page, login, emit);
+      triedAutoLogin = true;
+    } else {
+      emit(event("status", { status: "action_required", message: "请先在打开的 Chrome 窗口登录易考后台。" }));
+      emit(event("log", { level: "warn", message: "检测到登录页，等待人工完成登录。" }));
+    }
+  }
+
+  const timeoutAt = Date.now() + 10 * 60_000;
+  let lastNoticeAt = 0;
+  let attemptedListPage = false;
+  while (Date.now() < timeoutAt) {
+    if (await waitForBasicInfoReady(page, 8_000)) {
+      emit(event("log", { level: "success", message: "已检测到登录完成，继续执行。" }));
+      emit(event("status", { status: "running", message: "继续配置考试" }));
+      return;
+    }
+    if (Date.now() - lastNoticeAt > 5000) {
+      emit(event("status", { status: "running", message: "等待进入新建考试页" }));
+      lastNoticeAt = Date.now();
+    }
+    if ((await isLoginPage(page)) || page.url().includes("/login")) {
+      if (!triedAutoLogin && login?.url && login?.username && login?.password) {
+        emit(event("log", { level: "warn", message: "登录后仍停留在登录页，正在重试。" }));
+        await performLogin(page, login, emit);
+        triedAutoLogin = true;
+      } else {
+        emit(event("status", { status: "action_required", message: "登录未完成，请在浏览器中手动完成后脚本会继续。" }));
+      }
+      await delay(1500);
+      continue;
+    }
+
+    if (await openNewExamFromExamNav(page, emit)) {
+      await delay(1500);
+      continue;
+    }
+
+    if (await enterNewExamFromCurrentPage(page, emit)) {
+      await delay(2000);
+      continue;
+    }
+
+    if (!attemptedListPage) {
+      try {
+        emit(event("log", { level: "success", message: "当前页未发现“新建考试”，正在进入考试列表页。" }));
+        await page.goto(EZTEST_LIST_URL, { waitUntil: "domcontentloaded" });
+        attemptedListPage = true;
+        await delay(1500);
+        continue;
+      } catch {}
+    }
+
+    await delay(2000);
+  }
+
+  throw new Error("等待登录超时，请刷新任务后重试。");
+}
+
+async function takeShot(page, shotsDir, jobId, slug, title) {
+  const filePath = path.join(shotsDir, `${slug}.png`);
+  await page.screenshot({ path: filePath, fullPage: true });
+  return { title, slug, filePath, url: `/artifacts/${jobId}/${path.basename(filePath)}` };
+}
+
+async function clickButton(page, name) {
+  await page.getByRole("button", { name }).click();
+}
+
+async function checkRadio(page, name) {
+  await page.getByRole("radio", { name }).check();
+}
+
+async function selectRadioInGroup(page, groupLabel, optionLabel) {
+  await evaluate(
+    page,
+    ({ targetGroupLabel, targetOptionLabel }) => {
+      const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+
+      const group = [...document.querySelectorAll("div, li, section")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(targetGroupLabel))
+        .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length)
+        .find((el) => [...el.querySelectorAll("input[type='radio']")].length > 0);
+      if (!group) {
+        throw new Error(`未找到单选分组：${targetGroupLabel}`);
+      }
+
+      const labels = [...group.querySelectorAll("label")].filter((el) => visible(el) && norm(el.textContent).includes(targetOptionLabel));
+      for (const label of labels) {
+        const radio = label.querySelector("input[type='radio']");
+        if (radio) {
+          if (!radio.checked) {
+            label.click();
+            radio.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+          return;
+        }
+      }
+
+      const radios = [...group.querySelectorAll("input[type='radio']")];
+      const matchedRadio = radios.find((radio) => {
+        const candidates = [
+          radio.closest("label"),
+          radio.parentElement,
+          radio.parentElement?.parentElement,
+          radio.closest("div"),
+          radio.closest("span"),
+        ].filter(Boolean);
+        return candidates.some((node) => norm(node.textContent || "") === targetOptionLabel || norm(node.textContent || "").includes(targetOptionLabel));
+      });
+      if (!matchedRadio) {
+        throw new Error(`未找到单选项：${targetGroupLabel} / ${targetOptionLabel}`);
+      }
+      if (!matchedRadio.checked) {
+        matchedRadio.click();
+        matchedRadio.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    },
+    { targetGroupLabel: groupLabel, targetOptionLabel: optionLabel },
+  );
+}
+
+async function fillTextInputByPlaceholder(page, placeholder, value) {
+  const locator = page.getByPlaceholder(placeholder).first();
+  await locator.click();
+  await locator.fill(value);
+}
+
+async function fillLabeledTextField(page, label, value) {
+  await evaluate(
+    page,
+    ({ targetLabel, nextValue }) => {
+      const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+
+      const row = [...document.querySelectorAll("div, li, section")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(targetLabel))
+        .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length)
+        .find((el) => el.querySelector("input, textarea"));
+      if (!row) {
+        throw new Error(`未找到字段：${targetLabel}`);
+      }
+
+      const input = row.querySelector("input, textarea");
+      input.focus();
+      input.value = nextValue;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    },
+    { targetLabel: label, nextValue: value },
+  );
+}
+
+async function fillExamNameField(page, value) {
+  const locator = page.locator("textarea.ant-input").first();
+  await locator.waitFor({ state: "visible", timeout: 20_000 });
+  await locator.click();
+  await locator.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+  await locator.fill("");
+  await locator.type(value, { delay: 0 });
+  const success = await expectExactTextareaValue(locator, value, 3000).then(() => true).catch(() => false);
+  if (!success) {
+    throw new Error("考试名称填写后校验失败。");
+  }
+}
+
+async function readBasicInfoField(page, field) {
+  return evaluate(
+    page,
+    ({ fieldName }) => {
+      const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+
+      if (fieldName === "考试名称") {
+        const textarea = [...document.querySelectorAll("textarea.ant-input")].find(visible);
+        return textarea?.value || "";
+      }
+
+      const placeholder = fieldName === "开始时间" ? "开始时间" : "结束时间";
+      const input = [...document.querySelectorAll("input")]
+        .find((el) => visible(el) && (el.getAttribute("placeholder") || "").includes(placeholder));
+      return input?.value || "";
+    },
+    { fieldName: field },
+  );
+}
+
+async function readBasicInfoTimezone(page) {
+  return evaluate(page, () => {
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const candidates = [...document.querySelectorAll("span, div, p")]
+      .filter((el) => visible(el))
+      .map((el) => (el.textContent || "").trim())
+      .filter((text) => /^\(.+\)$/.test(text) && (text.includes("UTC") || text.includes("/")));
+    return candidates[0] || "";
+  });
+}
+
+async function setDateTimeField(page, placeholder, value, timezoneText = "", emit = null) {
+  const locator = page.getByPlaceholder(placeholder).first();
+  await locator.waitFor({ state: "visible", timeout: 20_000 });
+  const requirementParts = parseDateTimeValue(value);
+  if (requirementParts) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await clearDateTimeInput(page, placeholder);
+      await pause(120);
+      await locator.click();
+      await pause(150);
+      try {
+        emit?.(event("log", { level: "success", message: `${placeholder}第 ${attempt + 1} 次点击选择：${formatPartsForLog(requirementParts)}` }));
+        const selected = await selectDateTimeFromPicker(page, requirementParts, emit);
+        if (selected) {
+          await pause(300);
+          const actual = await locator.inputValue().catch(() => "");
+          emit?.(event("log", { level: parseDateTimeValue(actual) ? "success" : "warn", message: `${placeholder}页面回显：${actual || "空"}` }));
+          const exact = await isExactDateTimeValue(locator, requirementParts);
+          if (!exact) {
+            emit?.(event("log", { level: "warn", message: `${placeholder}回显与需求单不一致，强制写回需求单时间：${formatPartsForLog(requirementParts)}` }));
+            await forceSetDateTimeInput(page, placeholder, formatPartsForLog(requirementParts));
+          }
+          await expectExactDateTimeValue(locator, requirementParts, 2500);
+          return;
+        }
+      } catch (error) {
+        emit?.(event("log", { level: "warn", message: `${placeholder}选择尝试失败：${error.message || String(error)}` }));
+      }
+      await locator.blur().catch(() => {});
+      await pause(160);
+    }
+    const actual = await locator.inputValue().catch(() => "");
+    throw new Error(`${placeholder}选择失败，期望 ${value}，实际 ${actual || "空"}`);
+  }
+
+  const fast = await fastSetInputByPlaceholder(page, placeholder, value);
+  if (!fast) {
+    await locator.click();
+    await locator.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+    await locator.fill("");
+    await locator.type(value, { delay: 0 });
+  }
+
+  const confirm = page.getByRole("button", { name: "确 定" }).last();
+  if ((await confirm.count()) > 0 && (await confirm.isVisible().catch(() => false))) {
+    await confirm.click();
+  } else {
+    await locator.press("Enter").catch(() => {});
+    await locator.blur().catch(() => {});
+  }
+
+  if (requirementParts) {
+    await expectExactDateTimeValue(locator, requirementParts, 5000);
+  } else {
+    await expectInputContains(locator, value, 5000);
+  }
+}
+
+async function isExactDateTimeValue(locator, parsed) {
+  const current = await locator.inputValue().catch(() => "");
+  const currentParsed = parseDateTimeValue(current);
+  return Boolean(
+    currentParsed &&
+      currentParsed.year === parsed.year &&
+      currentParsed.month === parsed.month &&
+      currentParsed.day === parsed.day &&
+      currentParsed.hour === parsed.hour &&
+      currentParsed.minute === parsed.minute,
+  );
+}
+
+async function forceSetDateTimeInput(page, placeholder, value) {
+  await evaluate(
+    page,
+    ({ targetPlaceholder, nextValue }) => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const input = [...document.querySelectorAll("input")]
+        .find((el) => visible(el) && (el.getAttribute("placeholder") || "").includes(targetPlaceholder));
+      if (!input) {
+        throw new Error(`未找到时间输入框：${targetPlaceholder}`);
+      }
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      const previousValue = input.value;
+      input.focus();
+      input.removeAttribute("readonly");
+      input.removeAttribute("disabled");
+      if (setter) {
+        setter.call(input, nextValue);
+      } else {
+        input.value = nextValue;
+      }
+      if (input._valueTracker) {
+        input._valueTracker.setValue(previousValue);
+      }
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextValue, inputType: "insertText" }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
+      input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", code: "Enter" }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("blur", { bubbles: true }));
+    },
+    { targetPlaceholder: placeholder, nextValue: value },
+  );
+  await pause(200);
+}
+
+function formatPartsForLog(parts) {
+  return `${parts.year}/${String(parts.month).padStart(2, "0")}/${String(parts.day).padStart(2, "0")} ${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}`;
+}
+
+function parseTimezoneOffsetMinutes(timezoneText = "") {
+  const text = String(timezoneText || "").trim();
+  if (!text) return null;
+  if (/^\(?UTC\)?$/i.test(text)) return 0;
+  const match = text.match(/UTC\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?/i);
+  if (!match) return null;
+  const sign = match[1] === "-" ? -1 : 1;
+  const hours = Number(match[2] || 0);
+  const minutes = Number(match[3] || 0);
+  return sign * (hours * 60 + minutes);
+}
+
+async function clearDateTimeInput(page, placeholder) {
+  await evaluate(
+    page,
+    ({ targetPlaceholder }) => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const input = [...document.querySelectorAll("input")]
+        .find((el) => visible(el) && (el.getAttribute("placeholder") || "").includes(targetPlaceholder));
+      if (!input) return;
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set;
+      input.focus();
+      if (setter) {
+        setter.call(input, "");
+      } else {
+        input.value = "";
+      }
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "", inputType: "deleteContentBackward" }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("blur", { bubbles: true }));
+    },
+    { targetPlaceholder: placeholder },
+  );
+}
+
+async function selectDateTimeFromPicker(page, parts, emit = null) {
+  await page
+    .waitForFunction(() => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      return [...document.querySelectorAll(".ant-calendar-picker-container, .ant-calendar, .ant-picker-dropdown")]
+        .some(visible);
+    }, null, { timeout: 3000 })
+    .catch(() => {});
+
+  const legacySelected = await selectLegacyCalendarDateTime(page, parts, emit);
+  if (legacySelected) {
+    return true;
+  }
+  return selectModernPickerDateTime(page, parts);
+}
+
+async function selectLegacyCalendarDateTime(page, parts, emit = null) {
+  const legacyVisible = await page
+    .locator(".ant-calendar-picker-container:visible, .ant-calendar:visible")
+    .count()
+    .catch(() => 0);
+  if (legacyVisible === 0) {
+    return false;
+  }
+
+  const result = await page.evaluate(async ({ target }) => {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+
+    const getContainer = () =>
+      [...document.querySelectorAll(".ant-calendar-picker-container, .ant-calendar")]
+        .filter(visible)
+        .pop();
+    const getPickerContainers = () => [...document.querySelectorAll(".ant-calendar-picker-container")].filter(visible);
+
+    const readMonth = (container) => {
+      const headerText = norm(
+        container.querySelector(".ant-calendar-my-select")?.textContent ||
+          container.querySelector(".ant-calendar-header")?.textContent ||
+          "",
+      );
+      const match = headerText.match(/(\d{4})\D+(\d{1,2})/);
+      if (!match) return null;
+      return { year: Number(match[1]), month: Number(match[2]) };
+    };
+
+    const clickButton = (container, selectors) => {
+      for (const selector of selectors) {
+        const button = container.querySelector(selector);
+        if (button && visible(button)) {
+          button.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+          button.click();
+          return true;
+        }
+      }
+      return false;
+    };
+
+    let container = getContainer();
+    if (!container) {
+      return false;
+    }
+
+    for (let attempt = 0; attempt < 48; attempt += 1) {
+      container = getContainer();
+      const current = readMonth(container);
+      if (!current) break;
+      if (current.year === target.year && current.month === target.month) {
+        break;
+      }
+      const before = current.year * 12 + current.month;
+      const desired = target.year * 12 + target.month;
+      const moved =
+        before > desired
+          ? clickButton(container, [".ant-calendar-prev-month-btn", ".ant-calendar-prev-year-btn"])
+          : clickButton(container, [".ant-calendar-next-month-btn", ".ant-calendar-next-year-btn"]);
+      if (!moved) break;
+      await sleep(80);
+    }
+
+    container = getContainer();
+    if (!container) {
+      throw new Error("未找到旧版时间选择器弹层");
+    }
+
+    const targetDay = String(target.day);
+    const dateCell = [...container.querySelectorAll(".ant-calendar-cell")]
+      .filter((cell) => {
+        if (!visible(cell)) return false;
+        if (cell.classList.contains("ant-calendar-disabled-cell")) return false;
+        if (cell.classList.contains("ant-calendar-last-month-cell")) return false;
+        if (cell.classList.contains("ant-calendar-next-month-cell")) return false;
+        const dateNode = cell.querySelector(".ant-calendar-date");
+        if (dateNode?.classList.contains("ant-calendar-last-month-cell")) return false;
+        if (dateNode?.classList.contains("ant-calendar-next-month-btn-day")) return false;
+        return norm(dateNode?.textContent) === targetDay;
+      })
+      .sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        if (ar.top !== br.top) return ar.top - br.top;
+        return ar.left - br.left;
+      })[0];
+
+    if (!dateCell) {
+      throw new Error(`未找到日期：${targetDay}`);
+    }
+    const dateButton = dateCell.querySelector(".ant-calendar-date") || dateCell;
+    dateButton.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    dateButton.click();
+    await sleep(120);
+
+    container = getContainer();
+    const columns = [...container.querySelectorAll(".ant-calendar-time-picker-select")].filter(visible);
+    if (columns.length >= 2) {
+      const pickerContainers = getPickerContainers();
+      const previewOptions = (column) =>
+        [...column.querySelectorAll("li")]
+          .slice(0, 24)
+          .map((li) => norm(li.textContent))
+          .filter(Boolean)
+          .join(",");
+      return {
+        mode: "timeColumns",
+        containerIndex: Math.max(0, pickerContainers.length - 1),
+        dateText: `${target.year}/${String(target.month).padStart(2, "0")}/${String(target.day).padStart(2, "0")}`,
+        hourOptions: previewOptions(columns[0]),
+        minuteOptions: previewOptions(columns[1]),
+      };
+    }
+
+    container = getContainer();
+    const okButton = container.querySelector(".ant-calendar-ok-btn");
+    if (!okButton || !visible(okButton)) {
+      throw new Error("未找到时间选择器确定按钮");
+    }
+
+    return { mode: "noTimeColumns" };
+  }, { target: parts });
+
+  if (result?.mode === "timeColumns") {
+    emit?.(event("log", { level: "success", message: `时间弹层识别：日期 ${result.dateText}；小时候选 ${result.hourOptions}；分钟候选 ${result.minuteOptions}` }));
+    const hourSelected = await clickLegacyTimeColumnItem(page, result.containerIndex, 0, parts.hour);
+    emit?.(event("log", { level: "success", message: `小时列精确选中：${hourSelected}` }));
+    const minuteSelected = await clickLegacyTimeColumnItem(page, result.containerIndex, 1, parts.minute);
+    emit?.(event("log", { level: "success", message: `分钟列精确选中：${minuteSelected}` }));
+  }
+
+  emit?.(event("log", { level: "success", message: "时间弹层选择完成，准备点击确定。" }));
+
+  await page.evaluate(() => {
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const container = [...document.querySelectorAll(".ant-calendar-picker-container")]
+      .filter(visible)
+      .pop();
+    const okButton = container?.querySelector(".ant-calendar-ok-btn");
+    if (!okButton) {
+      throw new Error("未找到时间选择器确定按钮");
+    }
+    okButton.classList.remove("ant-calendar-ok-btn-disabled");
+    okButton.removeAttribute("disabled");
+    okButton.click();
+  });
+  await pause(160);
+  return true;
+}
+
+async function clickLegacyTimeColumnItem(page, containerIndex, columnIndex, value) {
+  const padded = String(value).padStart(2, "0");
+  const selected = await page.evaluate(
+    async ({ targetText, targetContainerIndex, targetColumnIndex }) => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const containers = [...document.querySelectorAll(".ant-calendar-picker-container")]
+        .filter(visible);
+      const container = containers[targetContainerIndex] || containers.at(-1);
+      if (!container) {
+        throw new Error("未找到当前时间弹层");
+      }
+      const columns = [...container.querySelectorAll(".ant-calendar-time-picker-select")].filter(visible);
+      const column = columns[targetColumnIndex];
+      if (!column) {
+        throw new Error(`未找到时间列：${targetColumnIndex + 1}`);
+      }
+      const item = [...column.querySelectorAll("li")].find((li) => norm(li.textContent) === targetText);
+      if (!item) {
+        throw new Error(`未找到时间项：${targetText}`);
+      }
+      column.scrollTop = Math.max(0, item.offsetTop - column.clientHeight / 2);
+      await sleep(80);
+      const clickable = item.querySelector("a, span, div") || item;
+      const rect = clickable.getBoundingClientRect();
+      const init = {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+      };
+      clickable.dispatchEvent(new MouseEvent("mousedown", init));
+      clickable.dispatchEvent(new MouseEvent("mouseup", init));
+      clickable.dispatchEvent(new MouseEvent("click", init));
+      clickable.click();
+      await sleep(80);
+      const selectedItem = [...column.querySelectorAll(".ant-calendar-time-picker-select-option-selected, li")]
+        .find((li) => li.classList.contains("ant-calendar-time-picker-select-option-selected"));
+      return norm(selectedItem?.textContent || item.textContent);
+    },
+    { targetText: padded, targetContainerIndex: containerIndex, targetColumnIndex: columnIndex },
+  );
+  if (String(selected || "").replace(/\s+/g, " ").trim() !== padded) {
+    throw new Error(`时间列 ${columnIndex + 1} 选中错误，期望 ${padded}，实际 ${selected || "空"}`);
+  }
+  return padded;
+}
+
+async function selectModernPickerDateTime(page, parts) {
+  const dropdown = page.locator(".ant-picker-dropdown").last();
+  await dropdown.waitFor({ state: "visible", timeout: 5000 });
+
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    const header = await dropdown.locator(".ant-picker-header-view").first().innerText().catch(() => "");
+    const monthMatch = header.match(/(\d{4})\D+(\d{1,2})\D*/);
+    if (monthMatch) {
+      const currentYear = Number(monthMatch[1]);
+      const currentMonth = Number(monthMatch[2]);
+      if (currentYear === parts.year && currentMonth === parts.month) {
+        break;
+      }
+      if (currentYear > parts.year || (currentYear === parts.year && currentMonth > parts.month)) {
+        await dropdown.locator(".ant-picker-header-prev-btn").first().click();
+      } else {
+        await dropdown.locator(".ant-picker-header-next-btn").first().click();
+      }
+      await pause(120);
+      continue;
+    }
+    break;
+  }
+
+  await page.evaluate(
+    ({ day }) => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+
+      const dropdown = [...document.querySelectorAll(".ant-picker-dropdown")]
+        .filter((el) => visible(el))
+        .pop();
+      if (!dropdown) {
+        throw new Error("未找到时间选择器弹层");
+      }
+
+      const dateCell = [...dropdown.querySelectorAll(".ant-picker-cell")]
+        .find((cell) =>
+          cell.classList.contains("ant-picker-cell-in-view") &&
+          !cell.classList.contains("ant-picker-cell-disabled") &&
+          (cell.querySelector(".ant-picker-cell-inner")?.textContent || "").trim() === String(day),
+        );
+      if (!dateCell) {
+        throw new Error(`未找到日期：${day}`);
+      }
+      dateCell.click();
+    },
+    { day: parts.day },
+  );
+
+  await pause(120);
+
+  await page.evaluate(
+    ({ hour, minute }) => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+
+      const dropdown = [...document.querySelectorAll(".ant-picker-dropdown")]
+        .filter((el) => visible(el))
+        .pop();
+      if (!dropdown) {
+        throw new Error("未找到时间选择器弹层");
+      }
+
+      const pickFromColumn = (columnIndex, value) => {
+        const columns = [...dropdown.querySelectorAll(".ant-picker-time-panel-column")].filter(visible);
+        const column = columns[columnIndex];
+        if (!column) {
+          throw new Error(`未找到时间列：${columnIndex}`);
+        }
+        const text = String(value).padStart(2, "0");
+        const item = [...column.querySelectorAll(".ant-picker-time-panel-cell-inner")]
+          .find((el) => (el.textContent || "").trim() === text);
+        if (!item) {
+          throw new Error(`未找到时间项：${text}`);
+        }
+        column.scrollTop = Math.max(0, item.offsetTop - column.clientHeight / 2);
+        item.click();
+      };
+
+      pickFromColumn(0, hour);
+      pickFromColumn(1, minute);
+    },
+    { hour: parts.hour, minute: parts.minute },
+  );
+  await pause(120);
+
+  return page.evaluate(() => {
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+
+    const dropdown = [...document.querySelectorAll(".ant-picker-dropdown")]
+      .filter((el) => visible(el))
+      .pop();
+    const button = dropdown?.querySelector(".ant-picker-ok button");
+    if (!button || button.disabled) {
+      return false;
+    }
+    button.click();
+    return true;
+  });
+}
+
+async function expectInputContains(locator, value, timeout = 2_000) {
+  const expectedDateTime = parseDateTimeValue(value);
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const current = await locator.inputValue().catch(() => "");
+    const currentDateTime = expectedDateTime ? parseDateTimeValue(current) : null;
+    if (
+      expectedDateTime &&
+      currentDateTime &&
+      currentDateTime.year === expectedDateTime.year &&
+      currentDateTime.month === expectedDateTime.month &&
+      currentDateTime.day === expectedDateTime.day &&
+      currentDateTime.hour === expectedDateTime.hour &&
+      currentDateTime.minute === expectedDateTime.minute
+    ) {
+      return;
+    }
+    if (current.includes(value)) {
+      return;
+    }
+    await delay(200);
+  }
+  throw new Error(`输入值未生效：${value}`);
+}
+
+async function expectExactInputValue(locator, value, timeout = 2_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const current = await locator.inputValue().catch(() => "");
+    if ((current || "").trim() === String(value).trim()) {
+      return;
+    }
+    await delay(200);
+  }
+  throw new Error(`输入值未精确生效：${value}`);
+}
+
+async function expectExactTextareaValue(locator, value, timeout = 2_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const current = await locator.inputValue().catch(() => "");
+    if ((current || "").trim() === String(value).trim()) {
+      return;
+    }
+    await delay(200);
+  }
+  throw new Error(`文本框值未精确生效：${value}`);
+}
+
+async function expectExactDateTimeValue(locator, parsed, timeout = 2_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const current = await locator.inputValue().catch(() => "");
+    const currentParsed = parseDateTimeValue(current);
+    if (
+      currentParsed &&
+      currentParsed.year === parsed.year &&
+      currentParsed.month === parsed.month &&
+      currentParsed.day === parsed.day &&
+      currentParsed.hour === parsed.hour &&
+      currentParsed.minute === parsed.minute
+    ) {
+      return;
+    }
+    await delay(200);
+  }
+  throw new Error(
+    `时间值未精确生效：${parsed.year}/${String(parsed.month).padStart(2, "0")}/${String(parsed.day).padStart(2, "0")} ${String(parsed.hour).padStart(2, "0")}:${String(parsed.minute).padStart(2, "0")}`,
+  );
+}
+
+async function expectBasicInfoReadyToSubmit(page, config, emit) {
+  const checks = [];
+  const examName = await readBasicInfoField(page, "考试名称");
+  checks.push(["考试名称", config.examName, examName]);
+
+  const startTime = await readBasicInfoField(page, "开始时间");
+  checks.push(["开始时间", config.startTimeDisplay, normalizeDateTimeDisplay(startTime)]);
+
+  const endTime = await readBasicInfoField(page, "结束时间");
+  checks.push(["结束时间", config.endTimeDisplay, normalizeDateTimeDisplay(endTime)]);
+
+  if (config.earlyLoginMinutes != null) {
+    const earlyLogin = await readMinuteNumberValue(page, 0);
+    checks.push(["提前登录", String(config.earlyLoginMinutes), earlyLogin]);
+  }
+  if (config.lateLimitMinutes != null) {
+    const lateLimit = await readMinuteNumberValue(page, 1);
+    checks.push(["限制迟到", String(config.lateLimitMinutes), lateLimit]);
+  }
+
+  for (const [label, expected, actual] of checks) {
+    emit?.(event("log", { level: actual === expected ? "success" : "warn", message: `提交前校验 ${label}：期望 ${expected || "空"}，实际 ${actual || "空"}` }));
+    if (actual !== expected) {
+      throw new Error(`基础信息提交前校验失败：${label} 期望 ${expected || "空"}，实际 ${actual || "空"}`);
+    }
+  }
+}
+
+function normalizeDateTimeDisplay(value) {
+  const parsed = parseDateTimeValue(value);
+  return parsed ? formatPartsForLog(parsed) : String(value || "").trim();
+}
+
+async function readMinuteNumberValue(page, index) {
+  const input = page.locator("input[type='number']").nth(index);
+  return (await input.inputValue().catch(() => "")).trim();
+}
+
+async function fastSetInputByPlaceholder(page, placeholder, value) {
+  return evaluate(
+    page,
+    ({ targetPlaceholder, nextValue }) => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+
+      const input = [...document.querySelectorAll("input, textarea")]
+        .find((el) => visible(el) && (el.getAttribute("placeholder") || "").includes(targetPlaceholder));
+      if (!input) return false;
+
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set;
+      input.focus();
+      input.click();
+      input.removeAttribute("readonly");
+      input.removeAttribute("disabled");
+      if (setter) {
+        setter.call(input, nextValue);
+      } else {
+        input.value = nextValue;
+      }
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextValue, inputType: "insertText" }));
+      input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter" }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("blur", { bubbles: true }));
+      return input.value.length > 0;
+    },
+    { targetPlaceholder: placeholder, nextValue: value },
+  );
+}
+
+async function enableMinuteOption(page, label, value) {
+  const inputIndex = label === "提前登录" ? 0 : 1;
+  await toggleMinuteCheckboxByLabel(page, label);
+
+  const input = page.locator("input[type='number']").nth(inputIndex);
+  await input.waitFor({ state: "visible", timeout: 20_000 });
+  await input.click();
+  await input.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+  await input.fill("");
+  await input.type(String(value), { delay: 0 });
+  await expectExactInputValue(input, String(value), 3000);
+}
+
+async function toggleMinuteCheckboxByLabel(page, label) {
+  await evaluate(
+    page,
+    ({ targetLabel }) => {
+      const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const labelEl = [...document.querySelectorAll("span, div, label, p")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(`${targetLabel}：`))
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          if (ar.top !== br.top) return ar.top - br.top;
+          return ar.left - br.left;
+        })[0];
+      if (!labelEl) {
+        throw new Error(`未找到${targetLabel}标签`);
+      }
+      const lr = labelEl.getBoundingClientRect();
+      const checkbox = [...document.querySelectorAll("input[type='checkbox']")]
+        .filter((input) => {
+          const rect = input.getBoundingClientRect();
+          return Math.abs(rect.top - lr.top) < 35 && rect.left < lr.left;
+        })
+        .sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left)[0];
+      if (!checkbox) {
+        throw new Error(`未找到${targetLabel}复选框`);
+      }
+      if (!checkbox.checked) {
+        const clickable = checkbox.closest("label") || checkbox.parentElement || checkbox;
+        clickable.click();
+        checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    },
+    { targetLabel: label },
+  );
+}
+
+async function fillTextboxLike(page, value, index = 0) {
+  const locator = page.locator("textarea, [contenteditable='true']").nth(index);
+  await locator.click();
+  await locator.fill(value);
+}
+
+async function setStepValue(page, index, value) {
+  const stepper = page.getByRole("spinbutton").nth(index);
+  await stepper.click();
+  await stepper.fill(String(value));
+}
+
+async function evaluate(page, fn, arg) {
+  return page.evaluate(fn, arg);
+}
+
+async function setCheckboxRowState(page, label, checkboxIndex, desired) {
+  await evaluate(
+    page,
+    ({ label: targetLabel, checkboxIndex: targetIndex, desiredState }) => {
+      const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+
+      const candidates = [...document.querySelectorAll("div, li, tr, section")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(targetLabel))
+        .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length);
+
+      const row = candidates.find((el) => el.querySelectorAll("input[type='checkbox']").length > targetIndex);
+      if (!row) {
+        throw new Error(`未找到字段行：${targetLabel}`);
+      }
+
+      const checkbox = row.querySelectorAll("input[type='checkbox']")[targetIndex];
+      if (!checkbox) {
+        throw new Error(`未找到复选框：${targetLabel} #${targetIndex}`);
+      }
+
+      if (checkbox.checked !== desiredState) {
+        checkbox.click();
+        checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    },
+    { label, checkboxIndex, desiredState: desired },
+  );
+}
+
+async function setMasterCheckboxByLabel(page, label, desired) {
+  await evaluate(
+    page,
+    ({ label: targetLabel, desiredState }) => {
+      const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+
+      const candidates = [...document.querySelectorAll("div, li, section")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(targetLabel))
+        .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length);
+
+      const row = candidates.find((el) => el.querySelector("input[type='checkbox']"));
+      if (!row) {
+        throw new Error(`未找到配置行：${targetLabel}`);
+      }
+
+      const checkbox = row.querySelector("input[type='checkbox']");
+      if (!checkbox) {
+        throw new Error(`未找到配置行复选框：${targetLabel}`);
+      }
+
+      if (checkbox.checked !== desiredState) {
+        checkbox.click();
+        checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    },
+    { label, desiredState: desired },
+  );
+}
+
+async function clickTextInRow(page, rowLabel, actionText) {
+  await evaluate(
+    page,
+    ({ rowLabel: targetRowLabel, actionText: targetActionText }) => {
+      const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+
+      const candidates = [...document.querySelectorAll("div, li, section")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(targetRowLabel))
+        .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length);
+      const row = candidates[0];
+      if (!row) {
+        throw new Error(`未找到配置行：${targetRowLabel}`);
+      }
+
+      const clickable = [...row.querySelectorAll("label, span, div, button")]
+        .find((el) => visible(el) && norm(el.textContent).includes(targetActionText));
+      if (!clickable) {
+        throw new Error(`未找到行内动作：${targetRowLabel} / ${targetActionText}`);
+      }
+      clickable.click();
+    },
+    { rowLabel, actionText },
+  );
+}
+
+async function toggleSwitchByText(page, label, desired) {
+  await evaluate(
+    page,
+    ({ label: targetLabel, desiredState }) => {
+      const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+
+      const container = [...document.querySelectorAll("div, li, section")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(targetLabel))
+        .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length)[0];
+      if (!container) {
+        throw new Error(`未找到开关：${targetLabel}`);
+      }
+
+      const switchEl =
+        container.querySelector("[role='switch']") ||
+        container.querySelector(".ant-switch") ||
+        container.querySelector("button[aria-checked]");
+      if (!switchEl) {
+        throw new Error(`未找到开关控件：${targetLabel}`);
+      }
+
+      const current =
+        switchEl.getAttribute("aria-checked") === "true" ||
+        switchEl.classList.contains("ant-switch-checked") ||
+        switchEl.classList.contains("is-checked");
+      if (current !== desiredState) {
+        switchEl.click();
+      }
+    },
+    { label, desiredState: desired },
+  );
+}
+
+async function fillTextareaInRow(page, rowLabel, value) {
+  await evaluate(
+    page,
+    ({ targetLabel, nextValue }) => {
+      const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+
+      const row = [...document.querySelectorAll("div, li, section")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(targetLabel))
+        .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length)
+        .find((el) => el.querySelector("textarea"));
+      const textarea = row?.querySelector("textarea");
+      if (!textarea) {
+        throw new Error(`未找到文本区域：${targetLabel}`);
+      }
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(textarea), "value")?.set;
+      textarea.focus();
+      if (setter) {
+        setter.call(textarea, nextValue);
+      } else {
+        textarea.value = nextValue;
+      }
+      textarea.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextValue, inputType: "insertText" }));
+      textarea.dispatchEvent(new Event("change", { bubbles: true }));
+      textarea.dispatchEvent(new Event("blur", { bubbles: true }));
+    },
+    { targetLabel: rowLabel, nextValue: value },
+  );
+}
+
+async function fillWelcomeText(page, value) {
+  await evaluate(
+    page,
+    ({ nextValue }) => {
+      const editor = [...document.querySelectorAll(".item-stem")]
+        .filter((el) => {
+          if (!(el instanceof HTMLElement)) return false;
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+        })[0];
+      if (!editor) {
+        throw new Error("未找到欢迎语富文本控件 .item-stem");
+      }
+      editor.focus();
+      editor.textContent = nextValue;
+      editor.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextValue, inputType: "insertText" }));
+      editor.dispatchEvent(new Event("change", { bubbles: true }));
+      editor.dispatchEvent(new Event("blur", { bubbles: true }));
+    },
+    { nextValue: value },
+  );
+}
+
+async function waitForStep(page, stepText) {
+  await page.getByText(stepText, { exact: false }).first().waitFor({ state: "visible", timeout: 20_000 });
+}
+
+async function runBasicInfo(page, config, emit) {
+  emit(event("stage", { stage: "基础信息", percent: 24, stepIndex: 1, caption: "正在填写考试名称、考试时间、提前登录和迟到限制" }));
+  if (!(await waitForBasicInfoReady(page, 20_000))) {
+    throw new Error("尚未进入新建考试基本信息页，已停止，避免把考试信息填到错误页面。");
+  }
+  emit(event("log", { level: "success", message: "已进入基本信息页，开始填写基础信息。" }));
+
+  const timezoneText = await readBasicInfoTimezone(page);
+  emit(event("log", { level: "success", message: `页面时区：${timezoneText || "未识别"}` }));
+
+  await fillExamNameField(page, config.examName);
+  emit(event("log", { level: "success", message: `已填写考试名称：${config.examName}` }));
+  const examNameReadback = await readBasicInfoField(page, "考试名称");
+  emit(event("log", { level: examNameReadback === config.examName ? "success" : "warn", message: `考试名称回读：${examNameReadback || "空"}` }));
+  if (examNameReadback !== config.examName) {
+    throw new Error(`考试名称回读不一致，期望“${config.examName}”，实际“${examNameReadback || "空"}”`);
+  }
+
+  await setDateTimeField(page, "开始时间", config.startTimeDisplay, timezoneText, emit);
+  emit(event("log", { level: "success", message: `已选择开始时间：${config.startTimeDisplay}` }));
+  const startReadback = await readBasicInfoField(page, "开始时间");
+  emit(event("log", { level: startReadback ? "success" : "warn", message: `开始时间回读：${startReadback || "空"}` }));
+  await setDateTimeField(page, "结束时间", config.endTimeDisplay, timezoneText, emit);
+  emit(event("log", { level: "success", message: `已选择结束时间：${config.endTimeDisplay}` }));
+  const endReadback = await readBasicInfoField(page, "结束时间");
+  emit(event("log", { level: endReadback ? "success" : "warn", message: `结束时间回读：${endReadback || "空"}` }));
+
+  if (config.earlyLoginMinutes) {
+    await enableMinuteOption(page, "提前登录", config.earlyLoginMinutes);
+    emit(event("log", { level: "success", message: `已填写提前登录：${config.earlyLoginMinutes} 分钟` }));
+  }
+  if (config.lateLimitMinutes) {
+    await enableMinuteOption(page, "限制迟到", config.lateLimitMinutes);
+    emit(event("log", { level: "success", message: `已填写限制迟到：${config.lateLimitMinutes} 分钟` }));
+  }
+
+  await selectRadioInGroup(page, "试卷扣时规则", config.timeRule || "迟到及离开扣时");
+  await selectRadioInGroup(page, "场次类型", "考试");
+  await selectRadioInGroup(page, "考试地址", "独立考试地址");
+  await selectRadioInGroup(page, "交卷后跳转", "不跳转");
+
+  if (config.welcomeText) {
+    await fillWelcomeText(page, config.welcomeText);
+    emit(event("log", { level: "success", message: "已填写欢迎语。" }));
+  }
+
+  const finalExamNameReadback = await readBasicInfoField(page, "考试名称");
+  if (finalExamNameReadback !== config.examName) {
+    throw new Error(`基础信息结束前考试名称被改写，期望“${config.examName}”，实际“${finalExamNameReadback || "空"}”`);
+  }
+
+  await expectBasicInfoReadyToSubmit(page, config, emit);
+  await clickButton(page, "下一步");
+  await waitForStep(page, "批量添加科目");
+  emit(event("log", { level: "success", message: "基础信息填写完成，已进入选择试卷页。" }));
+}
+
+async function runSubjects(page, config, emit) {
+  emit(event("stage", { stage: "选择试卷", percent: 46, stepIndex: 2, caption: "正在下载易考科目模板、填充并批量导入" }));
+
+  if (config.subjects.length && config.subjectImportPath) {
+    emit(event("log", { level: "success", message: `准备批量导入科目：${config.subjects.join("、")}` }));
+    try {
+      await fastImportSubjects(page, config);
+      emit(event("log", { level: "success", message: "已下载后台科目模板，填充后完成上传。" }));
+    } catch (error) {
+      emit(event("log", { level: "warn", message: `科目批量导入未成功：${error.message}` }));
+    }
+  } else {
+    emit(event("log", { level: "warn", message: "需求单未读取到科目，已跳过科目导入。" }));
+  }
+
+  await clickButton(page, "下一步");
+  const confirmMissingPaper = page.getByText("当前未选择试卷或模板，是否继续操作？", { exact: false });
+  if ((await confirmMissingPaper.count()) > 0) {
+    await clickButton(page, "确 定");
+  }
+
+  await waitForStep(page, "已选信息");
+  emit(event("log", { level: "success", message: "已进入个人信息页。" }));
+}
+
+async function fastImportSubjects(page, config) {
+  await clickButton(page, "批量添加科目");
+  const filePath = await prepareSubjectImportFile(page, config);
+
+  const fileInput = page.locator("input[type='file']").last();
+  try {
+    await fileInput.waitFor({ state: "attached", timeout: 1500 });
+    await fileInput.setInputFiles(filePath);
+  } catch {
+    const chooserPromise = page.waitForEvent("filechooser", { timeout: 3000 });
+    const uploadButton = page.getByText("拖拽或点击上传文件", { exact: false }).last();
+    await uploadButton.click();
+    const chooser = await chooserPromise;
+    await chooser.setFiles(filePath);
+  }
+
+  await clickButton(page, "确 定");
+
+  const errorText = page.getByText("未知异常", { exact: false });
+  const successText = page.getByText(/导入成功|上传成功|添加成功/);
+  await Promise.race([
+    errorText.waitFor({ state: "visible", timeout: 2500 }).then(() => "error").catch(() => null),
+    successText.waitFor({ state: "visible", timeout: 2500 }).then(() => "success").catch(() => null),
+    page.waitForTimeout(1200).then(() => "timeout"),
+  ]).then(async (result) => {
+    if (result === "error") {
+      const known = page.getByRole("button", { name: "我知道了" }).last();
+      if ((await known.count()) > 0 && (await known.isVisible().catch(() => false))) {
+        await known.click();
+      }
+      throw new Error("后台返回未知异常，请检查科目导入模板格式。");
+    }
+  });
+}
+
+async function prepareSubjectImportFile(page, config) {
+  const workDir = path.dirname(config.subjectImportPath);
+  await fs.mkdir(workDir, { recursive: true });
+
+  try {
+    const templatePath = path.join(workDir, "易考科目导入模板.xlsx");
+    const outputPath = path.join(workDir, "易考科目导入_已填.xlsx");
+    const templateLink = page.getByText("科目导入模板", { exact: false }).last();
+    await templateLink.waitFor({ state: "visible", timeout: 5000 });
+    const downloadPromise = page.waitForEvent("download", { timeout: 5000 });
+    await templateLink.click();
+    const download = await downloadPromise;
+    await download.saveAs(templatePath);
+    await fillSubjectTemplate(templatePath, outputPath, config.subjects);
+    return outputPath;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`未能下载并填充后台科目导入模板：${message}`);
+  }
+}
+
+async function fillSubjectTemplate(templatePath, outputPath, subjects) {
+  const child = spawn(pythonBin, [subjectTemplateScript, templatePath, outputPath, JSON.stringify(subjects)], {
+    cwd: path.dirname(subjectTemplateScript),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString("utf8");
+  });
+
+  const exitCode = await new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", resolve);
+  });
+
+  if (exitCode !== 0) {
+    throw new Error(stderr.trim() || "科目导入模板填充失败");
+  }
+}
+
+async function runPersonalInfo(page, config, emit) {
+  emit(event("stage", { stage: "个人信息", percent: 66, stepIndex: 3, caption: "正在保留姓名、身份证号并取消全部编辑/必填" }));
+
+  const visibleSet = new Set(config.visibleFields || ["姓名", "身份证号"]);
+  const rows = ["姓名", "邮箱", "手机号码", "性别", "身份证号"];
+
+  for (const row of rows) {
+    await setCheckboxRowState(page, row, 0, false);
+    await setCheckboxRowState(page, row, 1, visibleSet.has(row));
+    await setCheckboxRowState(page, row, 2, false);
+  }
+
+  await clickButton(page, "下一步");
+  await waitForStep(page, "考试承诺书");
+  emit(event("log", { level: "success", message: "个人信息已调整为仅显示姓名和身份证号，且不允许编辑、不设必填。" }));
+}
+
+async function runExamConfig(page, config, emit) {
+  emit(event("stage", { stage: "考试配置", percent: 88, stepIndex: 4, caption: "正在配置承诺书、视频监控、鹰眼、客户端和防复制项" }));
+
+  await setMasterCheckboxByLabel(page, "考试承诺书", true);
+  await fillTextareaInRow(page, "考试承诺书", config.pledgeContent || "测试考试");
+
+  if (config.videoMonitor) {
+    await setMasterCheckboxByLabel(page, "视频监控", true);
+  }
+  if (config.videoRecord) {
+    await toggleSwitchByText(page, "视频录制", true);
+  }
+  if (config.hawkeye) {
+    await setMasterCheckboxByLabel(page, "鹰眼监控", true);
+  }
+  if (config.clientExam) {
+    await setMasterCheckboxByLabel(page, "锁定考试", true);
+    await setStepValue(page, 0, config.clientLoginLimit || 5);
+    await clickTextInRow(page, "锁定考试", "客户端考试");
+    await pause(250);
+    await evaluate(page, () => {
+      const checkbox = [...document.querySelectorAll("input[type='checkbox']")].find((input) => {
+        const rowText = input.closest("div, li, section")?.textContent || "";
+        return rowText.includes("电脑端（Windows版/Mac版）");
+      });
+      if (checkbox && !checkbox.checked) {
+        checkbox.click();
+        checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    await clickTextInRow(page, "锁定考试", "独占网络");
+  }
+  if (config.watermark) {
+    await setMasterCheckboxByLabel(page, "答题水印", true);
+  }
+  if (config.disableCopy) {
+    await setMasterCheckboxByLabel(page, "禁止复制", true);
+  }
+
+  await clickButton(page, "下一步");
+  emit(event("log", { level: "success", message: "考试配置已按需求单写入，准备进入确认页。" }));
+}
+
+export async function runEasyExamJob({ job, runtimeDir, emit }) {
+  const profileDir = path.join(runtimeDir, "chrome-profiles", job.id);
+  const shotsDir = path.join(runtimeDir, "shots", job.id);
+  await ensureDir(profileDir);
+  await ensureDir(shotsDir);
+
+  let context;
+  let page;
+  let keepBrowserOpen = true;
+  try {
+    emit(event("stage", { stage: "读取需求单", percent: 8, stepIndex: 0, caption: "正在启动本地自动化引擎并载入需求单" }));
+    emit(event("status", { status: "running", message: "正在启动 Chrome" }));
+    emit(event("log", { level: "success", message: "正在启动本地 Chrome 自动化会话。" }));
+    emit(event("log", { level: "success", message: `本次任务考试名称：${job.config.examName || "空"}` }));
+    emit(event("log", { level: "success", message: `本次任务考试时间：${job.config.startTimeDisplay || "空"} - ${job.config.endTimeDisplay || "空"}` }));
+
+    context = await chromium.launchPersistentContext(profileDir, {
+      channel: "chrome",
+      headless: false,
+      viewport: { width: 1440, height: 1100 },
+      locale: "zh-CN",
+      timezoneId: "Asia/Shanghai",
+      args: ["--window-size=1440,1100"],
+    });
+
+    page = context.pages()[0] ?? (await context.newPage());
+    emit(event("status", { status: "running", message: "正在连接易考后台" }));
+    await page.goto(EZTEST_ADD_URL, { waitUntil: "domcontentloaded" });
+    await waitForLogin(page, emit, job.login);
+
+    await runBasicInfo(page, job.config, emit);
+    await runSubjects(page, job.config, emit);
+    await runPersonalInfo(page, job.config, emit);
+    await runExamConfig(page, job.config, emit);
+
+    emit(event("stage", { stage: "确认核对", percent: 100, stepIndex: 4, caption: "已到确认页，等待人工核对后决定是否创建" }));
+    emit(event("status", { status: "waiting_confirmation", message: "已停在确认页，请核对后再决定是否创建。" }));
+
+    const captures = [];
+    captures.push(await takeShot(page, shotsDir, job.id, "basic-info", "基本信息完整页"));
+    captures.push(await takeShot(page, shotsDir, job.id, "exam-config-before", "考试配置-开考前"));
+    captures.push(await takeShot(page, shotsDir, job.id, "exam-config-during", "考试配置-考试中"));
+    captures.push(await takeShot(page, shotsDir, job.id, "exam-config-after", "考试配置-考试后"));
+    emit(event("captures", { captures }));
+    emit(event("log", { level: "success", message: "已生成确认截图，可在网页中点开查看。" }));
+    emit(event("done", { result: "stopped_at_confirmation" }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (page) {
+      try {
+        const failureShot = await takeShot(page, shotsDir, job.id, "failure-current-page", "失败现场");
+        emit(event("captures", { captures: [failureShot] }));
+        emit(event("log", { level: "warn", message: "已截取失败现场，可在网页中点开查看。" }));
+      } catch {}
+    }
+    if (message.includes("launchPersistentContext") && message.includes("Target page, context or browser has been closed")) {
+      throw new Error("自动化浏览器启动失败。原因通常是上一次 Chrome 自动化会话没有正常退出；现在脚本已改为独立会话，请重新点击开始配置。");
+    }
+    throw error;
+  } finally {
+    if (context && !keepBrowserOpen) {
+      await context.close();
+    }
+  }
+}
