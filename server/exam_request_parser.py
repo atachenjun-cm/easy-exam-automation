@@ -165,28 +165,37 @@ def parse_workbook(path_str):
         if item:
             field_map[item] = value
 
-    start_dt, end_dt = parse_time_range(field_map.get("考试日期时间"))
-    subjects = parse_subjects_text(field_map.get("科目信息"))
+    def get_field(*names):
+        for name in names:
+            if name in field_map and field_map[name]:
+                return field_map[name]
+        for key, value in field_map.items():
+            if value and any(name in key for name in names):
+                return value
+        return ""
+
+    start_dt, end_dt = parse_time_range(get_field("考试日期时间", "考试时间", "考试起止时间"))
+    subjects = parse_subjects_text(get_field("科目信息", "科目"))
     if not subjects and subjects_sheet:
         subjects = read_subjects(subjects_sheet)
     subject_import_dir = path.parent / "exam_request"
     subject_import_path = build_subject_workbook(subjects, subject_import_dir) if subjects else ""
 
     config = {
-        "examName": field_map.get("考试名称", ""),
+        "examName": get_field("考试名称", "考试名"),
         "startTimeDisplay": format_datetime(start_dt),
         "endTimeDisplay": format_datetime(end_dt),
         "startTimeIso": start_dt.isoformat() if start_dt else "",
         "endTimeIso": end_dt.isoformat() if end_dt else "",
-        "earlyLoginMinutes": parse_minutes(field_map.get("提前登录时间")),
-        "lateLimitMinutes": parse_minutes(field_map.get("限制迟到时间")),
-        "timeRule": field_map.get("试卷扣时规则", "不扣时"),
-        "welcomeText": field_map.get("欢迎语", ""),
-        "pledgeContent": field_map.get("考试承诺书内容", ""),
-        "videoMonitor": parse_bool(field_map.get("视频监控")),
-        "videoRecord": parse_bool(field_map.get("视频录制")),
-        "hawkeye": parse_bool(field_map.get("鹰眼监控")),
-        "clientExam": field_map.get("考试类型", "") == "客户端考试",
+        "earlyLoginMinutes": parse_minutes(get_field("提前登录时间", "提前登录分钟", "提前登录")),
+        "lateLimitMinutes": parse_minutes(get_field("限制迟到时间", "限制迟到分钟", "限制迟到")),
+        "timeRule": get_field("试卷扣时规则") or "不扣时",
+        "welcomeText": get_field("欢迎语"),
+        "pledgeContent": get_field("考试承诺书内容", "承诺书内容"),
+        "videoMonitor": parse_bool(get_field("视频监控")),
+        "videoRecord": parse_bool(get_field("视频录制")),
+        "hawkeye": parse_bool(get_field("鹰眼监控")),
+        "clientExam": get_field("考试类型") == "客户端考试",
         "clientLoginLimit": 5,
         "watermark": parse_bool(field_map.get("答题水印")),
         "disableCopy": parse_bool(field_map.get("禁止复制")),

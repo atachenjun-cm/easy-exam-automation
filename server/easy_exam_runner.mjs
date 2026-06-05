@@ -458,21 +458,42 @@ async function setDateTimeField(page, placeholder, value, timezoneText = "", emi
   await locator.waitFor({ state: "visible", timeout: 20_000 });
   const requirementParts = parseDateTimeValue(value);
   if (requirementParts) {
+    emit?.(event("log", { level: "success", message: `${placeholder}按顺序输入并确认：${formatPartsForLog(requirementParts)}` }));
+    if (await typeDateTimeAndConfirm(page, locator, requirementParts)) {
+      const typedActual = await locator.inputValue().catch(() => "");
+      emit?.(event("log", { level: parseDateTimeValue(typedActual) ? "success" : "warn", message: `${placeholder}输入确认后回显：${typedActual || "空"}` }));
+      if (await isExactDateTimeValue(locator, requirementParts)) return;
+      if (parseDateTimeValue(typedActual)) {
+        emit?.(event("log", { level: "warn", message: `${placeholder}回显与需求单不一致，先继续填写提前登录/迟到，提交前会再次校验。` }));
+        return;
+      }
+      emit?.(event("log", { level: "warn", message: `${placeholder}输入确认后仍为空，先继续填写提前登录/迟到。` }));
+      return;
+    }
+
+    let pickerParts = requirementParts;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       await clearDateTimeInput(page, placeholder);
       await pause(120);
       await locator.click();
       await pause(150);
       try {
-        emit?.(event("log", { level: "success", message: `${placeholder}第 ${attempt + 1} 次点击选择：${formatPartsForLog(requirementParts)}` }));
-        const selected = await selectDateTimeFromPicker(page, requirementParts, emit);
+        emit?.(event("log", { level: "success", message: `${placeholder}第 ${attempt + 1} 次点击选择：${formatPartsForLog(pickerParts)}；目标回显：${formatPartsForLog(requirementParts)}` }));
+        const selected = await selectDateTimeFromPicker(page, pickerParts, emit);
         if (selected) {
           await pause(300);
           const actual = await locator.inputValue().catch(() => "");
           emit?.(event("log", { level: parseDateTimeValue(actual) ? "success" : "warn", message: `${placeholder}页面回显：${actual || "空"}` }));
           const exact = await isExactDateTimeValue(locator, requirementParts);
           if (!exact) {
-            emit?.(event("log", { level: "warn", message: `${placeholder}回显与需求单不一致，强制写回需求单时间：${formatPartsForLog(requirementParts)}` }));
+            const actualParts = parseDateTimeValue(actual);
+            const offsetMinutes = actualParts ? diffDateTimeMinutes(actualParts, requirementParts) : null;
+            if (actualParts && offsetMinutes !== 0 && attempt < 2) {
+              pickerParts = addMinutesToParts(requirementParts, -offsetMinutes);
+              emit?.(event("log", { level: "warn", message: `${placeholder}回显偏移 ${offsetMinutes} 分钟，改用控件重选：${formatPartsForLog(pickerParts)}` }));
+              continue;
+            }
+            emit?.(event("log", { level: "warn", message: `${placeholder}控件重选仍不一致，最后写回需求单时间：${formatPartsForLog(requirementParts)}` }));
             await forceSetDateTimeInput(page, placeholder, formatPartsForLog(requirementParts));
           }
           await expectExactDateTimeValue(locator, requirementParts, 2500);
@@ -509,6 +530,198 @@ async function setDateTimeField(page, placeholder, value, timezoneText = "", emi
   } else {
     await expectInputContains(locator, value, 5000);
   }
+}
+
+async function setDateTimeRangeByZipLogic(page, startValue, endValue, emit = null) {
+  const startParts = parseDateTimeValue(startValue);
+  const endParts = parseDateTimeValue(endValue);
+  if (!startParts || !endParts) return false;
+
+  const startIso = formatPartsForIsoSeconds(startParts);
+  const endIso = formatPartsForIsoSeconds(endParts);
+  emit?.(event("log", { level: "success", message: `使用 zip 逻辑同时设置考试时间：${startIso} - ${endIso}` }));
+
+  const ok = await evaluate(
+    page,
+    ({ startText, endText }) => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const inputs = [...document.querySelectorAll("input")]
+        .filter((el) => visible(el) && /开始时间|结束时间/.test(el.getAttribute("placeholder") || ""))
+        .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+      const startInput = inputs.find((el) => (el.getAttribute("placeholder") || "").includes("开始时间")) || inputs[0];
+      const endInput = inputs.find((el) => (el.getAttribute("placeholder") || "").includes("结束时间")) || inputs[1];
+      if (!startInput || !endInput) return false;
+
+      const setNativeValue = (input, value) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        const previous = input.value;
+        input.removeAttribute("readonly");
+        input.removeAttribute("disabled");
+        input.focus();
+        if (setter) setter.call(input, value);
+        else input.value = value;
+        if (input._valueTracker) input._valueTracker.setValue(previous);
+        input.dispatchEvent(new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" }));
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", code: "Enter" }));
+        input.dispatchEvent(new Event("blur", { bubbles: true }));
+      };
+
+      setNativeValue(startInput, startText);
+      setNativeValue(endInput, endText);
+      document.body.click();
+      return true;
+    },
+    { startText: startIso, endText: endIso },
+  );
+  await page.keyboard.press("Escape").catch(() => {});
+  await pause(400);
+  return ok;
+}
+
+async function confirmDateTimeInput(page) {
+  const clicked = await evaluate(page, () => {
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const okButton = [...document.querySelectorAll(".ant-calendar-ok-btn, .ant-picker-ok button, button")]
+      .filter(visible)
+      .find((el) => /确\s*定/.test(el.textContent || ""));
+    if (okButton) {
+      okButton.removeAttribute("disabled");
+      okButton.classList.remove("ant-calendar-ok-btn-disabled");
+      okButton.click();
+      return true;
+    }
+    return false;
+  });
+  if (!clicked) {
+    await page.keyboard.press("Enter").catch(() => {});
+  }
+  await pause(180);
+  await page.keyboard.press("Escape").catch(() => {});
+}
+
+async function typeDateTimeAndConfirm(page, locator, parts) {
+  const value = formatPartsForLog(parts);
+  await locator.click();
+  await pause(150);
+  await locator.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+  await locator.fill("");
+  await locator.type(value, { delay: 0 });
+  await pause(180);
+  await page.keyboard.press("Enter").catch(() => {});
+  await pause(220);
+  await confirmDateTimeInput(page);
+  await pause(250);
+  return true;
+}
+
+async function closeDateTimePanel(page) {
+  await page.keyboard.press("Escape").catch(() => {});
+  await pause(120);
+  await evaluate(page, () => {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    const panels = [
+      ...document.querySelectorAll(".ant-calendar-picker-container, .ant-picker-dropdown"),
+    ];
+    for (const panel of panels) {
+      if (panel instanceof HTMLElement) {
+        panel.style.display = "none";
+        panel.classList.add("ant-picker-dropdown-hidden", "ant-calendar-picker-container-hidden");
+      }
+    }
+    document.body.click();
+  }).catch(() => {});
+  await pause(150);
+}
+
+async function setDateTimeByZipLogic(page, placeholder, parts) {
+  const value = formatPartsForIsoSeconds(parts);
+  return evaluate(
+    page,
+    ({ targetPlaceholder, nextValue }) => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+
+      const placeholderInput = [...document.querySelectorAll("input")]
+        .find((el) => visible(el) && (el.getAttribute("placeholder") || "").includes(targetPlaceholder));
+      const pickerInput =
+        placeholderInput ||
+        [...document.querySelectorAll(".ant-picker input, .ant-calendar-picker input")]
+          .filter(visible)[targetPlaceholder.includes("开始") ? 0 : 1];
+      if (!pickerInput) {
+        return false;
+      }
+
+      const picker = pickerInput.closest(".ant-picker, .ant-calendar-picker") || pickerInput;
+      picker.click();
+      pickerInput.focus();
+
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      const previousValue = pickerInput.value;
+      pickerInput.removeAttribute("readonly");
+      pickerInput.removeAttribute("disabled");
+      if (setter) {
+        setter.call(pickerInput, nextValue);
+      } else {
+        pickerInput.value = nextValue;
+      }
+      if (pickerInput._valueTracker) {
+        pickerInput._valueTracker.setValue(previousValue);
+      }
+      pickerInput.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextValue, inputType: "insertText" }));
+      pickerInput.dispatchEvent(new Event("input", { bubbles: true }));
+      pickerInput.dispatchEvent(new Event("change", { bubbles: true }));
+      pickerInput.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", code: "Enter" }));
+      pickerInput.dispatchEvent(new Event("blur", { bubbles: true }));
+      return true;
+    },
+    { targetPlaceholder: placeholder, nextValue: value },
+  );
+}
+
+function formatPartsForIsoSeconds(parts) {
+  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")} ${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}:00`;
+}
+
+function dateFromParts(parts) {
+  return new Date(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, 0, 0);
+}
+
+function partsFromDate(date) {
+  return {
+    year: date.getFullYear(),
+    month: date.getMonth() + 1,
+    day: date.getDate(),
+    hour: date.getHours(),
+    minute: date.getMinutes(),
+  };
+}
+
+function diffDateTimeMinutes(actualParts, expectedParts) {
+  return Math.round((dateFromParts(actualParts).getTime() - dateFromParts(expectedParts).getTime()) / 60000);
+}
+
+function addMinutesToParts(parts, minutes) {
+  const date = dateFromParts(parts);
+  date.setMinutes(date.getMinutes() + minutes);
+  return partsFromDate(date);
 }
 
 async function isExactDateTimeValue(locator, parsed) {
@@ -1043,11 +1256,11 @@ async function expectBasicInfoReadyToSubmit(page, config, emit) {
   checks.push(["结束时间", config.endTimeDisplay, normalizeDateTimeDisplay(endTime)]);
 
   if (config.earlyLoginMinutes != null) {
-    const earlyLogin = await readMinuteNumberValue(page, 0);
+    const earlyLogin = await readMinuteValueByLabel(page, "提前登录");
     checks.push(["提前登录", String(config.earlyLoginMinutes), earlyLogin]);
   }
   if (config.lateLimitMinutes != null) {
-    const lateLimit = await readMinuteNumberValue(page, 1);
+    const lateLimit = await readMinuteValueByLabel(page, "限制迟到");
     checks.push(["限制迟到", String(config.lateLimitMinutes), lateLimit]);
   }
 
@@ -1104,17 +1317,357 @@ async function fastSetInputByPlaceholder(page, placeholder, value) {
   );
 }
 
-async function enableMinuteOption(page, label, value) {
-  const inputIndex = label === "提前登录" ? 0 : 1;
-  await toggleMinuteCheckboxByLabel(page, label);
+async function enableMinuteOption(page, label, value, emit = null) {
+  const result = await evaluate(
+    page,
+    ({ targetLabel }) => {
+      const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
 
-  const input = page.locator("input[type='number']").nth(inputIndex);
-  await input.waitFor({ state: "visible", timeout: 20_000 });
-  await input.click();
-  await input.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
-  await input.fill("");
-  await input.type(String(value), { delay: 0 });
-  await expectExactInputValue(input, String(value), 3000);
+      const findTextNode = () => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          if (norm(node.textContent).includes(targetLabel) && visible(node.parentElement)) return node;
+        }
+        return null;
+      };
+      const findContainer = (textNode) => {
+        let container = textNode?.parentElement || null;
+        for (let i = 0; container && i < 8; i += 1) {
+          const checkbox = container.querySelector("input[type='checkbox']");
+          const visibleInputs = [...container.querySelectorAll("input")]
+            .filter((input) => {
+              const type = (input.getAttribute("type") || "").toLowerCase();
+              return visible(input) && !["checkbox", "hidden", "password"].includes(type);
+            });
+          if (checkbox && visibleInputs.length > 0) {
+            return { container, checkbox, visibleInputs };
+          }
+          container = container.parentElement;
+        }
+        return null;
+      };
+
+      const textNode = findTextNode();
+      const found = findContainer(textNode);
+      if (!found) {
+        throw new Error(`未找到${targetLabel}复选框或分钟输入框`);
+      }
+
+      const wrapper = found.checkbox.closest(".ant-checkbox-wrapper") || found.checkbox.closest("label") || found.checkbox;
+      if (!found.checkbox.checked) {
+        wrapper.click();
+      }
+      return {
+        label: targetLabel,
+        checked: found.checkbox.checked,
+      };
+    },
+    { targetLabel: label },
+  );
+  await pause(250);
+
+  const spinIndex = label.includes("提前登录") ? 0 : label.includes("限制迟到") ? 1 : -1;
+  if (spinIndex < 0) {
+    throw new Error(`未知分钟字段：${label}`);
+  }
+  const spinbutton = page.getByRole("spinbutton").nth(spinIndex);
+  await spinbutton.waitFor({ state: "visible", timeout: 5000 });
+  await spinbutton.click();
+  await spinbutton.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+  await spinbutton.fill(String(value));
+  await pause(120);
+  const actual = (await spinbutton.inputValue().catch(() => "")).trim();
+
+  emit?.(event("log", { level: "success", message: `${label}写入结果：checked=${Boolean(result?.checked)}，value=${actual || "空"}，spinbutton=${spinIndex}` }));
+  if (!result?.checked || actual !== String(value)) {
+    throw new Error(`${label}配置失败，期望勾选且分钟为 ${value}，实际 checked=${Boolean(result?.checked)} value=${actual || "空"} spinbutton=${spinIndex}`);
+  }
+}
+
+async function getMinuteRowControls(page, label) {
+  return evaluate(
+    page,
+    ({ targetLabel }) => {
+      const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const center = (rect) => ({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+      const findLabelRect = () => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        const rects = [];
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          if (!norm(node.nodeValue).includes(targetLabel)) continue;
+          const parent = node.parentElement;
+          if (!visible(parent)) continue;
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          const rect = range.getBoundingClientRect();
+          range.detach();
+          if (rect.width > 0 && rect.height > 0) rects.push(rect);
+        }
+        const elementRects = [...document.querySelectorAll("span, label, div, p")]
+          .filter((el) => visible(el) && norm(el.textContent).includes(targetLabel))
+          .map((el) => el.getBoundingClientRect())
+          .filter((rect) => rect.width > 0 && rect.height > 0)
+          .sort((a, b) => a.width * a.height - b.width * b.height);
+        return [...rects, ...elementRects].sort((a, b) => (a.top === b.top ? a.left - b.left : a.top - b.top))[0] || null;
+      };
+      const labelRect = findLabelRect();
+      const optionIndex = targetLabel.includes("提前登录") ? 0 : targetLabel.includes("限制迟到") ? 1 : -1;
+      const checkboxSquares = [...document.querySelectorAll(".ant-checkbox-inner, input[type='checkbox']")]
+        .filter((el) => {
+          if (!visible(el)) return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width >= 10 && rect.height >= 10 && rect.width <= 40 && rect.height <= 40;
+        })
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          if (Math.abs(ar.top - br.top) > 2) return ar.top - br.top;
+          return ar.left - br.left;
+        });
+      const pageTop = [...document.querySelectorAll("input")]
+        .filter((el) => visible(el) && (el.placeholder || "").includes("开始时间"))
+        .map((el) => el.getBoundingClientRect().bottom)
+        .sort((a, b) => b - a)[0] || 0;
+      const basicOptionSquares = checkboxSquares.filter((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.top > pageTop && rect.left < 260;
+      });
+      const labelCenterY = labelRect
+        ? labelRect.top + labelRect.height / 2
+        : basicOptionSquares[optionIndex]?.getBoundingClientRect().top + basicOptionSquares[optionIndex]?.getBoundingClientRect().height / 2;
+      const visualFallback = () => {
+        const timeBottom = [...document.querySelectorAll("input")]
+          .filter((el) => visible(el) && ((el.placeholder || "").includes("开始时间") || (el.placeholder || "").includes("结束时间")))
+          .map((el) => el.getBoundingClientRect().bottom)
+          .sort((a, b) => b - a)[0] || 0;
+        const timeLeft = [...document.querySelectorAll("input")]
+          .filter((el) => visible(el) && ((el.placeholder || "").includes("开始时间") || (el.placeholder || "").includes("结束时间")))
+          .map((el) => el.getBoundingClientRect().left)
+          .sort((a, b) => a - b)[0] || 80;
+        const textareaTop = [...document.querySelectorAll("textarea")]
+          .filter((el) => visible(el))
+          .map((el) => el.getBoundingClientRect().top)
+          .sort((a, b) => a - b)[0] || Number.POSITIVE_INFINITY;
+        const minuteInputs = [...document.querySelectorAll("input")]
+          .filter((candidate) => {
+            if (!visible(candidate)) return false;
+            const rect = candidate.getBoundingClientRect();
+            const type = (candidate.getAttribute("type") || "").toLowerCase();
+            return (
+              !["checkbox", "hidden", "password"].includes(type) &&
+              rect.top > timeBottom + 10 &&
+              rect.top < textareaTop &&
+              rect.width > 50 &&
+              rect.width < 260 &&
+              rect.height > 20
+            );
+          })
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            if (Math.abs(ar.top - br.top) > 3) return ar.top - br.top;
+            return ar.left - br.left;
+          });
+        const input = minuteInputs[optionIndex];
+        const inputRect = input?.getBoundingClientRect?.();
+        if (!inputRect) {
+          const rowY = timeBottom + 86 + optionIndex * 86;
+          return {
+            checked: false,
+            checkbox: { x: timeLeft + 20, y: rowY },
+            input: { x: timeLeft + 360, y: rowY },
+            method: "visual-fixed",
+          };
+        }
+        const rowY = inputRect.top + inputRect.height / 2;
+        const checkboxX = Math.max(20, inputRect.left - 285);
+        const checked = [...document.querySelectorAll(".ant-checkbox-checked, input[type='checkbox']:checked")]
+          .some((el) => {
+            if (!visible(el)) return false;
+            const rect = el.getBoundingClientRect();
+            return Math.abs(rect.top + rect.height / 2 - rowY) < 30 && rect.left < inputRect.left;
+          });
+        return {
+          checked,
+          checkbox: { x: checkboxX, y: rowY },
+          input: center(inputRect),
+          method: "visual",
+        };
+      };
+      if (!labelCenterY) return visualFallback();
+      const rowMatch = (rect, tolerance = 28) => Math.abs(rect.top + rect.height / 2 - labelCenterY) < tolerance;
+
+      const checkboxCandidates = [...document.querySelectorAll(".ant-checkbox-inner, input[type='checkbox'], .ant-checkbox, .ant-checkbox-wrapper, label")]
+        .filter((el) => {
+          if (!visible(el)) return false;
+          const rect = el.getBoundingClientRect();
+          return rowMatch(rect) && rect.left < 260 && rect.width >= 10 && rect.height >= 10 && rect.width < 90 && rect.height < 90;
+        })
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return ar.left - br.left;
+        });
+      const checkboxEl = checkboxCandidates[0];
+      const checkboxInput = checkboxEl?.matches?.("input[type='checkbox']")
+        ? checkboxEl
+        : checkboxEl?.querySelector?.("input[type='checkbox']");
+      const checkboxRect = (checkboxInput && visible(checkboxInput) ? checkboxInput : checkboxEl)?.getBoundingClientRect?.();
+
+      const inputEl = [...document.querySelectorAll("input")]
+        .filter((candidate) => {
+          if (!visible(candidate)) return false;
+          const rect = candidate.getBoundingClientRect();
+          const type = (candidate.getAttribute("type") || "").toLowerCase();
+          return (
+            rowMatch(rect, 24) &&
+            !["checkbox", "hidden", "password"].includes(type) &&
+            rect.left > 250 &&
+            rect.width > 20
+          );
+        })
+        .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)[0];
+      const inputRect = inputEl?.getBoundingClientRect?.();
+
+      const checkedRoot = checkboxEl?.closest?.(".ant-checkbox-wrapper, .ant-checkbox");
+      const checked = Boolean(
+        checkboxInput?.checked ||
+          checkboxEl?.classList?.contains("ant-checkbox-checked") ||
+          checkboxEl?.querySelector?.(".ant-checkbox-checked") ||
+          checkedRoot?.classList?.contains("ant-checkbox-checked") ||
+          checkedRoot?.querySelector?.(".ant-checkbox-checked"),
+      );
+      const structuralResult = {
+        checked,
+        checkbox: checkboxRect ? center(checkboxRect) : null,
+        input: inputRect ? center(inputRect) : null,
+      };
+      if (!structuralResult.checkbox || !structuralResult.input) {
+        return visualFallback();
+      }
+      return structuralResult;
+    },
+    { targetLabel: label },
+  );
+}
+
+async function clickMinuteCheckbox(page, label) {
+  return evaluate(
+    page,
+    ({ targetLabel }) => {
+      const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const findLabelRect = () => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        const rects = [];
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          if (!norm(node.nodeValue).includes(`${targetLabel}：`)) continue;
+          const parent = node.parentElement;
+          if (!visible(parent)) continue;
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          const rect = range.getBoundingClientRect();
+          range.detach();
+          if (rect.width > 0 && rect.height > 0) rects.push(rect);
+        }
+        return rects.sort((a, b) => (a.top === b.top ? a.left - b.left : a.top - b.top))[0] || null;
+      };
+      const labelRect = findLabelRect();
+      if (!labelRect) return { clicked: false, reason: "label not found" };
+      const labelCenterY = labelRect.top + labelRect.height / 2;
+      const candidates = [...document.querySelectorAll("input[type='checkbox'], .ant-checkbox, .ant-checkbox-wrapper, span, label")]
+        .filter((el) => {
+          if (!visible(el)) return false;
+          const rect = el.getBoundingClientRect();
+          const centerY = rect.top + rect.height / 2;
+          return (
+            Math.abs(centerY - labelCenterY) < 28 &&
+            rect.left < labelRect.left &&
+            rect.width > 8 &&
+            rect.height > 8 &&
+            rect.width < 80 &&
+            rect.height < 80
+          );
+        })
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return Math.abs(ar.right - labelRect.left) - Math.abs(br.right - labelRect.left);
+        });
+      const target = candidates[0];
+      if (!target) return { clicked: false, reason: "checkbox not found" };
+      const checkbox = target.matches("input[type='checkbox']")
+        ? target
+        : target.querySelector?.("input[type='checkbox']");
+      if (checkbox instanceof HTMLInputElement && checkbox.checked) {
+        return { clicked: true, alreadyChecked: true };
+      }
+      target.click();
+      return { clicked: true };
+    },
+    { targetLabel: label },
+  );
+}
+
+async function getMinuteCheckboxClickPoint(page, label) {
+  return evaluate(
+    page,
+    ({ targetLabel }) => {
+      const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      const rects = [];
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (!norm(node.nodeValue).includes(`${targetLabel}：`)) continue;
+        const parent = node.parentElement;
+        if (!visible(parent)) continue;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const rect = range.getBoundingClientRect();
+        range.detach();
+        if (rect.width > 0 && rect.height > 0) rects.push(rect);
+      }
+      const rect = rects.sort((a, b) => (a.top === b.top ? a.left - b.left : a.top - b.top))[0];
+      if (!rect) return null;
+      return {
+        x: Math.max(10, rect.left - 58),
+        y: rect.top + rect.height / 2,
+      };
+    },
+    { targetLabel: label },
+  );
+}
+
+async function readMinuteValueByLabel(page, label) {
+  const spinIndex = label.includes("提前登录") ? 0 : label.includes("限制迟到") ? 1 : -1;
+  if (spinIndex < 0) return "";
+  return (await page.getByRole("spinbutton").nth(spinIndex).inputValue().catch(() => "")).trim();
 }
 
 async function toggleMinuteCheckboxByLabel(page, label) {
@@ -1207,6 +1760,50 @@ async function setCheckboxRowState(page, label, checkboxIndex, desired) {
       }
     },
     { label, checkboxIndex, desiredState: desired },
+  );
+}
+
+async function configurePersonalInfoVisibility(page, visibleFields) {
+  const rowNames = ["姓名", "邮箱", "手机号码", "性别", "身份证号"];
+  const desired = rowNames.flatMap((name) => [false, visibleFields.has(name), false]);
+  return evaluate(
+    page,
+    ({ names, desiredStates }) => {
+      const checkboxes = [...document.querySelectorAll("input[type='checkbox']")]
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          if (Math.abs(ar.top - br.top) > 2) return ar.top - br.top;
+          return ar.left - br.left;
+        })
+        .slice(0, desiredStates.length);
+      if (checkboxes.length < desiredStates.length) {
+        throw new Error(`个人信息页复选框数量不足，期望至少 ${desiredStates.length}，实际 ${checkboxes.length}`);
+      }
+      desiredStates.forEach((state, index) => {
+        const checkbox = checkboxes[index];
+        if (checkbox.checked !== state) {
+          const clickable = checkbox.closest(".ant-checkbox-wrapper") || checkbox.closest("label") || checkbox;
+          clickable.click();
+          if (checkbox.checked !== state && clickable !== checkbox) checkbox.click();
+          checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      });
+      return names.map((name, rowIndex) => {
+        const offset = rowIndex * 3;
+        return {
+          name,
+          ok:
+            checkboxes[offset]?.checked === desiredStates[offset] &&
+            checkboxes[offset + 1]?.checked === desiredStates[offset + 1] &&
+            checkboxes[offset + 2]?.checked === desiredStates[offset + 2],
+          allowEdit: checkboxes[offset]?.checked ?? null,
+          candidateVisible: checkboxes[offset + 1]?.checked ?? null,
+          required: checkboxes[offset + 2]?.checked ?? null,
+        };
+      });
+    },
+    { names: rowNames, desiredStates: desired },
   );
 }
 
@@ -1351,27 +1948,113 @@ async function fillTextareaInRow(page, rowLabel, value) {
 }
 
 async function fillWelcomeText(page, value) {
-  await evaluate(
+  return evaluate(
     page,
     ({ nextValue }) => {
-      const editor = [...document.querySelectorAll(".item-stem")]
+      const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const findTextRect = (keyword) => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        const rects = [];
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          if (!norm(node.textContent).includes(keyword) || !visible(node.parentElement)) continue;
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          const rect = range.getBoundingClientRect();
+          range.detach();
+          if (rect.width > 0 && rect.height > 0) rects.push(rect);
+        }
+        return rects.sort((a, b) => (a.top === b.top ? a.left - b.left : a.top - b.top))[0] || null;
+      };
+      const labelRect = findTextRect("欢迎语");
+      if (!labelRect) {
+        throw new Error("未找到欢迎语标签");
+      }
+      const editor = [...document.querySelectorAll(".item-stem, textarea")]
         .filter((el) => {
-          if (!(el instanceof HTMLElement)) return false;
-          const style = window.getComputedStyle(el);
+          if (!visible(el)) return false;
           const rect = el.getBoundingClientRect();
-          return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
-        })[0];
+          return rect.top > labelRect.bottom && rect.top - labelRect.bottom < 500 && Math.abs(rect.left - labelRect.left) < 260;
+        })
+        .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0];
       if (!editor) {
-        throw new Error("未找到欢迎语富文本控件 .item-stem");
+        throw new Error("未找到欢迎语标签下方输入控件");
       }
       editor.focus();
-      editor.textContent = nextValue;
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(editor), "value")?.set;
+      if (editor.matches("textarea")) {
+        if (setter) setter.call(editor, nextValue);
+        else editor.value = nextValue;
+      } else {
+        editor.textContent = nextValue;
+      }
       editor.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextValue, inputType: "insertText" }));
       editor.dispatchEvent(new Event("change", { bubbles: true }));
       editor.dispatchEvent(new Event("blur", { bubbles: true }));
+      return {
+        tag: editor.tagName,
+        className: editor.getAttribute("class") || "",
+        value: editor.matches("textarea") ? editor.value : editor.textContent,
+      };
     },
     { nextValue: value },
   );
+}
+
+async function collectBasicInfoSnapshot(page) {
+  return evaluate(page, () => {
+    const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const visibleTextareas = [...document.querySelectorAll("textarea")]
+      .filter(visible)
+      .map((el, index) => ({ index, value: el.value || "", top: Math.round(el.getBoundingClientRect().top) }));
+    const visibleInputs = [...document.querySelectorAll("input")]
+      .filter(visible)
+      .map((el, index) => ({
+        index,
+        type: el.getAttribute("type") || "",
+        placeholder: el.getAttribute("placeholder") || "",
+        value: el.value || "",
+        checked: el.type === "checkbox" ? el.checked : undefined,
+        top: Math.round(el.getBoundingClientRect().top),
+        left: Math.round(el.getBoundingClientRect().left),
+      }));
+    const findMinute = (label) => {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (!norm(node.textContent).includes(label) || !visible(node.parentElement)) continue;
+        let container = node.parentElement;
+        for (let i = 0; container && i < 8; i += 1) {
+          const checkbox = container.querySelector("input[type='checkbox']");
+          const inputs = [...container.querySelectorAll("input")]
+            .filter((input) => visible(input) && input.type !== "checkbox" && input.type !== "hidden" && input.type !== "password");
+          if (checkbox && inputs.length) {
+            return { checked: checkbox.checked, value: inputs[0].value || "" };
+          }
+          container = container.parentElement;
+        }
+      }
+      return { checked: null, value: "" };
+    };
+    return {
+      textareas: visibleTextareas,
+      inputs: visibleInputs,
+      earlyLogin: findMinute("提前登录"),
+      lateLimit: findMinute("限制迟到"),
+    };
+  });
 }
 
 async function waitForStep(page, stepText) {
@@ -1397,20 +2080,27 @@ async function runBasicInfo(page, config, emit) {
   }
 
   await setDateTimeField(page, "开始时间", config.startTimeDisplay, timezoneText, emit);
-  emit(event("log", { level: "success", message: `已选择开始时间：${config.startTimeDisplay}` }));
+  emit(event("log", { level: "success", message: `已确认开始时间：${config.startTimeDisplay}` }));
   const startReadback = await readBasicInfoField(page, "开始时间");
   emit(event("log", { level: startReadback ? "success" : "warn", message: `开始时间回读：${startReadback || "空"}` }));
+
   await setDateTimeField(page, "结束时间", config.endTimeDisplay, timezoneText, emit);
-  emit(event("log", { level: "success", message: `已选择结束时间：${config.endTimeDisplay}` }));
+  emit(event("log", { level: "success", message: `已确认结束时间：${config.endTimeDisplay}` }));
   const endReadback = await readBasicInfoField(page, "结束时间");
   emit(event("log", { level: endReadback ? "success" : "warn", message: `结束时间回读：${endReadback || "空"}` }));
+  await closeDateTimePanel(page);
+  emit(event("log", { level: "success", message: "考试时间步骤结束，开始处理提前登录和限制迟到。" }));
 
-  if (config.earlyLoginMinutes) {
-    await enableMinuteOption(page, "提前登录", config.earlyLoginMinutes);
+  emit(event("log", { level: "success", message: `本次读取提前登录/限制迟到：${config.earlyLoginMinutes ?? "空"} / ${config.lateLimitMinutes ?? "空"} 分钟` }));
+
+  if (config.earlyLoginMinutes != null) {
+    emit(event("log", { level: "success", message: `开始填写提前登录：${config.earlyLoginMinutes} 分钟` }));
+    await enableMinuteOption(page, "提前登录", config.earlyLoginMinutes, emit);
     emit(event("log", { level: "success", message: `已填写提前登录：${config.earlyLoginMinutes} 分钟` }));
   }
-  if (config.lateLimitMinutes) {
-    await enableMinuteOption(page, "限制迟到", config.lateLimitMinutes);
+  if (config.lateLimitMinutes != null) {
+    emit(event("log", { level: "success", message: `开始填写限制迟到：${config.lateLimitMinutes} 分钟` }));
+    await enableMinuteOption(page, "限制迟到", config.lateLimitMinutes, emit);
     emit(event("log", { level: "success", message: `已填写限制迟到：${config.lateLimitMinutes} 分钟` }));
   }
 
@@ -1420,8 +2110,14 @@ async function runBasicInfo(page, config, emit) {
   await selectRadioInGroup(page, "交卷后跳转", "不跳转");
 
   if (config.welcomeText) {
-    await fillWelcomeText(page, config.welcomeText);
-    emit(event("log", { level: "success", message: "已填写欢迎语。" }));
+    const examNameBeforeWelcome = await readBasicInfoField(page, "考试名称");
+    const welcomeResult = await fillWelcomeText(page, config.welcomeText);
+    emit(event("log", { level: "success", message: `已填写欢迎语：${welcomeResult?.value || "空"}；目标 ${welcomeResult?.tag || "未知"} ${welcomeResult?.className || ""}` }));
+    const examNameAfterWelcome = await readBasicInfoField(page, "考试名称");
+    if (examNameAfterWelcome !== examNameBeforeWelcome) {
+      await fillExamNameField(page, config.examName);
+      throw new Error(`欢迎语填写误改考试名称，已恢复考试名称。原值“${examNameBeforeWelcome || "空"}”，误写为“${examNameAfterWelcome || "空"}”`);
+    }
   }
 
   const finalExamNameReadback = await readBasicInfoField(page, "考试名称");
@@ -1541,12 +2237,14 @@ async function runPersonalInfo(page, config, emit) {
   emit(event("stage", { stage: "个人信息", percent: 66, stepIndex: 3, caption: "正在保留姓名、身份证号并取消全部编辑/必填" }));
 
   const visibleSet = new Set(config.visibleFields || ["姓名", "身份证号"]);
-  const rows = ["姓名", "邮箱", "手机号码", "性别", "身份证号"];
-
-  for (const row of rows) {
-    await setCheckboxRowState(page, row, 0, false);
-    await setCheckboxRowState(page, row, 1, visibleSet.has(row));
-    await setCheckboxRowState(page, row, 2, false);
+  const personalResult = await configurePersonalInfoVisibility(page, visibleSet);
+  emit(event("log", { level: "success", message: `个人信息勾选结果：${JSON.stringify(personalResult)}` }));
+  const failed = personalResult.filter((row) => {
+    const shouldVisible = visibleSet.has(row.name);
+    return !row.ok || row.allowEdit !== false || row.candidateVisible !== shouldVisible || row.required !== false;
+  });
+  if (failed.length) {
+    throw new Error(`个人信息配置校验失败：${JSON.stringify(failed)}`);
   }
 
   await clickButton(page, "下一步");
@@ -1647,6 +2345,11 @@ export async function runEasyExamJob({ job, runtimeDir, emit }) {
     const message = error instanceof Error ? error.message : String(error);
     if (page) {
       try {
+        const snapshot = await collectBasicInfoSnapshot(page);
+        emit(event("log", {
+          level: "warn",
+          message: `失败现场字段快照：提前登录=${JSON.stringify(snapshot.earlyLogin)}，限制迟到=${JSON.stringify(snapshot.lateLimit)}，textarea=${JSON.stringify(snapshot.textareas)}`,
+        }));
         const failureShot = await takeShot(page, shotsDir, job.id, "failure-current-page", "失败现场");
         emit(event("captures", { captures: [failureShot] }));
         emit(event("log", { level: "warn", message: "已截取失败现场，可在网页中点开查看。" }));
