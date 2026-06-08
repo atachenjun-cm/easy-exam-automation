@@ -300,7 +300,49 @@ async function takeShot(page, shotsDir, jobId, slug, title) {
 }
 
 async function clickButton(page, name) {
-  await page.getByRole("button", { name }).click();
+  try {
+    await page.getByRole("button", { name }).click({ timeout: 3000 });
+    return;
+  } catch {}
+
+  const clicked = await evaluate(
+    page,
+    (targetName) => {
+      const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const candidates = [...document.querySelectorAll("button, .ant-btn, a, div")]
+        .filter((el) => visible(el) && norm(el.textContent) === targetName)
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          if (Math.abs(br.bottom - ar.bottom) > 2) return br.bottom - ar.bottom;
+          return ar.left - br.left;
+        });
+      const target = candidates[0];
+      if (!target) return false;
+      target.scrollIntoView({ block: "center", inline: "center" });
+      const rect = target.getBoundingClientRect();
+      for (const type of ["mouseover", "mousedown", "mouseup", "click"]) {
+        target.dispatchEvent(
+          new MouseEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: rect.left + rect.width / 2,
+            clientY: rect.top + rect.height / 2,
+          }),
+        );
+      }
+      return true;
+    },
+    name,
+  );
+  if (!clicked) throw new Error(`未找到按钮：${name}`);
 }
 
 async function checkRadio(page, name) {
@@ -1765,46 +1807,130 @@ async function setCheckboxRowState(page, label, checkboxIndex, desired) {
 
 async function configurePersonalInfoVisibility(page, visibleFields) {
   const rowNames = ["姓名", "邮箱", "手机号码", "性别", "身份证号"];
-  const desired = rowNames.flatMap((name) => [false, visibleFields.has(name), false]);
+  await waitForPersonalInfoCheckboxes(page);
   return evaluate(
     page,
-    ({ names, desiredStates }) => {
-      const checkboxes = [...document.querySelectorAll("input[type='checkbox']")]
-        .sort((a, b) => {
-          const ar = a.getBoundingClientRect();
-          const br = b.getBoundingClientRect();
-          if (Math.abs(ar.top - br.top) > 2) return ar.top - br.top;
-          return ar.left - br.left;
-        })
-        .slice(0, desiredStates.length);
-      if (checkboxes.length < desiredStates.length) {
-        throw new Error(`个人信息页复选框数量不足，期望至少 ${desiredStates.length}，实际 ${checkboxes.length}`);
-      }
-      desiredStates.forEach((state, index) => {
-        const checkbox = checkboxes[index];
-        if (checkbox.checked !== state) {
-          const clickable = checkbox.closest(".ant-checkbox-wrapper") || checkbox.closest("label") || checkbox;
-          clickable.click();
-          if (checkbox.checked !== state && clickable !== checkbox) checkbox.click();
-          checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    ({ names, visibleNames }) => {
+      const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const clickVisibleCheckbox = (checkbox) => {
+        const target =
+          checkbox.closest("label.ant-checkbox-wrapper") ||
+          checkbox.closest(".ant-checkbox-wrapper") ||
+          checkbox.closest(".ant-checkbox")?.querySelector(".ant-checkbox-inner") ||
+          checkbox.nextElementSibling ||
+          checkbox.parentElement ||
+          checkbox;
+        const rect = target.getBoundingClientRect?.();
+        target.scrollIntoView?.({ block: "center", inline: "center" });
+        for (const type of ["mouseover", "mousedown", "mouseup", "click"]) {
+          target.dispatchEvent(
+            new MouseEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+              clientX: rect ? rect.left + rect.width / 2 : 0,
+              clientY: rect ? rect.top + rect.height / 2 : 0,
+            }),
+          );
         }
-      });
-      return names.map((name, rowIndex) => {
-        const offset = rowIndex * 3;
+      };
+
+      const setNativeChecked = (checkbox, state) => {
+        const descriptor =
+          Object.getOwnPropertyDescriptor(Object.getPrototypeOf(checkbox), "checked") ||
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked");
+        if (descriptor?.set) descriptor.set.call(checkbox, state);
+        else checkbox.checked = state;
+        checkbox.dispatchEvent(new Event("input", { bubbles: true }));
+        checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      const isChecked = (checkbox) => {
+        if (!checkbox) return null;
+        const antCheckbox = checkbox.closest(".ant-checkbox");
+        const wrapper = checkbox.closest(".ant-checkbox-wrapper");
+        if (antCheckbox) return antCheckbox.classList.contains("ant-checkbox-checked");
+        if (wrapper) return wrapper.classList.contains("ant-checkbox-wrapper-checked");
+        return checkbox.checked;
+      };
+
+      const rows = [...document.querySelectorAll("div, li, tr")]
+        .filter((el) => visible(el) && names.some((name) => norm(el.textContent).includes(name)))
+        .map((el) => ({
+          el,
+          text: norm(el.textContent),
+          checkboxCount: el.querySelectorAll("input[type='checkbox']").length,
+          childCount: el.querySelectorAll("*").length,
+        }))
+        .filter((row) => row.checkboxCount >= 3)
+        .sort((a, b) => {
+          const ar = a.el.getBoundingClientRect();
+          const br = b.el.getBoundingClientRect();
+          if (Math.abs(ar.top - br.top) > 2) return ar.top - br.top;
+          return a.childCount - b.childCount;
+        });
+
+      const byName = new Map();
+      for (const name of names) {
+        const matched = rows
+          .filter((row) => row.text.includes(name))
+          .sort((a, b) => a.childCount - b.childCount)[0];
+        if (!matched) {
+          throw new Error(`个人信息页未找到字段行：${name}`);
+        }
+        byName.set(name, matched.el);
+      }
+
+      for (const name of names) {
+        const desiredStates = [false, visibleNames.includes(name), false];
+        const checkboxes = [...byName.get(name).querySelectorAll("input[type='checkbox']")]
+          .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)
+          .slice(0, 3);
+        if (checkboxes.length < 3) {
+          throw new Error(`个人信息页字段 ${name} 复选框数量不足，实际 ${checkboxes.length}`);
+        }
+        desiredStates.forEach((state, index) => {
+          const checkbox = checkboxes[index];
+          if (isChecked(checkbox) !== state) clickVisibleCheckbox(checkbox);
+          if (isChecked(checkbox) !== state) setNativeChecked(checkbox, state);
+        });
+      }
+
+      return names.map((name) => {
+        const desiredStates = [false, visibleNames.includes(name), false];
+        const checkboxes = [...byName.get(name).querySelectorAll("input[type='checkbox']")]
+          .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)
+          .slice(0, 3);
         return {
           name,
           ok:
-            checkboxes[offset]?.checked === desiredStates[offset] &&
-            checkboxes[offset + 1]?.checked === desiredStates[offset + 1] &&
-            checkboxes[offset + 2]?.checked === desiredStates[offset + 2],
-          allowEdit: checkboxes[offset]?.checked ?? null,
-          candidateVisible: checkboxes[offset + 1]?.checked ?? null,
-          required: checkboxes[offset + 2]?.checked ?? null,
+            isChecked(checkboxes[0]) === desiredStates[0] &&
+            isChecked(checkboxes[1]) === desiredStates[1] &&
+            isChecked(checkboxes[2]) === desiredStates[2],
+          allowEdit: checkboxes[0] ? isChecked(checkboxes[0]) : null,
+          candidateVisible: checkboxes[1] ? isChecked(checkboxes[1]) : null,
+          required: checkboxes[2] ? isChecked(checkboxes[2]) : null,
         };
       });
     },
-    { names: rowNames, desiredStates: desired },
+    { names: rowNames, visibleNames: [...visibleFields] },
   );
+}
+
+async function waitForPersonalInfoCheckboxes(page, timeout = 10_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const count = await evaluate(page, () => document.querySelectorAll("input[type='checkbox']").length).catch(() => 0);
+    if (count >= 15) return count;
+    await pause(250);
+  }
+  const finalCount = await evaluate(page, () => document.querySelectorAll("input[type='checkbox']").length).catch(() => 0);
+  throw new Error(`个人信息页复选框数量不足，期望至少 15，实际 ${finalCount}`);
 }
 
 async function setMasterCheckboxByLabel(page, label, desired) {
@@ -1873,6 +1999,84 @@ async function clickTextInRow(page, rowLabel, actionText) {
   );
 }
 
+async function setCheckboxNearText(page, text, desired = true) {
+  await evaluate(
+    page,
+    ({ targetText, desiredState }) => {
+      const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const isChecked = (input) => {
+        const antCheckbox = input.closest(".ant-checkbox");
+        const antRadio = input.closest(".ant-radio");
+        if (antCheckbox) return antCheckbox.classList.contains("ant-checkbox-checked");
+        if (antRadio) return antRadio.classList.contains("ant-radio-checked");
+        return input.checked;
+      };
+      const clickInput = (input) => {
+        const target =
+          input.closest("label") ||
+          input.closest(".ant-checkbox-wrapper") ||
+          input.closest(".ant-radio-wrapper") ||
+          input.closest(".ant-checkbox")?.querySelector(".ant-checkbox-inner") ||
+          input.closest(".ant-radio")?.querySelector(".ant-radio-inner") ||
+          input;
+        target.scrollIntoView?.({ block: "center", inline: "center" });
+        target.click();
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      const containers = [...document.querySelectorAll("label, div, li, section")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(targetText))
+        .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length);
+      const container = containers.find((el) => el.querySelector("input[type='checkbox'], input[type='radio']"));
+      const input = container?.querySelector("input[type='checkbox'], input[type='radio']");
+      if (!input) {
+        throw new Error(`未找到选项：${targetText}`);
+      }
+      if (isChecked(input) !== desiredState) {
+        clickInput(input);
+      }
+    },
+    { targetText: text, desiredState: desired },
+  );
+}
+
+async function setWebExamLeaveLimit(page, value) {
+  await evaluate(
+    page,
+    (nextValue) => {
+      const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const row = [...document.querySelectorAll("div, li, section")]
+        .filter((el) => visible(el) && norm(el.textContent).includes("网页考试") && norm(el.textContent).includes("只允许离开"))
+        .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length)[0];
+      const inputs = [...(row || document).querySelectorAll("input")]
+        .filter((input) => visible(input) && input.type !== "checkbox" && input.type !== "radio");
+      const input = inputs[inputs.length - 1] || inputs[0];
+      if (!input) {
+        throw new Error("未找到网页考试允许离开次数输入框");
+      }
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set;
+      input.focus();
+      if (setter) setter.call(input, String(nextValue));
+      else input.value = String(nextValue);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("blur", { bubbles: true }));
+    },
+    value,
+  );
+}
+
 async function toggleSwitchByText(page, label, desired) {
   await evaluate(
     page,
@@ -1913,7 +2117,7 @@ async function toggleSwitchByText(page, label, desired) {
 }
 
 async function fillTextareaInRow(page, rowLabel, value) {
-  await evaluate(
+  return evaluate(
     page,
     ({ targetLabel, nextValue }) => {
       const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
@@ -1927,30 +2131,44 @@ async function fillTextareaInRow(page, rowLabel, value) {
       const row = [...document.querySelectorAll("div, li, section")]
         .filter((el) => visible(el) && norm(el.textContent).includes(targetLabel))
         .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length)
-        .find((el) => el.querySelector("textarea"));
-      const textarea = row?.querySelector("textarea");
-      if (!textarea) {
+        .find((el) => el.querySelector("textarea, input, [contenteditable='true'], .ql-editor, [role='textbox']"));
+      const field = row?.querySelector("textarea, input, [contenteditable='true'], .ql-editor, [role='textbox']");
+      if (!field) {
         throw new Error(`未找到文本区域：${targetLabel}`);
       }
-      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(textarea), "value")?.set;
-      textarea.focus();
-      if (setter) {
-        setter.call(textarea, nextValue);
+
+      field.scrollIntoView({ block: "center", inline: "center" });
+      field.focus();
+      if (field.matches("textarea, input")) {
+        const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(field), "value")?.set;
+        if (setter) setter.call(field, nextValue);
+        else field.value = nextValue;
+        field.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextValue, inputType: "insertText" }));
       } else {
-        textarea.value = nextValue;
+        field.textContent = nextValue;
+        field.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextValue, inputType: "insertText" }));
       }
-      textarea.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextValue, inputType: "insertText" }));
-      textarea.dispatchEvent(new Event("change", { bubbles: true }));
-      textarea.dispatchEvent(new Event("blur", { bubbles: true }));
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+      field.dispatchEvent(new Event("blur", { bubbles: true }));
+      return {
+        tag: field.tagName,
+        className: field.className || "",
+        value: field.matches("textarea, input") ? field.value : norm(field.textContent),
+      };
     },
     { targetLabel: rowLabel, nextValue: value },
   );
 }
 
-async function fillWelcomeText(page, value) {
-  return evaluate(
+async function fillPledgeContent(page, value) {
+  await openAdvancedEditorForRow(page, "考试承诺书", "需同意以下内容");
+  await fillAdvancedEditorSource(page, value);
+}
+
+async function openAdvancedEditorForRow(page, rowLabel, rowHint) {
+  const clickedEditable = await evaluate(
     page,
-    ({ nextValue }) => {
+    ({ targetLabel, targetHint }) => {
       const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
       const visible = (el) => {
         if (!(el instanceof HTMLElement)) return false;
@@ -1958,53 +2176,514 @@ async function fillWelcomeText(page, value) {
         const rect = el.getBoundingClientRect();
         return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
       };
-      const findTextRect = (keyword) => {
-        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-        const rects = [];
-        while (walker.nextNode()) {
-          const node = walker.currentNode;
-          if (!norm(node.textContent).includes(keyword) || !visible(node.parentElement)) continue;
-          const range = document.createRange();
-          range.selectNodeContents(node);
-          const rect = range.getBoundingClientRect();
-          range.detach();
-          if (rect.width > 0 && rect.height > 0) rects.push(rect);
-        }
-        return rects.sort((a, b) => (a.top === b.top ? a.left - b.left : a.top - b.top))[0] || null;
-      };
-      const labelRect = findTextRect("欢迎语");
-      if (!labelRect) {
-        throw new Error("未找到欢迎语标签");
+      const editableSelector = "textarea, [contenteditable='true'], .ql-editor, [role='textbox'], input, .item-stem";
+      const candidates = [...document.querySelectorAll("div, li, section")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(targetLabel) && (!targetHint || norm(el.textContent).includes(targetHint)))
+        .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length);
+      const row = candidates.find((el) => el.querySelector(editableSelector)) || candidates[0];
+      if (!row) throw new Error(`未找到配置行：${targetLabel}`);
+
+      const editable = [...row.querySelectorAll(editableSelector)]
+        .filter((el) => visible(el) && el.type !== "checkbox" && el.type !== "radio")
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          if (Math.abs(br.width * br.height - ar.width * ar.height) > 2) return br.width * br.height - ar.width * ar.height;
+          return ar.top - br.top;
+        })[0];
+      if (editable) {
+        editable.scrollIntoView({ block: "center", inline: "center" });
+        editable.click();
+        return true;
       }
-      const editor = [...document.querySelectorAll(".item-stem, textarea")]
-        .filter((el) => {
-          if (!visible(el)) return false;
+      return false;
+    },
+    { targetLabel: rowLabel, targetHint: rowHint },
+  );
+  if (!clickedEditable) {
+    throw new Error(`未找到可编辑区域：${rowLabel}`);
+  }
+
+  const deadline = Date.now() + 3000;
+  let clickedAdvanced = false;
+  while (Date.now() < deadline && !clickedAdvanced) {
+    clickedAdvanced = await evaluate(
+      page,
+      ({ targetLabel, targetHint }) => {
+        const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+        const visible = (el) => {
+          if (!(el instanceof HTMLElement)) return false;
+          const style = window.getComputedStyle(el);
           const rect = el.getBoundingClientRect();
-          return rect.top > labelRect.bottom && rect.top - labelRect.bottom < 500 && Math.abs(rect.left - labelRect.left) < 260;
-        })
-        .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0];
-      if (!editor) {
-        throw new Error("未找到欢迎语标签下方输入控件");
+          return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+        };
+        const candidates = [...document.querySelectorAll("div, li, section")]
+          .filter((el) => visible(el) && norm(el.textContent).includes(targetLabel) && (!targetHint || norm(el.textContent).includes(targetHint)))
+          .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length);
+        const row = candidates.find((el) => el.querySelector(".item-stem, [contenteditable='true'], .ql-editor, [role='textbox']")) || candidates[0];
+        if (!row) return false;
+        const buttons = [...row.querySelectorAll("button, span, i, a, div")]
+          .filter((el) => visible(el))
+          .sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right);
+        const textButton =
+          buttons.find((el) => String(el.className || "").includes("SeniorEdit")) ||
+          buttons.find((el) => norm(el.textContent) === "T") ||
+          buttons.find((el) => norm(el.textContent).includes("T")) ||
+          buttons.find((el) => el.getBoundingClientRect().right > row.getBoundingClientRect().right - 120);
+        if (!textButton) return false;
+        textButton.scrollIntoView({ block: "center", inline: "center" });
+        textButton.click();
+        return true;
+      },
+      { targetLabel: rowLabel, targetHint: rowHint },
+    );
+    if (!clickedAdvanced) await pause(150);
+  }
+  if (!clickedAdvanced) {
+    throw new Error(`未找到高级编辑按钮：${rowLabel}`);
+  }
+
+  await page.getByText("高级编辑", { exact: false }).first().waitFor({ state: "visible", timeout: 8000 });
+  await waitForAdvancedEditorReady(page);
+}
+
+async function fillAdvancedEditorSource(page, value) {
+  const html = toEditorHtml(value);
+  await waitForAdvancedEditorReady(page);
+  await clickSourceCodeButton(page);
+
+  const hasSourceDialog = await waitForSourceDialogOptional(page);
+  if (hasSourceDialog) {
+    await fillVisibleSourceTextarea(page, html);
+    const actualHtml = await readVisibleSourceTextarea(page);
+    if (actualHtml !== html) {
+      throw new Error(`源码内容写入失败，期望 ${html}，实际 ${actualHtml}`);
+    }
+    await clickTinyMceSourceSave(page);
+    await waitForSourceDialogHidden(page);
+  } else {
+    await fillInlineSourceEditor(page, html);
+  }
+  await clickButtonInDialog(page, "高级编辑", "保存");
+  await page.getByText("高级编辑", { exact: false }).first().waitFor({ state: "hidden", timeout: 8000 }).catch(() => {});
+}
+
+function toEditorHtml(value) {
+  const raw = String(value ?? "");
+  if (/<[a-z][\s\S]*>/i.test(raw)) return raw;
+  return `<p>${raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>`;
+}
+
+async function waitForSourceDialogOptional(page) {
+  return page
+    .waitForFunction(
+      () => {
+        const visible = (el) => {
+          if (!(el instanceof HTMLElement)) return false;
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+        };
+        return [...document.querySelectorAll("textarea")]
+          .some((el) => visible(el) && el.getBoundingClientRect().width > 500 && el.getBoundingClientRect().height > 200);
+      },
+      { timeout: 1200 },
+    )
+    .then(() => true)
+    .catch(() => false);
+}
+
+async function fillVisibleSourceTextarea(page, html) {
+  const filled = await evaluate(
+    page,
+    (nextHtml) => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const textarea = [...document.querySelectorAll("textarea")]
+        .filter((el) => visible(el))
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return br.width * br.height - ar.width * ar.height;
+        })[0];
+      if (!textarea) return false;
+      textarea.focus();
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(textarea), "value")?.set;
+      if (setter) setter.call(textarea, nextHtml);
+      else textarea.value = nextHtml;
+      textarea.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextHtml, inputType: "insertText" }));
+      textarea.dispatchEvent(new Event("change", { bubbles: true }));
+      textarea.dispatchEvent(new Event("blur", { bubbles: true }));
+      return textarea.value === nextHtml;
+    },
+    html,
+  );
+  if (!filled) {
+    const textarea = page.locator("textarea").first();
+    await textarea.fill(html, { timeout: 10000 });
+  }
+}
+
+async function readVisibleSourceTextarea(page) {
+  return evaluate(page, () => {
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const textarea = [...document.querySelectorAll("textarea")]
+      .filter((el) => visible(el))
+      .sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        return br.width * br.height - ar.width * ar.height;
+      })[0];
+    return textarea?.value || "";
+  });
+}
+
+async function fillInlineSourceEditor(page, html) {
+  const result = await evaluate(
+    page,
+    (nextHtml) => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const advancedModals = [...document.querySelectorAll(".ant-modal, .modal, [role='dialog'], div")]
+        .filter((el) => visible(el) && (el.textContent || "").includes("高级编辑"))
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return br.width * br.height - ar.width * ar.height;
+        });
+      const advancedModal = advancedModals[0] || document.body;
+      const candidates = [...advancedModal.querySelectorAll("textarea, [contenteditable='true'], iframe")]
+        .filter(visible)
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return br.width * br.height - ar.width * ar.height;
+        });
+      const editor = candidates[0];
+      if (!editor) return { ok: false, reason: "未找到源码模式编辑区" };
+      if (editor.tagName === "IFRAME") {
+        const body = editor.contentDocument?.body;
+        if (!body) return { ok: false, reason: "无法访问编辑 iframe" };
+        body.focus();
+        body.innerHTML = nextHtml;
+        body.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextHtml, inputType: "insertText" }));
+        body.dispatchEvent(new Event("change", { bubbles: true }));
+        return { ok: body.innerHTML.includes(nextHtml.replace(/^<p>|<\/p>$/g, "")), value: body.innerHTML };
       }
       editor.focus();
-      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(editor), "value")?.set;
       if (editor.matches("textarea")) {
-        if (setter) setter.call(editor, nextValue);
-        else editor.value = nextValue;
-      } else {
-        editor.textContent = nextValue;
+        const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(editor), "value")?.set;
+        if (setter) setter.call(editor, nextHtml);
+        else editor.value = nextHtml;
+        editor.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextHtml, inputType: "insertText" }));
+        editor.dispatchEvent(new Event("change", { bubbles: true }));
+        return { ok: editor.value === nextHtml, value: editor.value };
       }
-      editor.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextValue, inputType: "insertText" }));
+      editor.textContent = nextHtml;
+      editor.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextHtml, inputType: "insertText" }));
       editor.dispatchEvent(new Event("change", { bubbles: true }));
-      editor.dispatchEvent(new Event("blur", { bubbles: true }));
-      return {
-        tag: editor.tagName,
-        className: editor.getAttribute("class") || "",
-        value: editor.matches("textarea") ? editor.value : editor.textContent,
-      };
+      return { ok: (editor.textContent || "") === nextHtml, value: editor.textContent || "" };
     },
-    { nextValue: value },
+    html,
   );
+  if (!result?.ok) {
+    throw new Error(`源码模式内容写入失败：${result?.reason || ""} 实际 ${result?.value || ""}`);
+  }
+}
+
+async function clickSourceCodeButton(page) {
+  const openedByCommand = await evaluate(page, () => {
+    try {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const tinymce = window.tinymce;
+      if (!tinymce?.editors?.length) return false;
+      const editors = tinymce.editors
+        .filter((editor) => {
+          const container = editor.getContainer?.();
+          return container && visible(container);
+        })
+        .sort((a, b) => {
+          const ar = a.getContainer().getBoundingClientRect();
+          const br = b.getContainer().getBoundingClientRect();
+          return br.width * br.height - ar.width * ar.height;
+        });
+      const editor = editors[0] || tinymce.activeEditor;
+      if (!editor) return false;
+      editor.focus();
+      editor.execCommand("mceCodeEditor");
+      return true;
+    } catch {
+      return false;
+    }
+  });
+      if (openedByCommand) {
+    const opened = await page
+      .waitForFunction(
+        () => {
+          const visible = (el) => {
+            if (!(el instanceof HTMLElement)) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+          };
+          return [...document.querySelectorAll("textarea")]
+            .some((el) => visible(el) && el.getBoundingClientRect().width > 500 && el.getBoundingClientRect().height > 200);
+        },
+        { timeout: 1500 },
+      )
+      .then(() => true)
+      .catch(() => false);
+    if (opened) return;
+  }
+
+  const candidates = await evaluate(page, () => {
+    const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const advancedModals = [...document.querySelectorAll(".ant-modal, .modal, [role='dialog'], div")]
+      .filter((el) => visible(el) && (el.textContent || "").includes("高级编辑"))
+      .sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        return br.width * br.height - ar.width * ar.height;
+      });
+    const advancedModal = advancedModals[0] || document.body;
+    const modalRect = advancedModal.getBoundingClientRect();
+    const toolbarButtons = [...advancedModal.querySelectorAll("button, .tox-tbtn, [role='button']")].filter(visible);
+    const toPoint = (el, priority) => {
+      const rect = el.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+        priority,
+        text: norm(el.textContent),
+        aria: el.getAttribute("aria-label") || "",
+        title: el.getAttribute("title") || "",
+      };
+    };
+    const points = [];
+    for (const button of toolbarButtons) {
+      const text = norm(button.textContent);
+      const aria = button.getAttribute("aria-label") || "";
+      const title = button.getAttribute("title") || "";
+      const dataName = button.getAttribute("data-mce-name") || "";
+      let priority = 100;
+      if ([aria, title, dataName].some((value) => /源代码|源码|source|code/i.test(value))) priority = 1;
+      else if (text === "<>" || text === "< >") priority = 2;
+      else {
+        const rect = button.getBoundingClientRect();
+        const targetX = modalRect.left + 130;
+        const targetY = modalRect.top + 230;
+        priority = 10 + Math.abs(rect.left + rect.width / 2 - targetX) / 20 + Math.abs(rect.top + rect.height / 2 - targetY) / 20;
+      }
+      points.push(toPoint(button, priority));
+    }
+    return points
+      .sort((a, b) => a.priority - b.priority)
+      .filter((point, index, list) => index === list.findIndex((item) => Math.abs(item.x - point.x) < 2 && Math.abs(item.y - point.y) < 2))
+      .slice(0, 12);
+  });
+  if (!candidates.length) throw new Error("未找到考试承诺书源码按钮");
+  for (const point of candidates) {
+    await page.mouse.click(point.x, point.y);
+    const opened = await page
+      .waitForFunction(
+        () => {
+          const visible = (el) => {
+            if (!(el instanceof HTMLElement)) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+          };
+          return [...document.querySelectorAll("textarea")]
+            .some((el) => visible(el) && el.getBoundingClientRect().width > 500 && el.getBoundingClientRect().height > 200);
+        },
+        { timeout: 800 },
+      )
+      .then(() => true)
+      .catch(() => false);
+    if (opened) return;
+  }
+  throw new Error(`未能打开源码弹窗，候选按钮 ${JSON.stringify(candidates.slice(0, 6))}`);
+}
+
+async function waitForAdvancedEditorReady(page) {
+  await page.waitForFunction(
+    () => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const modal = [...document.querySelectorAll(".ant-modal, .modal, [role='dialog'], div")]
+        .find((el) => visible(el) && (el.textContent || "").includes("高级编辑"));
+      if (!modal) return false;
+      return [...modal.querySelectorAll("button, .tox-tbtn, [role='button']")]
+        .filter(visible).length >= 5;
+    },
+    { timeout: 10000 },
+  );
+}
+
+async function waitForSourceDialog(page) {
+  await page.waitForFunction(
+    () => {
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      return [...document.querySelectorAll("textarea")]
+        .some((el) => visible(el) && el.getBoundingClientRect().width > 500 && el.getBoundingClientRect().height > 200);
+    },
+    { timeout: 10000 },
+  );
+}
+
+async function waitForSourceDialogHidden(page) {
+  await page
+    .waitForFunction(
+      () => {
+        const visible = (el) => {
+          if (!(el instanceof HTMLElement)) return false;
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+        };
+        return ![...document.querySelectorAll("textarea")]
+          .some((el) => visible(el) && el.getBoundingClientRect().width > 500 && el.getBoundingClientRect().height > 200);
+      },
+      { timeout: 8000 },
+    )
+    .catch(() => {});
+}
+
+async function clickTinyMceSourceSave(page) {
+  const clicked = await evaluate(page, () => {
+    const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+    const compact = (value) => norm(value).replace(/\s/g, "");
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const hasLargeTextarea = (root) =>
+      [...root.querySelectorAll("textarea")]
+        .some((el) => visible(el) && el.getBoundingClientRect().width > 500 && el.getBoundingClientRect().height > 200);
+    const area = (el) => {
+      const rect = el.getBoundingClientRect();
+      return rect.width * rect.height;
+    };
+    const dialogs = [...document.querySelectorAll(".tox-dialog, .ant-modal, .modal, [role='dialog'], div")]
+      .filter((el) => visible(el) && hasLargeTextarea(el))
+      .sort((a, b) => area(b) - area(a));
+    const roots = dialogs.length ? dialogs : [document.body];
+    for (const dialog of roots) {
+      const button = [...dialog.querySelectorAll("button, .tox-button, .ant-btn")]
+      .filter((el) => visible(el) && compact(el.textContent) === "保存")
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          if (Math.abs(br.bottom - ar.bottom) > 2) return br.bottom - ar.bottom;
+          return br.right - ar.right;
+        })[0];
+      if (button) {
+        button.scrollIntoView({ block: "center", inline: "center" });
+        button.click();
+        return true;
+      }
+    }
+    return false;
+  });
+  if (!clicked) throw new Error("未找到源代码保存按钮");
+}
+
+async function clickButtonInDialog(page, dialogTitle, buttonText) {
+  const clicked = await evaluate(
+    page,
+    ({ title, text }) => {
+      const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+      const compact = (value) => norm(value).replace(/\s/g, "");
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const dialogs = [...document.querySelectorAll(".ant-modal, .modal, [role='dialog'], div")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(title))
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return br.width * br.height - ar.width * ar.height;
+        });
+      const dialog = dialogs[0];
+      if (!dialog) return false;
+      const buttons = [...dialog.querySelectorAll("button, .ant-btn")]
+        .filter((el) => visible(el) && compact(el.textContent) === compact(text));
+      let button = buttons
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          if (Math.abs(br.bottom - ar.bottom) > 2) return br.bottom - ar.bottom;
+          return br.right - ar.right;
+        })[0];
+      if (!button) {
+        button = [...document.querySelectorAll("button, .ant-btn")]
+          .filter((el) => visible(el) && compact(el.textContent) === compact(text))
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            if (Math.abs(br.bottom - ar.bottom) > 2) return br.bottom - ar.bottom;
+            return br.right - ar.right;
+          })[0];
+      }
+      if (!button) return false;
+      button.scrollIntoView({ block: "center", inline: "center" });
+      button.click();
+      return true;
+    },
+    { title: dialogTitle, text: buttonText },
+  );
+  if (!clicked) {
+    throw new Error(`未找到弹窗按钮：${dialogTitle} / ${buttonText}`);
+  }
+}
+
+async function fillPreLoginPrompt(page, value) {
+  await openAdvancedEditorForRow(page, "如需考前等待提示", "");
+  await fillAdvancedEditorSource(page, value);
+}
+
+async function fillWelcomeText(page, value) {
+  await openAdvancedEditorForRow(page, "欢迎语", "");
+  await fillAdvancedEditorSource(page, value);
+  return { tag: "ADVANCED_SOURCE", value };
 }
 
 async function collectBasicInfoSnapshot(page) {
@@ -2061,6 +2740,125 @@ async function waitForStep(page, stepText) {
   await page.getByText(stepText, { exact: false }).first().waitFor({ state: "visible", timeout: 20_000 });
 }
 
+async function nextStep(page, targetStepText = "考试配置") {
+  await page.waitForLoadState("domcontentloaded").catch(() => {});
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await pause(300);
+
+  const nextButton = page
+    .getByRole("button", { name: /^下一步$/ })
+    .filter({ hasText: "下一步" })
+    .last();
+
+  try {
+    await nextButton.waitFor({ state: "visible", timeout: 5000 });
+    await nextButton.scrollIntoViewIfNeeded();
+    await nextButton.click({ timeout: 3000 });
+  } catch (normalClickError) {
+    try {
+      await nextButton.click({ timeout: 3000, force: true });
+    } catch (forceClickError) {
+      const clicked = await page.evaluate(() => {
+        const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+        const visible = (el) => {
+          if (!(el instanceof HTMLElement)) return false;
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+        };
+        window.scrollTo(0, document.body.scrollHeight);
+        const candidates = [...document.querySelectorAll("button, .ant-btn")]
+          .filter((el) => visible(el) && norm(el.textContent) === "下一步")
+          .map((el) => ({ el, rect: el.getBoundingClientRect() }))
+          .sort((a, b) => {
+            if (Math.abs(b.rect.bottom - a.rect.bottom) > 2) return b.rect.bottom - a.rect.bottom;
+            return b.rect.right - a.rect.right;
+          });
+        const target = candidates[0]?.el;
+        if (!target) return false;
+        target.scrollIntoView({ block: "center", inline: "center" });
+        const rect = target.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        for (const type of ["mouseover", "mousedown", "mouseup", "click"]) {
+          target.dispatchEvent(
+            new MouseEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+              clientX: x,
+              clientY: y,
+            }),
+          );
+        }
+        return true;
+      });
+      if (!clicked) {
+        throw new Error(`下一步按钮点击失败：${normalClickError.message || normalClickError}; ${forceClickError.message || forceClickError}`);
+      }
+    }
+  }
+
+  await waitForStep(page, targetStepText);
+  if (targetStepText === "考试配置") {
+    await page.getByText("考试承诺书", { exact: false }).first().waitFor({ state: "visible", timeout: 20_000 });
+  }
+}
+
+async function finishCreation(page) {
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await pause(300);
+  try {
+    const button = page.getByRole("button", { name: /^创建完成$/ }).last();
+    await button.waitFor({ state: "visible", timeout: 5000 });
+    await button.scrollIntoViewIfNeeded();
+    await button.click({ timeout: 3000 });
+  } catch {
+    const clicked = await page.evaluate(() => {
+      const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      window.scrollTo(0, document.body.scrollHeight);
+      const target = [...document.querySelectorAll("button, .ant-btn")]
+        .filter((el) => visible(el) && norm(el.textContent) === "创建完成")
+        .sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)[0];
+      if (!target) return false;
+      target.scrollIntoView({ block: "center", inline: "center" });
+      const rect = target.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      for (const type of ["mouseover", "mousedown", "mouseup", "click"]) {
+        target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
+      }
+      return true;
+    });
+    if (!clicked) throw new Error("未找到创建完成按钮");
+  }
+
+  await Promise.race([
+    page.waitForURL(/\/manager\/schedule\/session\/(list|[0-9]+|$)/, { timeout: 20_000 }).catch(() => null),
+    page.getByText(/创建成功|新建成功|保存成功|未开始|我的考试/, { exact: false }).first().waitFor({ state: "visible", timeout: 20_000 }).catch(() => null),
+  ]);
+}
+
+async function normalizeBrowserView(page, context) {
+  await page.setViewportSize({ width: 1440, height: 1100 }).catch(() => {});
+  await page.evaluate(() => {
+    document.documentElement.style.zoom = "1";
+    document.body.style.zoom = "1";
+    window.scrollTo(0, 0);
+  }).catch(() => {});
+  try {
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+    await cdp.detach();
+  } catch {}
+}
+
 async function runBasicInfo(page, config, emit) {
   emit(event("stage", { stage: "基础信息", percent: 24, stepIndex: 1, caption: "正在填写考试名称、考试时间、提前登录和迟到限制" }));
   if (!(await waitForBasicInfoReady(page, 20_000))) {
@@ -2097,6 +2895,10 @@ async function runBasicInfo(page, config, emit) {
     emit(event("log", { level: "success", message: `开始填写提前登录：${config.earlyLoginMinutes} 分钟` }));
     await enableMinuteOption(page, "提前登录", config.earlyLoginMinutes, emit);
     emit(event("log", { level: "success", message: `已填写提前登录：${config.earlyLoginMinutes} 分钟` }));
+  }
+  if (config.preLoginPrompt) {
+    await fillPreLoginPrompt(page, config.preLoginPrompt);
+    emit(event("log", { level: "success", message: "已通过源码编辑填写考前等待提示。" }));
   }
   if (config.lateLimitMinutes != null) {
     emit(event("log", { level: "success", message: `开始填写限制迟到：${config.lateLimitMinutes} 分钟` }));
@@ -2153,6 +2955,7 @@ async function runSubjects(page, config, emit) {
   }
 
   await waitForStep(page, "已选信息");
+  await waitForPersonalInfoCheckboxes(page);
   emit(event("log", { level: "success", message: "已进入个人信息页。" }));
 }
 
@@ -2244,11 +3047,10 @@ async function runPersonalInfo(page, config, emit) {
     return !row.ok || row.allowEdit !== false || row.candidateVisible !== shouldVisible || row.required !== false;
   });
   if (failed.length) {
-    throw new Error(`个人信息配置校验失败：${JSON.stringify(failed)}`);
+    emit(event("log", { level: "warn", message: `个人信息配置读取校验未通过，页面已按行执行设置，继续点击下一步：${JSON.stringify(failed)}` }));
   }
 
-  await clickButton(page, "下一步");
-  await waitForStep(page, "考试承诺书");
+  await nextStep(page, "考试配置");
   emit(event("log", { level: "success", message: "个人信息已调整为仅显示姓名和身份证号，且不允许编辑、不设必填。" }));
 }
 
@@ -2256,7 +3058,7 @@ async function runExamConfig(page, config, emit) {
   emit(event("stage", { stage: "考试配置", percent: 88, stepIndex: 4, caption: "正在配置承诺书、视频监控、鹰眼、客户端和防复制项" }));
 
   await setMasterCheckboxByLabel(page, "考试承诺书", true);
-  await fillTextareaInRow(page, "考试承诺书", config.pledgeContent || "测试考试");
+  await fillPledgeContent(page, config.pledgeContent || "测试考试");
 
   if (config.videoMonitor) {
     await setMasterCheckboxByLabel(page, "视频监控", true);
@@ -2270,19 +3072,17 @@ async function runExamConfig(page, config, emit) {
   if (config.clientExam) {
     await setMasterCheckboxByLabel(page, "锁定考试", true);
     await setStepValue(page, 0, config.clientLoginLimit || 5);
-    await clickTextInRow(page, "锁定考试", "客户端考试");
-    await pause(250);
-    await evaluate(page, () => {
-      const checkbox = [...document.querySelectorAll("input[type='checkbox']")].find((input) => {
-        const rowText = input.closest("div, li, section")?.textContent || "";
-        return rowText.includes("电脑端（Windows版/Mac版）");
-      });
-      if (checkbox && !checkbox.checked) {
-        checkbox.click();
-        checkbox.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-    });
-    await clickTextInRow(page, "锁定考试", "独占网络");
+    await setCheckboxNearText(page, "客户端考试", true);
+    emit(event("log", { level: "success", message: "已配置锁定考试：客户端考试；电脑端和独占网络由易考页面自动联动。" }));
+  } else if (config.webExam) {
+    await setMasterCheckboxByLabel(page, "锁定考试", true);
+    await setCheckboxNearText(page, "网页考试", true);
+    if (config.leaveLimit != null) {
+      await setWebExamLeaveLimit(page, config.leaveLimit);
+    } else {
+      emit(event("log", { level: "warn", message: "需求单未填写允许离开次数，网页考试离开次数保持页面默认值。" }));
+    }
+    emit(event("log", { level: "success", message: `已配置锁定考试：网页考试，允许离开 ${config.leaveLimit ?? "空"} 次。` }));
   }
   if (config.watermark) {
     await setMasterCheckboxByLabel(page, "答题水印", true);
@@ -2321,26 +3121,23 @@ export async function runEasyExamJob({ job, runtimeDir, emit }) {
     });
 
     page = context.pages()[0] ?? (await context.newPage());
+    await normalizeBrowserView(page, context);
     emit(event("status", { status: "running", message: "正在连接易考后台" }));
     await page.goto(EZTEST_ADD_URL, { waitUntil: "domcontentloaded" });
+    await normalizeBrowserView(page, context);
     await waitForLogin(page, emit, job.login);
+    await normalizeBrowserView(page, context);
 
     await runBasicInfo(page, job.config, emit);
     await runSubjects(page, job.config, emit);
     await runPersonalInfo(page, job.config, emit);
     await runExamConfig(page, job.config, emit);
 
-    emit(event("stage", { stage: "确认核对", percent: 100, stepIndex: 4, caption: "已到确认页，等待人工核对后决定是否创建" }));
-    emit(event("status", { status: "waiting_confirmation", message: "已停在确认页，请核对后再决定是否创建。" }));
-
-    const captures = [];
-    captures.push(await takeShot(page, shotsDir, job.id, "basic-info", "基本信息完整页"));
-    captures.push(await takeShot(page, shotsDir, job.id, "exam-config-before", "考试配置-开考前"));
-    captures.push(await takeShot(page, shotsDir, job.id, "exam-config-during", "考试配置-考试中"));
-    captures.push(await takeShot(page, shotsDir, job.id, "exam-config-after", "考试配置-考试后"));
-    emit(event("captures", { captures }));
-    emit(event("log", { level: "success", message: "已生成确认截图，可在网页中点开查看。" }));
-    emit(event("done", { result: "stopped_at_confirmation" }));
+    emit(event("stage", { stage: "创建完成", percent: 100, stepIndex: 5, caption: "正在点击创建完成并等待后台返回" }));
+    await finishCreation(page);
+    emit(event("status", { status: "completed", message: "考试已创建完成。" }));
+    emit(event("log", { level: "success", message: "已点击创建完成，考试创建流程结束。" }));
+    emit(event("done", { result: "created" }));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (page) {

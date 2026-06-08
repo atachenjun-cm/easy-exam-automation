@@ -124,6 +124,7 @@ def build_preview(config):
     add("基础信息", "提前登录时间", f'{config["earlyLoginMinutes"] or 0} 分钟', "自动填写")
     add("基础信息", "限制迟到时间", f'{config["lateLimitMinutes"] or 0} 分钟', "自动填写")
     add("基础信息", "试卷扣时规则", config["timeRule"] or "系统默认", "自动选择")
+    add("基础信息", "考前等待提示", config["preLoginPrompt"] or "空", "自动填写")
     add("基础信息", "欢迎语", config["welcomeText"] or "空", "自动填写")
     add("科目管理", "批量导入科目", "、".join(config["subjects"]) or "空", "下载后台模板后导入")
     add("选择试卷", "跳过试卷设置", "是", "自动跳过")
@@ -140,13 +141,19 @@ def build_preview(config):
     add("考试中", "鹰眼监控", "是" if config["hawkeye"] else "否", "自动勾选")
     add(
         "考试中",
-        "客户端考试",
-        "电脑端；登录限制 5 次" if config["clientExam"] else "否",
+        "锁定考试",
+        (
+            "客户端考试；登录限制 5 次"
+            if config["clientExam"]
+            else f'网页考试；允许离开 {config["leaveLimit"]} 次'
+            if config["webExam"] and config["leaveLimit"] is not None
+            else "否"
+        ),
         "自动勾选",
     )
     add("考试中", "答题水印", "是" if config["watermark"] else "否", "自动勾选")
     add("考试中", "禁止复制", "是" if config["disableCopy"] else "否", "自动勾选")
-    add("完成", "最终创建", "停在确认页人工检查", "人工确认")
+    add("完成", "最终创建", "点击创建完成", "自动创建")
     return preview
 
 
@@ -190,12 +197,16 @@ def parse_workbook(path_str):
         "earlyLoginMinutes": parse_minutes(get_field("提前登录时间", "提前登录分钟", "提前登录")),
         "lateLimitMinutes": parse_minutes(get_field("限制迟到时间", "限制迟到分钟", "限制迟到")),
         "timeRule": get_field("试卷扣时规则") or "不扣时",
+        "preLoginPrompt": get_field("考前等待提示", "考前提示", "考前等待"),
         "welcomeText": get_field("欢迎语"),
         "pledgeContent": get_field("考试承诺书内容", "承诺书内容"),
         "videoMonitor": parse_bool(get_field("视频监控")),
         "videoRecord": parse_bool(get_field("视频录制")),
         "hawkeye": parse_bool(get_field("鹰眼监控")),
+        "examType": get_field("考试类型"),
         "clientExam": get_field("考试类型") == "客户端考试",
+        "webExam": get_field("考试类型") == "网页考试",
+        "leaveLimit": parse_minutes(get_field("允许离开次数", "离开次数", "只允许离开次数")),
         "clientLoginLimit": 5,
         "watermark": parse_bool(field_map.get("答题水印")),
         "disableCopy": parse_bool(field_map.get("禁止复制")),
