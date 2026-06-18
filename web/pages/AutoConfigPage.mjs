@@ -14,7 +14,11 @@ export function AutoConfigPage({ documentObject = document }) {
   ];
   return {
     name: "auto-config",
-    roots: [documentObject.querySelector("#autoTopbar"), documentObject.querySelector("#autoConfigStack")],
+    roots: [
+      documentObject.querySelector("#autoTopbar"),
+      documentObject.querySelector("#autoConfigStack"),
+      ...components.map((component) => component.element),
+    ],
     components,
     enter: async () => {},
   };

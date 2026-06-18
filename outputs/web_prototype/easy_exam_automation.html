@@ -2381,6 +2381,8 @@
 
         <section class="task-view" id="examListView" hidden>
           <div class="view-heading"><div><h1>考试列表</h1><p class="subtitle">汇总展示正式考试与试考场次。</p></div><button class="btn" id="refreshExamsBtn" type="button">刷新</button></div>
+          <div class="task-overview" id="examStats"></div>
+          <div class="panel"><div class="panel-body"><div class="settings-grid"><label class="field"><span class="field-label">搜索考试</span><input class="field-input" id="examSearchInput" placeholder="场次名称 / session_id / 账号" /></label><label class="field"><span class="field-label">场次类型</span><select class="field-input" id="examTypeFilter"><option value="">全部类型</option><option value="formal">正式考试</option><option value="trial">试考</option></select></label></div></div></div>
           <div class="exam-table-wrap">
             <table class="exam-table"><thead><tr><th>场次类型</th><th>场次名称</th><th>session_id</th><th>考试时间</th><th>来源账号</th><th>考生数</th><th>班级数</th><th>状态</th><th>操作</th></tr></thead><tbody id="examListRows"><tr><td colspan="9">暂无考试记录</td></tr></tbody></table>
           </div>
@@ -2392,6 +2394,7 @@
           <div class="panel"><div class="panel-head"><h2 class="panel-title">场次列表</h2></div><div class="panel-body"><div class="exam-table-wrap"><table class="exam-table"><thead><tr><th>场次类型</th><th>场次名称</th><th>session_id</th><th>考试时间</th><th>考生数</th><th>班级数</th><th>状态</th></tr></thead><tbody id="taskSessionRows"></tbody></table></div></div></div>
           <div class="panel"><div class="panel-head"><div><h2 class="panel-title">进度步骤</h2><p class="subtitle">各步骤独立更新，按实际执行结果展示。</p></div></div><div class="panel-body"><div class="task-step-grid" id="taskStepGrid"></div></div></div>
           <div class="panel"><div class="panel-head"><h2 class="panel-title">科目、试卷、考生与班级</h2></div><div class="panel-body" id="examResources">根据已持久化的任务步骤和场次信息汇总。</div></div>
+          <div class="panel"><div class="panel-head"><h2 class="panel-title">监考账号文件</h2></div><div class="panel-body">监考账号文件在名单导入和自动分班完成后生成，可在对应场次下载。</div></div>
           <div class="panel"><div class="panel-head"><h2 class="panel-title">快捷操作与执行日志</h2></div><div class="panel-body"><div class="view-actions"><button class="btn" id="examContinueBtn" type="button">继续</button><button class="btn" id="examRefreshBtn" type="button">刷新状态</button></div><div class="log-list" id="examExecutionLogs" style="margin-top:12px;"></div></div></div>
         </section>
 
@@ -2487,6 +2490,9 @@
       const logsView = document.querySelector("#logsView");
       const projectGrid = document.querySelector("#projectGrid");
       const examListRows = document.querySelector("#examListRows");
+      const examStats = document.querySelector("#examStats");
+      const examSearchInput = document.querySelector("#examSearchInput");
+      const examTypeFilter = document.querySelector("#examTypeFilter");
       const taskOverview = document.querySelector("#taskOverview");
       const taskSessionRows = document.querySelector("#taskSessionRows");
       const taskStepGrid = document.querySelector("#taskStepGrid");
@@ -2606,19 +2612,32 @@
         renderProjectList();
       }
 
-      async function loadExams() {
-        const data = await fetchJson(`/api/exams?_=${Date.now()}`);
-        taskViewState.sessions = data.sessions || [];
-        examListRows.innerHTML = taskViewState.sessions.length
-          ? taskViewState.sessions.map((session) => `
+      function renderExamList() {
+        const query = String(examSearchInput.value || "").trim().toLowerCase();
+        const type = examTypeFilter.value;
+        const sessions = taskViewState.sessions.filter((session) => {
+          const searchable = `${session.name || ""} ${session.session_id || ""} ${session.sourceAccount || ""}`.toLowerCase();
+          return (!query || searchable.includes(query)) && (!type || session.sessionType === type);
+        });
+        const formalCount = taskViewState.sessions.filter((session) => session.sessionType === "formal").length;
+        const trialCount = taskViewState.sessions.filter((session) => session.sessionType === "trial").length;
+        examStats.innerHTML = `<div class="task-summary"><div><div class="project-title">考试统计</div><div class="task-meta">场次总数 ${taskViewState.sessions.length} · 正式考试 ${formalCount} · 试考 ${trialCount}</div></div></div>`;
+        examListRows.innerHTML = sessions.length
+          ? sessions.map((session) => `
               <tr>
                 <td><span class="status-chip ${session.sessionType === "formal" ? "running" : "success"}">${session.sessionType === "formal" ? "正式考试" : "试考"}</span></td>
                 <td>${safeText(session.name)}</td><td>${safeText(session.session_id || "--")}</td>
                 <td>${safeText(session.start || "--")}<br>${safeText(session.end || "--")}</td>
                 <td>${safeText(session.sourceAccount || "未记录")}</td><td>${Number(session.candidateCount || 0)}</td><td>${Number(session.roomCount || 0)}</td>
-                <td>${statusChip(session.status)}</td><td><button class="btn task-detail-btn" data-task-id="${safeText(session.taskId)}" type="button">查看</button></td>
+                <td>${statusChip(session.status)}</td><td><div class="view-actions"><button class="btn task-detail-btn" data-action="view" data-task-id="${safeText(session.taskId)}" type="button">查看</button><button class="btn task-detail-btn" data-action="continue" data-task-id="${safeText(session.taskId)}" type="button">继续/重试</button><button class="btn exam-row-action" data-action="refresh" type="button">刷新状态</button><button class="btn exam-row-action" data-action="archive" type="button">归档</button></div></td>
               </tr>`).join("")
           : `<tr><td colspan="9">暂无考试记录。新创建场次会自动显示在这里。</td></tr>`;
+      }
+
+      async function loadExams() {
+        const data = await fetchJson(`/api/exams?_=${Date.now()}`);
+        taskViewState.sessions = data.sessions || [];
+        renderExamList();
       }
 
       function renderTaskDetail(task) {
@@ -3896,6 +3915,8 @@
       projectAutoConfigBtn.addEventListener("click", () => router.navigate(`/auto-config?projectId=${encodeURIComponent(taskViewState.currentProjectId)}`));
       projectSearchInput.addEventListener("input", renderProjectList);
       projectStatusFilter.addEventListener("change", renderProjectList);
+      examSearchInput.addEventListener("input", renderExamList);
+      examTypeFilter.addEventListener("change", renderExamList);
       projectGrid.addEventListener("click", (event) => {
         const card = event.target.closest("[data-task-id]");
         if (!card) return;
@@ -3907,7 +3928,10 @@
       });
       examListRows.addEventListener("click", (event) => {
         const button = event.target.closest(".task-detail-btn");
-        if (button) router.navigate(`/exams/${encodeURIComponent(button.dataset.taskId)}`);
+        if (button) return router.navigate(`/exams/${encodeURIComponent(button.dataset.taskId)}`);
+        const action = event.target.closest(".exam-row-action")?.dataset.action;
+        if (action === "refresh") return loadExams();
+        if (action === "archive") return alert("归档操作尚未接入持久化 API。");
       });
       examRefreshBtn.addEventListener("click", () => taskViewState.currentTaskId && openTaskDetail(taskViewState.currentTaskId));
       examContinueBtn.addEventListener("click", async () => {

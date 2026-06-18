@@ -42,3 +42,8 @@ test("only AutoConfigPage imports auto configuration components", () => {
     }
   }
 });
+
+test("AutoConfigPage owns every auto component root", () => {
+  const autoPage = read("web/pages/AutoConfigPage.mjs");
+  assert.match(autoPage, /roots:\s*\[[\s\S]*\.\.\.components\.map\(\(component\) => component\.element\)/);
+});
