@@ -10,6 +10,7 @@ import {
   createSessionsThenConfigureCourses,
 } from "./course_session_binding.mjs";
 import { isFrontendRoute, webContentType } from "./frontend_routes.mjs";
+import { handleRequirementRequest } from "./requirement_request_api.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -26,7 +27,8 @@ const taskStateScript = path.join(__dirname, "task_state_db.py");
 const taskDbPath = path.join(runtimeDir, "task_state.sqlite3");
 const pythonBin =
   process.env.CODEX_PYTHON ||
-  "/Users/chen/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3";
+  process.env.PYTHON ||
+  "python3";
 
 async function loadEnvFile() {
   const envPath = path.join(rootDir, ".env");
@@ -1807,6 +1809,9 @@ async function requestHandler(req, res) {
     }
     if (req.method === "POST" && url.pathname === "/api/jobs") {
       return await handleCreateJob(req, res);
+    }
+    if (await handleRequirementRequest(req, res, url)) {
+      return;
     }
     if (req.method === "GET" && url.pathname === "/api/tasks") {
       return await handleTaskList(req, res);

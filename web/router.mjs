@@ -6,6 +6,7 @@ export const ROUTES = [
   { name: "exam-detail", pattern: /^\/exams\/([^/]+)\/?$/, param: "examId", menuKey: "exams" },
   { name: "candidate-import", pattern: /^\/candidate-import\/?$/, menuKey: "candidate-import" },
   { name: "requirements", pattern: /^\/requirements\/?$/, menuKey: "requirements" },
+  { name: "requirement-detail", pattern: /^\/requirements\/([^/]+)\/?$/, param: "requestId", menuKey: "requirements" },
   { name: "templates", pattern: /^\/templates\/?$/, menuKey: "templates" },
   { name: "logs", pattern: /^\/logs\/?$/, menuKey: "logs" },
 ];

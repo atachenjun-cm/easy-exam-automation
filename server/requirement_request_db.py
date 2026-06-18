@@ -1,0 +1,465 @@
+import json
+import re
+import sqlite3
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+REQUIRED_FIELDS = [
+    "exam_name",
+    "formal_exam_time_range",
+    "early_login_minutes",
+    "late_limit_minutes",
+    "video_monitor_required",
+    "video_record_required",
+    "hawkeye_required",
+    "exam_client_type",
+    "watermark_enabled",
+    "copy_forbidden",
+    "subjects",
+]
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def loads(value, fallback):
+    if not value:
+        return fallback
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+
+
+def normalize_bool(value):
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"是", "需要", "启用", "开启", "true", "yes", "y", "1"}:
+        return True
+    if text in {"否", "不需要", "禁用", "关闭", "false", "no", "n", "0"}:
+        return False
+    return value
+
+
+def normalize_minutes(value):
+    if value is None or value == "":
+        return value
+    if isinstance(value, (int, float)):
+        return int(value)
+    match = re.search(r"\d+", str(value))
+    return int(match.group(0)) if match else value
+
+
+def normalize_exam_type(value):
+    text = str(value or "").strip()
+    if text in {"网页考试", "web", "WEB", "Web"}:
+        return "web"
+    if text in {"客户端考试", "锁定考试", "client", "CLIENT", "Client"}:
+        return "client"
+    return text
+
+
+def normalize_subjects(value):
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    parts = re.split(r"[,，、;\n\r]+", str(value or ""))
+    return [part.strip() for part in parts if part.strip()]
+
+
+def normalize_requirement(payload):
+    source = dict(payload or {})
+    result = {}
+    for key, value in source.items():
+        result[key] = value
+    for key in ["early_login_minutes", "late_limit_minutes", "leave_limit_count"]:
+        if key in result:
+            result[key] = normalize_minutes(result.get(key))
+    for key in [
+        "video_monitor_required",
+        "video_record_required",
+        "hawkeye_required",
+        "watermark_enabled",
+        "copy_forbidden",
+        "candidate_template_required",
+    ]:
+        if key in result:
+            result[key] = normalize_bool(result.get(key))
+    if "exam_client_type" in result:
+        result["exam_client_type"] = normalize_exam_type(result.get("exam_client_type"))
+    if "subjects" in result:
+        result["subjects"] = normalize_subjects(result.get("subjects"))
+    if "subjects_text" in result and not result.get("subjects"):
+        result["subjects"] = normalize_subjects(result.get("subjects_text"))
+    return result
+
+
+def validate_requirement(requirement):
+    missing = []
+    errors = []
+    for field in REQUIRED_FIELDS:
+        value = requirement.get(field)
+        if value is None or value == "" or value == []:
+            missing.append(field)
+    if requirement.get("exam_client_type") == "web" and not requirement.get("leave_limit_count"):
+        missing.append("leave_limit_count")
+    for field in ["early_login_minutes", "late_limit_minutes", "leave_limit_count"]:
+        if field in requirement and requirement.get(field) not in (None, ""):
+            if not isinstance(requirement.get(field), int):
+                errors.append({"field": field, "message": "必须是分钟数或整数"})
+    return sorted(set(missing)), errors
+
+
+class RequirementStore:
+    def __init__(self, db_path):
+        self.db_path = str(db_path)
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._init_schema()
+
+    def connect(self):
+        connection = sqlite3.connect(self.db_path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _init_schema(self):
+        with self.connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS requirement_requests (
+                    request_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL DEFAULT '未命名考试需求',
+                    status TEXT NOT NULL DEFAULT 'collecting',
+                    customer_json TEXT NOT NULL DEFAULT '{}',
+                    linked_task_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS requirement_versions (
+                    request_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    source TEXT NOT NULL DEFAULT '',
+                    message TEXT NOT NULL DEFAULT '',
+                    requirement_json TEXT NOT NULL DEFAULT '{}',
+                    missing_fields_json TEXT NOT NULL DEFAULT '[]',
+                    validation_errors_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(request_id, version),
+                    FOREIGN KEY(request_id) REFERENCES requirement_requests(request_id)
+                );
+                CREATE TABLE IF NOT EXISTS requirement_confirmations (
+                    confirmation_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL,
+                    customer_reply TEXT NOT NULL DEFAULT '',
+                    conversation_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(request_id) REFERENCES requirement_requests(request_id)
+                );
+                CREATE TABLE IF NOT EXISTS requirement_change_requests (
+                    change_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending_internal_review',
+                    customer_message TEXT NOT NULL DEFAULT '',
+                    changes_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(request_id) REFERENCES requirement_requests(request_id)
+                );
+                CREATE TABLE IF NOT EXISTS requirement_events (
+                    event_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    actor TEXT NOT NULL DEFAULT '',
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(request_id) REFERENCES requirement_requests(request_id)
+                );
+                """
+            )
+
+    def create_or_update_requirement(self, customer=None, requirement=None, message="", request_id=None, source="dify"):
+        request_id = request_id or str(uuid.uuid4())
+        now = utc_now()
+        normalized = normalize_requirement(requirement or {})
+        missing, errors = validate_requirement(normalized)
+        status = "collecting" if missing or errors else "pending_internal_review"
+        title = str(normalized.get("exam_name") or "未命名考试需求")
+        customer_json = json.dumps(customer or {}, ensure_ascii=False)
+        with self.connect() as db:
+            current = db.execute(
+                "SELECT * FROM requirement_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if not current:
+                db.execute(
+                    """INSERT INTO requirement_requests
+                    (request_id, title, status, customer_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)""",
+                    (request_id, title, status, customer_json, now, now),
+                )
+                next_version = 1
+            else:
+                customer_payload = customer_json if customer is not None else current["customer_json"]
+                latest = db.execute(
+                    "SELECT MAX(version) AS version FROM requirement_versions WHERE request_id=?",
+                    (request_id,),
+                ).fetchone()
+                next_version = int(latest["version"] or 0) + 1
+                db.execute(
+                    """UPDATE requirement_requests
+                    SET title=?, status=?, customer_json=?, updated_at=? WHERE request_id=?""",
+                    (title, status, customer_payload, now, request_id),
+                )
+            db.execute(
+                """INSERT INTO requirement_versions
+                (request_id, version, source, message, requirement_json, missing_fields_json,
+                 validation_errors_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    request_id,
+                    next_version,
+                    source or "",
+                    message or "",
+                    json.dumps(normalized, ensure_ascii=False),
+                    json.dumps(missing, ensure_ascii=False),
+                    json.dumps(errors, ensure_ascii=False),
+                    now,
+                ),
+            )
+            self._record_event(db, request_id, "requirement_upserted", source, {
+                "version": next_version,
+                "status": status,
+                "missingFields": missing,
+            })
+        return self.get_requirement(request_id)
+
+    def list_requirements(self):
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM requirement_requests ORDER BY updated_at DESC"
+            ).fetchall()
+        return [self._summary(row) for row in rows]
+
+    def get_requirement(self, request_id):
+        with self.connect() as db:
+            request = db.execute(
+                "SELECT * FROM requirement_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if not request:
+                return None
+            versions = db.execute(
+                "SELECT * FROM requirement_versions WHERE request_id=? ORDER BY version",
+                (request_id,),
+            ).fetchall()
+            confirmations = db.execute(
+                "SELECT * FROM requirement_confirmations WHERE request_id=? ORDER BY created_at DESC",
+                (request_id,),
+            ).fetchall()
+            changes = db.execute(
+                "SELECT * FROM requirement_change_requests WHERE request_id=? ORDER BY created_at DESC",
+                (request_id,),
+            ).fetchall()
+            events = db.execute(
+                "SELECT * FROM requirement_events WHERE request_id=? ORDER BY created_at DESC",
+                (request_id,),
+            ).fetchall()
+        detail = self._summary(request)
+        detail["versions"] = [self._version(row) for row in versions]
+        detail["latest"] = detail["versions"][-1] if detail["versions"] else None
+        detail["confirmations"] = [self._confirmation(row) for row in confirmations]
+        detail["changeRequests"] = [self._change_request(row) for row in changes]
+        detail["events"] = [self._event(row) for row in events]
+        return detail
+
+    def record_customer_confirmation(self, request_id, customer_reply, conversation_id=""):
+        now = utc_now()
+        with self.connect() as db:
+            self._require_request(db, request_id)
+            db.execute(
+                """INSERT INTO requirement_confirmations
+                (confirmation_id, request_id, customer_reply, conversation_id, created_at)
+                VALUES (?, ?, ?, ?, ?)""",
+                (str(uuid.uuid4()), request_id, customer_reply or "", conversation_id or "", now),
+            )
+            db.execute(
+                "UPDATE requirement_requests SET status='customer_confirmed', updated_at=? WHERE request_id=?",
+                (now, request_id),
+            )
+            self._record_event(db, request_id, "customer_confirmed", "customer", {
+                "conversationId": conversation_id or "",
+            })
+        return self.get_requirement(request_id)
+
+    def create_change_request(self, request_id, customer_message="", changes=None):
+        now = utc_now()
+        with self.connect() as db:
+            self._require_request(db, request_id)
+            db.execute(
+                """INSERT INTO requirement_change_requests
+                (change_id, request_id, status, customer_message, changes_json, created_at)
+                VALUES (?, ?, 'pending_internal_review', ?, ?, ?)""",
+                (
+                    str(uuid.uuid4()),
+                    request_id,
+                    customer_message or "",
+                    json.dumps(normalize_requirement(changes or {}), ensure_ascii=False),
+                    now,
+                ),
+            )
+            db.execute(
+                "UPDATE requirement_requests SET status='change_requested', updated_at=? WHERE request_id=?",
+                (now, request_id),
+            )
+            self._record_event(db, request_id, "change_requested", "customer", {
+                "message": customer_message or "",
+            })
+        return self.get_requirement(request_id)
+
+    def mark_ready_to_create_task(self, request_id, reviewer=""):
+        return self._set_status(request_id, "ready_to_create_task", "marked_ready", reviewer)
+
+    def link_task(self, request_id, task_id):
+        if not task_id:
+            raise ValueError("task_id is required")
+        now = utc_now()
+        with self.connect() as db:
+            self._require_request(db, request_id)
+            db.execute(
+                """UPDATE requirement_requests
+                SET status='task_created', linked_task_id=?, updated_at=? WHERE request_id=?""",
+                (task_id, now, request_id),
+            )
+            self._record_event(db, request_id, "task_linked", "staff", {"taskId": task_id})
+        return self.get_requirement(request_id)
+
+    def _set_status(self, request_id, status, event_type, actor=""):
+        now = utc_now()
+        with self.connect() as db:
+            self._require_request(db, request_id)
+            db.execute(
+                "UPDATE requirement_requests SET status=?, updated_at=? WHERE request_id=?",
+                (status, now, request_id),
+            )
+            self._record_event(db, request_id, event_type, actor or "staff", {"status": status})
+        return self.get_requirement(request_id)
+
+    def _require_request(self, db, request_id):
+        row = db.execute(
+            "SELECT * FROM requirement_requests WHERE request_id=?", (request_id,)
+        ).fetchone()
+        if not row:
+            raise ValueError("Requirement request not found")
+        return row
+
+    def _record_event(self, db, request_id, event_type, actor, payload):
+        db.execute(
+            """INSERT INTO requirement_events
+            (event_id, request_id, event_type, actor, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                str(uuid.uuid4()),
+                request_id,
+                event_type,
+                actor or "",
+                json.dumps(payload or {}, ensure_ascii=False),
+                utc_now(),
+            ),
+        )
+
+    def _summary(self, row):
+        return {
+            "requestId": row["request_id"],
+            "title": row["title"],
+            "status": row["status"],
+            "customer": loads(row["customer_json"], {}),
+            "linkedTaskId": row["linked_task_id"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
+
+    def _version(self, row):
+        return {
+            "version": row["version"],
+            "source": row["source"],
+            "message": row["message"],
+            "requirement": loads(row["requirement_json"], {}),
+            "missingFields": loads(row["missing_fields_json"], []),
+            "validationErrors": loads(row["validation_errors_json"], []),
+            "createdAt": row["created_at"],
+        }
+
+    def _confirmation(self, row):
+        return {
+            "confirmationId": row["confirmation_id"],
+            "customerReply": row["customer_reply"],
+            "conversationId": row["conversation_id"],
+            "createdAt": row["created_at"],
+        }
+
+    def _change_request(self, row):
+        return {
+            "changeId": row["change_id"],
+            "status": row["status"],
+            "customerMessage": row["customer_message"],
+            "changes": loads(row["changes_json"], {}),
+            "createdAt": row["created_at"],
+        }
+
+    def _event(self, row):
+        return {
+            "eventId": row["event_id"],
+            "eventType": row["event_type"],
+            "actor": row["actor"],
+            "payload": loads(row["payload_json"], {}),
+            "createdAt": row["created_at"],
+        }
+
+
+def main():
+    if len(sys.argv) < 3:
+        raise SystemExit("usage: requirement_request_db.py DB_PATH ACTION")
+    store = RequirementStore(sys.argv[1])
+    action = sys.argv[2]
+    payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
+    if action == "upsert":
+        result = store.create_or_update_requirement(
+            customer=payload.get("customer"),
+            requirement=payload.get("requirement"),
+            message=payload.get("message", ""),
+            request_id=payload.get("requestId") or payload.get("request_id"),
+            source=payload.get("source", "dify"),
+        )
+    elif action == "list":
+        result = store.list_requirements()
+    elif action == "get":
+        result = store.get_requirement(payload.get("requestId") or payload.get("request_id"))
+    elif action == "confirm":
+        result = store.record_customer_confirmation(
+            payload.get("requestId") or payload.get("request_id"),
+            payload.get("customerReply") or payload.get("customer_reply") or "",
+            payload.get("conversationId") or payload.get("conversation_id") or "",
+        )
+    elif action == "change":
+        result = store.create_change_request(
+            payload.get("requestId") or payload.get("request_id"),
+            payload.get("customerMessage") or payload.get("customer_message") or "",
+            payload.get("changes") or {},
+        )
+    elif action == "mark_ready":
+        result = store.mark_ready_to_create_task(
+            payload.get("requestId") or payload.get("request_id"),
+            payload.get("reviewer") or "",
+        )
+    elif action == "link_task":
+        result = store.link_task(
+            payload.get("requestId") or payload.get("request_id"),
+            payload.get("taskId") or payload.get("task_id"),
+        )
+    else:
+        raise SystemExit("unknown action: %s" % action)
+    print(json.dumps(result, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

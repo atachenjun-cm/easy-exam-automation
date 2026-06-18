@@ -2398,7 +2398,19 @@
           <div class="panel"><div class="panel-head"><h2 class="panel-title">快捷操作与执行日志</h2></div><div class="panel-body"><div class="view-actions"><button class="btn" id="examContinueBtn" type="button">继续</button><button class="btn" id="examRefreshBtn" type="button">刷新状态</button></div><div class="log-list" id="examExecutionLogs" style="margin-top:12px;"></div></div></div>
         </section>
 
-        <section class="task-view" id="requirementsView" hidden><div class="view-heading"><div><h1>需求单记录</h1><p class="subtitle">查看已持久化项目关联的需求单记录。</p></div></div><div class="project-grid" id="requirementsList"></div></section>
+        <section class="task-view" id="requirementsView" hidden>
+          <div class="view-heading"><div><h1>需求单记录</h1><p class="subtitle">查看 Dify 收集并持久化的考试服务需求。</p></div><button class="btn" id="refreshRequirementsBtn" type="button">刷新</button></div>
+          <div class="project-grid" id="requirementsList"></div>
+        </section>
+
+        <section class="task-view" id="requirementDetailView" hidden>
+          <div class="view-heading"><div><button class="btn" id="backToRequirementsBtn" type="button">返回</button><h1 style="margin-top:12px;">需求详情</h1><p class="subtitle" id="requirementDetailSubtitle"></p></div><div class="view-actions"><button class="btn" id="refreshRequirementBtn" type="button">刷新</button></div></div>
+          <div class="task-overview" id="requirementOverview"></div>
+          <div class="panel"><div class="panel-head"><h2 class="panel-title">最新需求</h2></div><div class="panel-body" id="requirementLatest"></div></div>
+          <div class="panel"><div class="panel-head"><h2 class="panel-title">缺失项与校验</h2></div><div class="panel-body" id="requirementIssues"></div></div>
+          <div class="panel"><div class="panel-head"><h2 class="panel-title">确认与变更记录</h2></div><div class="panel-body"><div class="log-list" id="requirementAuditTrail"></div></div></div>
+          <div class="panel"><div class="panel-head"><h2 class="panel-title">人工审核动作</h2></div><div class="panel-body"><div class="settings-grid"><label class="field"><span class="field-label">执行任务编号</span><input class="field-input" id="requirementTaskIdInput" placeholder="粘贴已创建的任务编号" /></label><label class="field"><span class="field-label">审核人</span><input class="field-input" id="requirementReviewerInput" placeholder="admin-op" /></label></div><div class="view-actions" style="margin-top:12px;"><button class="btn primary" id="requirementMarkReadyBtn" type="button">标记可创建任务</button><button class="btn" id="requirementLinkTaskBtn" type="button">绑定任务</button></div><div class="task-meta" id="requirementActionState" style="margin-top:8px;"></div></div></div>
+        </section>
         <section class="task-view" id="templatesView" hidden><div class="view-heading"><div><h1>配置模板</h1><p class="subtitle">管理考试配置模板。</p></div></div><div class="panel"><div class="panel-body"><div class="empty-state">暂无已保存配置模板</div></div></div></section>
         <section class="task-view" id="logsView" hidden><div class="view-heading"><div><h1>执行日志</h1><p class="subtitle">汇总展示已持久化的项目步骤日志。</p></div></div><div class="log-list" id="allTaskLogs"></div></section>
       </main>
@@ -2432,6 +2444,8 @@
       import { ExamListPage } from "/web/pages/ExamListPage.mjs";
       import { ProjectDetailPage } from "/web/pages/ProjectDetailPage.mjs";
       import { ProjectListPage } from "/web/pages/ProjectListPage.mjs";
+      import { RequirementDetailPage } from "/web/pages/RequirementDetailPage.mjs";
+      import { RequirementListPage } from "/web/pages/RequirementListPage.mjs";
 
       const runtime = {
         apiBase: window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "",
@@ -2486,6 +2500,7 @@
       const examListView = document.querySelector("#examListView");
       const taskDetailView = document.querySelector("#taskDetailView");
       const requirementsView = document.querySelector("#requirementsView");
+      const requirementDetailView = document.querySelector("#requirementDetailView");
       const templatesView = document.querySelector("#templatesView");
       const logsView = document.querySelector("#logsView");
       const projectGrid = document.querySelector("#projectGrid");
@@ -2500,8 +2515,11 @@
       const refreshProjectsBtn = document.querySelector("#refreshProjectsBtn");
       const refreshExamsBtn = document.querySelector("#refreshExamsBtn");
       const refreshTaskBtn = document.querySelector("#refreshTaskBtn");
+      const refreshRequirementsBtn = document.querySelector("#refreshRequirementsBtn");
+      const refreshRequirementBtn = document.querySelector("#refreshRequirementBtn");
       const backToExamsBtn = document.querySelector("#backToExamsBtn");
       const backToProjectsBtn = document.querySelector("#backToProjectsBtn");
+      const backToRequirementsBtn = document.querySelector("#backToRequirementsBtn");
       const projectAutoConfigBtn = document.querySelector("#projectAutoConfigBtn");
       const newProjectBtn = document.querySelector("#newProjectBtn");
       const projectSearchInput = document.querySelector("#projectSearchInput");
@@ -2512,6 +2530,16 @@
       const projectDetailSessionRows = document.querySelector("#projectDetailSessionRows");
       const projectLogs = document.querySelector("#projectLogs");
       const requirementsList = document.querySelector("#requirementsList");
+      const requirementDetailSubtitle = document.querySelector("#requirementDetailSubtitle");
+      const requirementOverview = document.querySelector("#requirementOverview");
+      const requirementLatest = document.querySelector("#requirementLatest");
+      const requirementIssues = document.querySelector("#requirementIssues");
+      const requirementAuditTrail = document.querySelector("#requirementAuditTrail");
+      const requirementTaskIdInput = document.querySelector("#requirementTaskIdInput");
+      const requirementReviewerInput = document.querySelector("#requirementReviewerInput");
+      const requirementMarkReadyBtn = document.querySelector("#requirementMarkReadyBtn");
+      const requirementLinkTaskBtn = document.querySelector("#requirementLinkTaskBtn");
+      const requirementActionState = document.querySelector("#requirementActionState");
       const allTaskLogs = document.querySelector("#allTaskLogs");
       const examExecutionLogs = document.querySelector("#examExecutionLogs");
       const examContinueBtn = document.querySelector("#examContinueBtn");
@@ -2545,6 +2573,9 @@
       const taskStatusLabels = {
         pending: "未开始", running: "进行中", success: "已完成", failed: "失败",
         waiting_manual: "待人工确认", skipped: "已跳过",
+        collecting: "收集中", pending_internal_review: "待内部审核",
+        customer_confirmed: "客户已确认", ready_to_create_task: "可创建任务",
+        task_created: "已绑定任务", change_requested: "客户变更",
       };
 
       function safeText(value) {
@@ -2568,7 +2599,7 @@
         return `<span class="status-chip ${safeText(status)}">${taskStatusLabels[status] || safeText(status)}</span>`;
       }
 
-      const taskViewState = { tasks: [], sessions: [], currentTaskId: "", currentProjectId: "" };
+      const taskViewState = { tasks: [], sessions: [], requirements: [], currentTaskId: "", currentProjectId: "", currentRequirementId: "" };
 
       async function fetchJson(url, options) {
         const response = await fetch(`${runtime.apiBase}${url}`, { cache: "no-store", ...options });
@@ -2696,8 +2727,51 @@
       }
 
       async function loadRequirements() {
-        const data = await fetchJson(`/api/tasks?_=${Date.now()}`);
-        requirementsList.innerHTML = (data.tasks || []).length ? data.tasks.map((task) => `<article class="project-card"><div class="project-title">${safeText(task.projectName)}</div><div class="task-meta">任务编号：${safeText(task.taskId)}<br>来源账号：${safeText(task.sourceAccount || "未记录")}<br>导入时间：${formatTaskTime(task.createdAt)}</div></article>`).join("") : `<div class="empty-state">暂无需求单记录</div>`;
+        const data = await fetchJson(`/api/requirements?_=${Date.now()}`);
+        taskViewState.requirements = data.requirements || [];
+        requirementsList.innerHTML = taskViewState.requirements.length ? taskViewState.requirements.map((item) => `<article class="project-card requirement-card" data-request-id="${safeText(item.requestId)}">
+          <div class="project-card-head"><div><div class="project-title">${safeText(item.title)}</div><div class="task-meta">需求编号：${safeText(item.requestId)}<br>客户：${safeText(item.customer?.name || item.customer?.contact || "未记录")}<br>更新时间：${formatTaskTime(item.updatedAt)}</div></div>${statusChip(item.status)}</div>
+          <div class="task-meta" style="margin-top:10px;">绑定任务：${safeText(item.linkedTaskId || "未绑定")}</div>
+          <div class="view-actions" style="margin-top:12px;"><button class="btn requirement-action" data-action="view" type="button">查看</button></div>
+        </article>`).join("") : `<div class="empty-state">暂无需求单记录</div>`;
+      }
+
+      function renderRequirementLatest(requirement) {
+        const latest = requirement.latest || {};
+        const payload = latest.requirement || {};
+        const subjects = Array.isArray(payload.subjects) ? payload.subjects.join("、") : (payload.subjects || "--");
+        requirementLatest.innerHTML = `<div class="task-overview-grid">
+          <div><div class="task-overview-label">考试名称</div><div class="task-overview-value">${safeText(payload.exam_name || "--")}</div></div>
+          <div><div class="task-overview-label">考试时间</div><div class="task-overview-value">${safeText(payload.formal_exam_time_range || "--")}</div></div>
+          <div><div class="task-overview-label">提前登录</div><div class="task-overview-value">${safeText(payload.early_login_minutes ?? "--")} 分钟</div></div>
+          <div><div class="task-overview-label">限制迟到</div><div class="task-overview-value">${safeText(payload.late_limit_minutes ?? "--")} 分钟</div></div>
+          <div><div class="task-overview-label">考试类型</div><div class="task-overview-value">${payload.exam_client_type === "web" ? "网页考试" : safeText(payload.exam_client_type || "--")}</div></div>
+          <div><div class="task-overview-label">科目</div><div class="task-overview-value">${safeText(subjects)}</div></div>
+        </div>`;
+      }
+
+      function renderRequirementDetail(requirement) {
+        taskViewState.currentRequirementId = requirement.requestId;
+        requirementDetailSubtitle.textContent = requirement.title || requirement.requestId;
+        requirementTaskIdInput.value = requirement.linkedTaskId || "";
+        requirementOverview.innerHTML = `<div class="task-summary"><div><div class="project-title">${safeText(requirement.title)}</div><div class="task-meta">需求编号：${safeText(requirement.requestId)}<br>客户：${safeText(requirement.customer?.name || requirement.customer?.contact || "未记录")}<br>更新时间：${formatTaskTime(requirement.updatedAt)}</div></div>${statusChip(requirement.status)}</div>`;
+        renderRequirementLatest(requirement);
+        const latest = requirement.latest || {};
+        const missing = latest.missingFields || [];
+        const errors = latest.validationErrors || [];
+        requirementIssues.innerHTML = missing.length || errors.length
+          ? `<div class="log-list">${missing.map((field) => `<div class="log"><div>缺失字段：${safeText(field)}</div></div>`).join("")}${errors.map((item) => `<div class="log warn"><div>${safeText(item.field)}：${safeText(item.message)}</div></div>`).join("")}</div>`
+          : `<div class="empty-state">当前版本没有缺失项</div>`;
+        const confirmations = (requirement.confirmations || []).map((item) => ({ type: "客户确认", message: item.customerReply, time: item.createdAt }));
+        const changes = (requirement.changeRequests || []).map((item) => ({ type: "变更请求", message: item.customerMessage, time: item.createdAt }));
+        const events = (requirement.events || []).map((item) => ({ type: item.eventType, message: JSON.stringify(item.payload || {}), time: item.createdAt }));
+        const audit = [...confirmations, ...changes, ...events].sort((a, b) => String(b.time).localeCompare(String(a.time)));
+        requirementAuditTrail.innerHTML = audit.length ? audit.map((item) => `<div class="log"><div>[${safeText(item.type)}] ${safeText(item.message || "--")}</div><div class="log-time">${formatTaskTime(item.time)}</div></div>`).join("") : `<div class="empty-state">暂无确认或变更记录</div>`;
+      }
+
+      async function loadRequirementDetail(requestId) {
+        const requirement = await fetchJson(`/api/requirements/${encodeURIComponent(requestId)}?_=${Date.now()}`);
+        renderRequirementDetail(requirement);
       }
 
       async function loadAllTaskLogs() {
@@ -3877,7 +3951,8 @@
         ExamListPage({ root: examListView, loadExams }),
         ExamDetailPage({ root: taskDetailView, loadExam: openTaskDetail }),
         CandidateImportPage({ root: candidateImportPanel }),
-        staticPage("requirements", requirementsView, loadRequirements),
+        RequirementListPage({ root: requirementsView, loadRequirements }),
+        RequirementDetailPage({ root: requirementDetailView, loadRequirement: loadRequirementDetail }),
         staticPage("templates", templatesView),
         staticPage("logs", logsView, loadAllTaskLogs),
         staticPage("not-found", projectManagementView, loadProjects),
@@ -3909,8 +3984,11 @@
       refreshProjectsBtn.addEventListener("click", () => loadProjects().catch((error) => { projectGrid.innerHTML = `<div class="empty-state">${safeText(error.message)}</div>`; }));
       refreshExamsBtn.addEventListener("click", () => loadExams().catch((error) => { examListRows.innerHTML = `<tr><td colspan="9">${safeText(error.message)}</td></tr>`; }));
       refreshTaskBtn.addEventListener("click", () => taskViewState.currentTaskId && openTaskDetail(taskViewState.currentTaskId));
+      refreshRequirementsBtn.addEventListener("click", () => loadRequirements().catch((error) => { requirementsList.innerHTML = `<div class="empty-state">${safeText(error.message)}</div>`; }));
+      refreshRequirementBtn.addEventListener("click", () => taskViewState.currentRequirementId && loadRequirementDetail(taskViewState.currentRequirementId));
       backToExamsBtn.addEventListener("click", () => router.navigate("/exams"));
       backToProjectsBtn.addEventListener("click", () => router.navigate("/projects"));
+      backToRequirementsBtn.addEventListener("click", () => router.navigate("/requirements"));
       newProjectBtn.addEventListener("click", () => router.navigate("/auto-config"));
       projectAutoConfigBtn.addEventListener("click", () => router.navigate(`/auto-config?projectId=${encodeURIComponent(taskViewState.currentProjectId)}`));
       projectSearchInput.addEventListener("input", renderProjectList);
@@ -3925,6 +4003,40 @@
         if (action === "edit") return alert("项目编辑将在独立表单中接入，不会打开自动配置组件。");
         if (action === "archive") return alert("归档操作尚未接入持久化 API。");
         return router.navigate(`/projects/${encodeURIComponent(card.dataset.taskId)}`);
+      });
+      requirementsList.addEventListener("click", (event) => {
+        const card = event.target.closest("[data-request-id]");
+        if (card) return router.navigate(`/requirements/${encodeURIComponent(card.dataset.requestId)}`);
+      });
+      requirementMarkReadyBtn.addEventListener("click", async () => {
+        if (!taskViewState.currentRequirementId) return;
+        try {
+          requirementActionState.textContent = "正在标记...";
+          const result = await fetchJson(`/api/requirements/${encodeURIComponent(taskViewState.currentRequirementId)}/mark-ready`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reviewer: requirementReviewerInput.value || "admin-op" }),
+          });
+          renderRequirementDetail(result.requirement);
+          requirementActionState.textContent = "已标记为可创建任务";
+        } catch (error) {
+          requirementActionState.textContent = error.message || String(error);
+        }
+      });
+      requirementLinkTaskBtn.addEventListener("click", async () => {
+        if (!taskViewState.currentRequirementId) return;
+        try {
+          requirementActionState.textContent = "正在绑定...";
+          const result = await fetchJson(`/api/requirements/${encodeURIComponent(taskViewState.currentRequirementId)}/link-task`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ taskId: requirementTaskIdInput.value }),
+          });
+          renderRequirementDetail(result.requirement);
+          requirementActionState.textContent = "已绑定任务";
+        } catch (error) {
+          requirementActionState.textContent = error.message || String(error);
+        }
       });
       examListRows.addEventListener("click", (event) => {
         const button = event.target.closest(".task-detail-btn");
