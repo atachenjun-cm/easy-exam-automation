@@ -2472,12 +2472,19 @@
       const projectNavBtn = document.querySelector("#projectNavBtn");
       const examNavBtn = document.querySelector("#examNavBtn");
       const candidateNavBtn = document.querySelector("#candidateNavBtn");
+      const requirementsNavBtn = document.querySelector("#requirementsNavBtn");
+      const templatesNavBtn = document.querySelector("#templatesNavBtn");
+      const logsNavBtn = document.querySelector("#logsNavBtn");
       const autoTopbar = document.querySelector("#autoTopbar");
       const autoConfigStack = document.querySelector("#autoConfigStack");
       const candidateImportPanel = document.querySelector("#candidateImportPanel");
       const projectManagementView = document.querySelector("#projectManagementView");
+      const projectDetailView = document.querySelector("#projectDetailView");
       const examListView = document.querySelector("#examListView");
       const taskDetailView = document.querySelector("#taskDetailView");
+      const requirementsView = document.querySelector("#requirementsView");
+      const templatesView = document.querySelector("#templatesView");
+      const logsView = document.querySelector("#logsView");
       const projectGrid = document.querySelector("#projectGrid");
       const examListRows = document.querySelector("#examListRows");
       const taskOverview = document.querySelector("#taskOverview");
@@ -2488,6 +2495,21 @@
       const refreshExamsBtn = document.querySelector("#refreshExamsBtn");
       const refreshTaskBtn = document.querySelector("#refreshTaskBtn");
       const backToExamsBtn = document.querySelector("#backToExamsBtn");
+      const backToProjectsBtn = document.querySelector("#backToProjectsBtn");
+      const projectAutoConfigBtn = document.querySelector("#projectAutoConfigBtn");
+      const newProjectBtn = document.querySelector("#newProjectBtn");
+      const projectSearchInput = document.querySelector("#projectSearchInput");
+      const projectStatusFilter = document.querySelector("#projectStatusFilter");
+      const projectStats = document.querySelector("#projectStats");
+      const projectDetailOverview = document.querySelector("#projectDetailOverview");
+      const projectDetailSubtitle = document.querySelector("#projectDetailSubtitle");
+      const projectDetailSessionRows = document.querySelector("#projectDetailSessionRows");
+      const projectLogs = document.querySelector("#projectLogs");
+      const requirementsList = document.querySelector("#requirementsList");
+      const allTaskLogs = document.querySelector("#allTaskLogs");
+      const examExecutionLogs = document.querySelector("#examExecutionLogs");
+      const examContinueBtn = document.querySelector("#examContinueBtn");
+      const examRefreshBtn = document.querySelector("#examRefreshBtn");
       const candidateState = document.querySelector("#candidateState");
       const candidateFileInput = document.querySelector("#candidateFileInput");
       const candidateDropZone = document.querySelector("#candidateDropZone");
@@ -2513,37 +2535,6 @@
       const monitorAccountRows = document.querySelector("#monitorAccountRows");
       const monitorAccountDownloadBtn = document.querySelector("#monitorAccountDownloadBtn");
       const candidateLogList = document.querySelector("#candidateLogList");
-
-      let currentView = "auto";
-
-      function setActiveNav(section) {
-        autoNavItem.classList.toggle("active", section === "auto");
-        candidateNavBtn.classList.toggle("active", section === "candidate");
-        projectNavBtn.classList.toggle("active", section === "projects");
-        examNavBtn.classList.toggle("active", section === "exams" || section === "task");
-      }
-
-      function showView(section) {
-        currentView = section;
-        const isAuto = section === "auto";
-        const isCandidate = section === "candidate";
-        autoTopbar.hidden = !(isAuto || isCandidate);
-        autoConfigStack.hidden = !isAuto;
-        candidateImportPanel.hidden = !isCandidate;
-        projectManagementView.hidden = section !== "projects";
-        examListView.hidden = section !== "exams";
-        taskDetailView.hidden = section !== "task";
-        setActiveNav(section);
-        window.scrollTo({ top: 0, behavior: "instant" });
-      }
-
-      function syncActiveNavByScroll() {
-        if (!(["auto", "candidate"].includes(currentView))) return;
-        const rect = candidateImportPanel.getBoundingClientRect();
-        const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-        const candidateInView = rect.top < viewportHeight * 0.55 && rect.bottom > viewportHeight * 0.25;
-        setActiveNav(candidateInView ? "candidate" : "auto");
-      }
 
       const taskStatusLabels = {
         pending: "未开始", running: "进行中", success: "已完成", failed: "失败",
@@ -2571,7 +2562,7 @@
         return `<span class="status-chip ${safeText(status)}">${taskStatusLabels[status] || safeText(status)}</span>`;
       }
 
-      const taskViewState = { tasks: [], sessions: [], currentTaskId: "" };
+      const taskViewState = { tasks: [], sessions: [], currentTaskId: "", currentProjectId: "" };
 
       async function fetchJson(url, options) {
         const response = await fetch(`${runtime.apiBase}${url}`, { cache: "no-store", ...options });
@@ -2580,17 +2571,39 @@
         return data;
       }
 
+      function renderProjectList() {
+        const query = String(projectSearchInput.value || "").trim().toLowerCase();
+        const status = projectStatusFilter.value;
+        const projects = taskViewState.tasks.filter((task) => {
+          const searchable = `${task.projectName || ""} ${task.customerName || ""} ${task.sourceAccount || ""}`.toLowerCase();
+          return (!query || searchable.includes(query)) && (!status || task.status === status);
+        });
+        const completed = taskViewState.tasks.filter((task) => task.status === "success").length;
+        const active = taskViewState.tasks.filter((task) => ["running", "waiting_manual"].includes(task.status)).length;
+        projectStats.innerHTML = `<div class="task-summary"><div><div class="project-title">项目状态统计</div><div class="task-meta">项目总数 ${taskViewState.tasks.length} · 进行/待处理 ${active} · 已完成 ${completed}</div></div></div>`;
+        projectGrid.innerHTML = projects.length
+          ? projects.map((task) => {
+              const sessions = task.sessions || [];
+              const formalCount = sessions.filter((session) => session.sessionType === "formal").length;
+              const trialCount = sessions.filter((session) => session.sessionType === "trial").length;
+              return `<article class="project-card" data-task-id="${safeText(task.taskId)}">
+                <div class="project-card-head"><div><div class="project-title">${safeText(task.projectName)}</div><div class="task-meta">客户名称：${safeText(task.customerName || "未记录")}<br>来源账号：${safeText(task.sourceAccount || "未记录")}<br>考试任务：1 · 正式场次：${formalCount} · 试考场次：${trialCount}<br>更新时间：${formatTaskTime(task.updatedAt)}</div></div>${statusChip(task.status)}</div>
+                <div class="mini-progress"><span style="width:${Math.max(0, Math.min(100, Number(task.progress || 0)))}%"></span></div>
+                <div class="task-meta" style="margin-top:7px;">当前进度 ${Number(task.progress || 0).toFixed(1)}%</div>
+                <div class="view-actions" style="margin-top:12px;"><button class="btn project-action" data-action="view" type="button">查看</button><button class="btn project-action" data-action="edit" type="button">编辑</button><button class="btn project-action" data-action="auto" type="button">进入自动配置</button><button class="btn project-action" data-action="archive" type="button">归档</button></div>
+              </article>`;
+            }).join("")
+          : `<div class="empty-state">暂无匹配项目</div>`;
+      }
+
       async function loadProjects() {
         const data = await fetchJson(`/api/tasks?_=${Date.now()}`);
-        taskViewState.tasks = data.tasks || [];
-        projectGrid.innerHTML = taskViewState.tasks.length
-          ? taskViewState.tasks.map((task) => `
-              <article class="project-card" data-task-id="${safeText(task.taskId)}">
-                <div class="project-card-head"><div><div class="project-title">${safeText(task.projectName)}</div><div class="task-meta">来源账号：${safeText(task.sourceAccount || "未记录")}<br>更新时间：${formatTaskTime(task.updatedAt)}<br>当前阶段：${safeText(task.currentStage || "等待执行")}</div></div>${statusChip(task.status)}</div>
-                <div class="mini-progress"><span style="width:${Math.max(0, Math.min(100, Number(task.progress || 0)))}%"></span></div>
-                <div class="task-meta" style="margin-top:7px;">整体进度 ${Number(task.progress || 0).toFixed(1)}%</div>
-              </article>`).join("")
-          : `<div class="empty-state">暂无项目记录。导入需求单后会自动建立项目。</div>`;
+        const summaries = data.tasks || [];
+        taskViewState.tasks = await Promise.all(summaries.map(async (task) => {
+          try { return await fetchJson(`/api/tasks/${encodeURIComponent(task.taskId)}?_=${Date.now()}`); }
+          catch { return task; }
+        }));
+        renderProjectList();
       }
 
       async function loadExams() {
@@ -2637,12 +2650,42 @@
             <div class="task-step-detail">${subHtml}${step.errorMessage ? `<div style="color:#c62828;margin-top:8px;">${safeText(step.errorMessage)}</div>` : ""}<div style="margin-top:8px;">${safeText(logs)}</div>${step.status === "failed" || (step.stepKey === "paper_bind" && step.status === "waiting_manual") ? `<button class="retry-step" data-retry-step="${safeText(step.stepKey)}" type="button">${step.stepKey === "paper_bind" && step.status === "waiting_manual" ? "继续绑定" : "重试此步骤"}</button>` : ""}</div>
           </article>`;
         }).join("");
+        const stepLogs = (task.steps || []).flatMap((step) => (step.logs || []).map((log) => ({ ...log, stepName: step.stepName })));
+        examExecutionLogs.innerHTML = stepLogs.length ? stepLogs.map((log) => `<div class="log"><div>[${safeText(log.stepName)}] ${safeText(log.message)}</div><div class="log-time">${formatTaskTime(log.time)}</div></div>`).join("") : `<div class="empty-state">暂无执行日志</div>`;
       }
 
       async function openTaskDetail(taskId) {
         const task = await fetchJson(`/api/tasks/${encodeURIComponent(taskId)}?_=${Date.now()}`);
         renderTaskDetail(task);
-        showView("task");
+      }
+
+      function renderProjectDetail(task) {
+        taskViewState.currentProjectId = task.taskId;
+        projectDetailSubtitle.textContent = task.projectName || "";
+        const sessions = task.sessions || [];
+        const candidates = sessions.reduce((sum, session) => sum + Number(session.candidateCount || 0), 0);
+        const rooms = sessions.reduce((sum, session) => sum + Number(session.roomCount || 0), 0);
+        projectDetailOverview.innerHTML = `<div class="task-summary"><div><div class="project-title">${safeText(task.projectName)}</div>${statusChip(task.status)}</div><div class="task-progress-value">${Number(task.progress || 0).toFixed(1)}%</div></div><div class="task-overview-grid"><div><div class="task-overview-label">项目编号</div><div class="task-overview-value">${safeText(task.taskId)}</div></div><div><div class="task-overview-label">来源账号</div><div class="task-overview-value">${safeText(task.sourceAccount || "未记录")}</div></div><div><div class="task-overview-label">考生总数</div><div class="task-overview-value">${candidates}</div></div><div><div class="task-overview-label">班级总数</div><div class="task-overview-value">${rooms}</div></div><div><div class="task-overview-label">更新时间</div><div class="task-overview-value">${formatTaskTime(task.updatedAt)}</div></div></div>`;
+        projectDetailSessionRows.innerHTML = sessions.length ? sessions.map((session) => `<tr><td>${session.sessionType === "formal" ? "正式考试" : "试考"}</td><td>${safeText(session.name)}</td><td>${safeText(session.session_id || "--")}</td><td>${safeText(session.start || "--")} ~ ${safeText(session.end || "--")}</td><td>${Number(session.candidateCount || 0)}</td><td>${Number(session.roomCount || 0)}</td><td>${statusChip(session.status)}</td></tr>`).join("") : `<tr><td colspan="7">尚未创建场次</td></tr>`;
+        const logs = (task.steps || []).flatMap((step) => (step.logs || []).map((log) => ({ ...log, stepName: step.stepName })));
+        projectLogs.innerHTML = logs.length ? logs.map((log) => `<div class="log"><div>[${safeText(log.stepName)}] ${safeText(log.message)}</div><div class="log-time">${formatTaskTime(log.time)}</div></div>`).join("") : `<div class="empty-state">暂无项目日志</div>`;
+      }
+
+      async function loadProjectDetail(projectId) {
+        const task = await fetchJson(`/api/tasks/${encodeURIComponent(projectId)}?_=${Date.now()}`);
+        renderProjectDetail(task);
+      }
+
+      async function loadRequirements() {
+        const data = await fetchJson(`/api/tasks?_=${Date.now()}`);
+        requirementsList.innerHTML = (data.tasks || []).length ? data.tasks.map((task) => `<article class="project-card"><div class="project-title">${safeText(task.projectName)}</div><div class="task-meta">任务编号：${safeText(task.taskId)}<br>来源账号：${safeText(task.sourceAccount || "未记录")}<br>导入时间：${formatTaskTime(task.createdAt)}</div></article>`).join("") : `<div class="empty-state">暂无需求单记录</div>`;
+      }
+
+      async function loadAllTaskLogs() {
+        const data = await fetchJson(`/api/tasks?_=${Date.now()}`);
+        const details = await Promise.all((data.tasks || []).map((task) => fetchJson(`/api/tasks/${encodeURIComponent(task.taskId)}?_=${Date.now()}`)));
+        const logs = details.flatMap((task) => (task.steps || []).flatMap((step) => (step.logs || []).map((log) => ({ ...log, projectName: task.projectName, stepName: step.stepName }))));
+        allTaskLogs.innerHTML = logs.length ? logs.map((log) => `<div class="log"><div>[${safeText(log.projectName)} / ${safeText(log.stepName)}] ${safeText(log.message)}</div><div class="log-time">${formatTaskTime(log.time)}</div></div>`).join("") : `<div class="empty-state">暂无已持久化日志</div>`;
       }
 
       const demoData = {
@@ -3806,30 +3849,73 @@
         }
       });
 
-      candidateNavBtn.addEventListener("click", () => {
-        showView("candidate");
+      const staticPage = (name, root, enter = async () => {}) => ({ name, roots: [root], enter });
+      let activeRoute = null;
+      const pages = [
+        ProjectListPage({ root: projectManagementView, loadProjects }),
+        ProjectDetailPage({ root: projectDetailView, loadProject: loadProjectDetail }),
+        AutoConfigPage({ documentObject: document }),
+        ExamListPage({ root: examListView, loadExams }),
+        ExamDetailPage({ root: taskDetailView, loadExam: openTaskDetail }),
+        CandidateImportPage({ root: candidateImportPanel }),
+        staticPage("requirements", requirementsView, loadRequirements),
+        staticPage("templates", templatesView),
+        staticPage("logs", logsView, loadAllTaskLogs),
+        staticPage("not-found", projectManagementView, loadProjects),
+      ];
+      const menuElements = [
+        { key: "projects", element: projectNavBtn },
+        { key: "exams", element: examNavBtn },
+        { key: "auto-config", element: autoNavItem },
+        { key: "candidate-import", element: candidateNavBtn },
+        { key: "requirements", element: requirementsNavBtn },
+        { key: "templates", element: templatesNavBtn },
+        { key: "logs", element: logsNavBtn },
+      ];
+      const appLayout = AppLayout({ pages, menuElements });
+      const router = createRouter({
+        onRoute: async (route) => {
+          activeRoute = route;
+          await appLayout.render(route);
+        },
       });
 
-      autoNavItem.addEventListener("click", () => showView("auto"));
-      projectNavBtn.addEventListener("click", async () => {
-        showView("projects");
-        try { await loadProjects(); } catch (error) { projectGrid.innerHTML = `<div class="empty-state">${safeText(error.message)}</div>`; }
-      });
-      examNavBtn.addEventListener("click", async () => {
-        showView("exams");
-        try { await loadExams(); } catch (error) { examListRows.innerHTML = `<tr><td colspan="9">${safeText(error.message)}</td></tr>`; }
-      });
+      candidateNavBtn.addEventListener("click", () => router.navigate("/candidate-import"));
+      autoNavItem.addEventListener("click", () => router.navigate("/auto-config"));
+      projectNavBtn.addEventListener("click", () => router.navigate("/projects"));
+      examNavBtn.addEventListener("click", () => router.navigate("/exams"));
+      requirementsNavBtn.addEventListener("click", () => router.navigate("/requirements"));
+      templatesNavBtn.addEventListener("click", () => router.navigate("/templates"));
+      logsNavBtn.addEventListener("click", () => router.navigate("/logs"));
       refreshProjectsBtn.addEventListener("click", () => loadProjects().catch((error) => { projectGrid.innerHTML = `<div class="empty-state">${safeText(error.message)}</div>`; }));
       refreshExamsBtn.addEventListener("click", () => loadExams().catch((error) => { examListRows.innerHTML = `<tr><td colspan="9">${safeText(error.message)}</td></tr>`; }));
       refreshTaskBtn.addEventListener("click", () => taskViewState.currentTaskId && openTaskDetail(taskViewState.currentTaskId));
-      backToExamsBtn.addEventListener("click", async () => { showView("exams"); await loadExams(); });
+      backToExamsBtn.addEventListener("click", () => router.navigate("/exams"));
+      backToProjectsBtn.addEventListener("click", () => router.navigate("/projects"));
+      newProjectBtn.addEventListener("click", () => router.navigate("/auto-config"));
+      projectAutoConfigBtn.addEventListener("click", () => router.navigate(`/auto-config?projectId=${encodeURIComponent(taskViewState.currentProjectId)}`));
+      projectSearchInput.addEventListener("input", renderProjectList);
+      projectStatusFilter.addEventListener("change", renderProjectList);
       projectGrid.addEventListener("click", (event) => {
         const card = event.target.closest("[data-task-id]");
-        if (card) openTaskDetail(card.dataset.taskId).catch((error) => alert(error.message));
+        if (!card) return;
+        const action = event.target.closest("[data-action]")?.dataset.action || "view";
+        if (action === "auto") return router.navigate(`/auto-config?projectId=${encodeURIComponent(card.dataset.taskId)}`);
+        if (action === "edit") return alert("项目编辑将在独立表单中接入，不会打开自动配置组件。");
+        if (action === "archive") return alert("归档操作尚未接入持久化 API。");
+        return router.navigate(`/projects/${encodeURIComponent(card.dataset.taskId)}`);
       });
       examListRows.addEventListener("click", (event) => {
         const button = event.target.closest(".task-detail-btn");
-        if (button) openTaskDetail(button.dataset.taskId).catch((error) => alert(error.message));
+        if (button) router.navigate(`/exams/${encodeURIComponent(button.dataset.taskId)}`);
+      });
+      examRefreshBtn.addEventListener("click", () => taskViewState.currentTaskId && openTaskDetail(taskViewState.currentTaskId));
+      examContinueBtn.addEventListener("click", async () => {
+        if (!taskViewState.currentTaskId) return;
+        try {
+          const task = await fetchJson(`/api/tasks/${encodeURIComponent(taskViewState.currentTaskId)}/steps/paper_bind/retry`, { method: "POST" });
+          renderTaskDetail(task);
+        } catch (error) { alert(error.message); }
       });
       taskStepGrid.addEventListener("click", async (event) => {
         const retry = event.target.closest("[data-retry-step]");
@@ -3844,9 +3930,6 @@
         const card = event.target.closest(".task-step-card");
         if (card) card.classList.toggle("open");
       });
-
-      window.addEventListener("scroll", syncActiveNavByScroll, { passive: true });
-      window.addEventListener("resize", syncActiveNavByScroll);
 
       captureGrid.addEventListener("click", (event) => {
         const card = event.target.closest("[data-shot]");
@@ -4025,8 +4108,8 @@
       renderSessions();
       renderSelectedSession();
       renderRoomAssignResult();
-      showView("auto");
       loadSettings().catch((error) => addLog(error.message || String(error), "warn"));
+      await router.start();
     </script>
   </body>
 </html>

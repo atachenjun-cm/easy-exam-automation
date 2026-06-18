@@ -20,9 +20,10 @@ test("navigation orders project management, exam list, then auto configuration",
   assert.ok(projectIndex < examIndex && examIndex < autoIndex);
 });
 
-test("project and exam views explicitly hide auto configuration content", () => {
-  assert.ok(html.includes("autoTopbar.hidden = !(isAuto || isCandidate)"));
-  assert.ok(html.includes("autoConfigStack.hidden = !isAuto"));
-  assert.ok(html.includes('projectManagementView.hidden = section !== "projects"'));
-  assert.ok(html.includes('examListView.hidden = section !== "exams"'));
+test("URL page layout replaces shared showView content switching", () => {
+  assert.ok(html.includes('import { createRouter } from "/web/router.mjs"'));
+  assert.ok(html.includes("ProjectListPage({ root: projectManagementView"));
+  assert.ok(html.includes("ExamListPage({ root: examListView"));
+  assert.equal(html.includes("function showView"), false);
+  assert.equal(html.includes("syncActiveNavByScroll"), false);
 });
