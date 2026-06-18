@@ -101,11 +101,75 @@ class RequirementStoreTest(unittest.TestCase):
 
         self.store.record_customer_confirmation(request_id, "确认变更后的版本")
         ready = self.store.mark_ready_to_create_task(request_id, reviewer="admin-op")
-        self.assertEqual(ready["status"], "ready_to_create_task")
+        self.assertEqual(ready["status"], "ready_for_manual_execution")
 
         linked = self.store.link_task(request_id, task_id="task-10001")
-        self.assertEqual(linked["status"], "task_created")
+        self.assertEqual(linked["status"], "linked_to_execution_task")
         self.assertEqual(linked["linkedTaskId"], "task-10001")
+
+    def test_review_gate_requires_staff_review_after_customer_confirmation(self):
+        created = self.store.create_or_update_requirement(requirement=complete_requirement())
+        request_id = created["requestId"]
+
+        with self.assertRaises(ValueError):
+            self.store.mark_ready_for_manual_execution(request_id, reviewer="ops-a")
+
+        confirmed = self.store.record_customer_confirmation(
+            request_id,
+            customer_reply="客户确认当前需求",
+            conversation_id="conv-100",
+        )
+        self.assertEqual(confirmed["status"], "customer_confirmed")
+        self.assertEqual(confirmed["confirmations"][0]["conversationId"], "conv-100")
+
+        with self.assertRaises(ValueError):
+            self.store.link_task(request_id, task_id="task-should-not-link")
+
+        ready = self.store.mark_ready_for_manual_execution(request_id, reviewer="ops-a")
+        self.assertEqual(ready["status"], "ready_for_manual_execution")
+
+        linked = self.store.link_task(request_id, task_id="manual-task-001")
+        self.assertEqual(linked["status"], "linked_to_execution_task")
+        self.assertEqual(linked["linkedTaskId"], "manual-task-001")
+
+    def test_staff_review_and_change_request_flow_records_timeline(self):
+        created = self.store.create_or_update_requirement(requirement=complete_requirement())
+        request_id = created["requestId"]
+
+        clarification = self.store.request_customer_clarification(
+            request_id,
+            reviewer="ops-a",
+            message="请补充候选人名单是否需要模板",
+        )
+        self.assertEqual(clarification["status"], "need_customer_clarification")
+
+        reviewed = self.store.mark_reviewed_waiting_customer_confirmation(
+            request_id,
+            reviewer="ops-a",
+            message="字段已核对，等待客户确认",
+        )
+        self.assertEqual(reviewed["status"], "reviewed_waiting_customer_confirmation")
+
+        confirmed = self.store.record_customer_confirmation(request_id, "确认执行")
+        self.assertEqual(confirmed["status"], "customer_confirmed")
+
+        changed = self.store.create_change_request(
+            request_id,
+            customer_message="请增加政治科目",
+            changes={"subjects": "英语，化学，物理，政治"},
+        )
+        self.assertEqual(changed["status"], "change_requested")
+        self.assertEqual(changed["changeRequests"][0]["changes"]["subjects"], ["英语", "化学", "物理", "政治"])
+
+        reviewed_change = self.store.create_or_update_requirement(
+            request_id=request_id,
+            requirement=complete_requirement(subjects="英语，化学，物理，政治"),
+            source="staff",
+        )
+        self.assertEqual(reviewed_change["status"], "pending_internal_review")
+        self.assertTrue(
+            any(event["eventType"] == "customer_clarification_requested" for event in reviewed_change["events"])
+        )
 
 
 if __name__ == "__main__":

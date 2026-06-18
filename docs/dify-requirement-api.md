@@ -1,0 +1,220 @@
+# Dify 需求收集 API 接入说明
+
+本文档用于配置 Dify Chatflow 的 HTTP Request 节点，把客户对话中收集到的考试服务需求写入 `easy-exam-automation` 的需求中心。
+
+## 接入边界
+
+Dify 负责：
+
+- 通过多轮对话收集客户需求。
+- 抽取结构化字段。
+- 调用需求中心 API 创建或更新需求记录。
+- 记录客户确认和客户变更请求。
+
+需求中心负责：
+
+- 持久化结构化需求。
+- 展示缺失字段和校验问题。
+- 展示版本、确认、变更和时间线。
+- 让运营人员人工审核并决定是否进入人工执行交接。
+
+本阶段 Dify 不负责创建考试、创建场次、绑定试卷、导入考生、导出监考账号，也不绕过人工审核。
+
+## 推荐 Chatflow 顺序
+
+1. 收集客户基础信息：客户名称、联系人、联系方式。
+2. 收集考试基础信息：考试名称、正式考试时间、是否需要试考。
+3. 收集登录和迟到规则：提前登录分钟数、迟到限制分钟数。
+4. 收集监控与客户端要求：视频监控、视频录制、鹰眼、考试类型。
+5. 收集网页考试控制项：允许离开次数、水印、禁止复制。
+6. 收集科目和考生名单要求。
+7. 调用 `POST /api/ai/requirements/upsert` 写入或更新需求。
+8. 如果返回 `missingFields` 非空，继续追问缺失项，并带同一个 `requestId` 再次 upsert。
+9. 当客户确认内容无误，调用 `POST /api/ai/requirements/:requestId/customer-confirmed`。
+10. 如果客户后续变更，调用 `POST /api/ai/requirements/:requestId/change-request`。
+
+## Base URL
+
+本地开发默认：
+
+```text
+http://127.0.0.1:8765
+```
+
+部署后改成实际服务地址。
+
+## 创建或更新需求
+
+```text
+POST /api/ai/requirements/upsert
+Content-Type: application/json
+```
+
+首次写入时可以不传 `requestId`。接口会返回 `requirement.requestId`，Dify 后续节点必须保存并复用它。
+
+完整需求示例：
+
+```json
+{
+  "customer": {
+    "name": "ATA客户",
+    "contact": "ops@example.com"
+  },
+  "requirement": {
+    "exam_name": "2026招聘考试",
+    "formal_exam_time_range": "2026-07-01 09:00 - 2026-07-01 11:00",
+    "mock_exam_time_range": "2026-06-30 15:00 - 2026-06-30 16:00",
+    "early_login_minutes": "30分钟",
+    "late_limit_minutes": "15分钟",
+    "waiting_notice": "请提前完成设备检测",
+    "paper_time_rule": "进入考试后开始扣时",
+    "welcome_message": "欢迎参加考试",
+    "commitment_text": "本人承诺独立作答",
+    "video_monitor_required": "是",
+    "video_record_required": "是",
+    "hawkeye_required": "否",
+    "exam_client_type": "网页考试",
+    "leave_limit_count": 8,
+    "watermark_enabled": "是",
+    "copy_forbidden": "是",
+    "subjects": "英语，化学，物理",
+    "candidate_template_required": "是",
+    "notes": "客户补充说明"
+  },
+  "message": "Dify 第一次完整收集",
+  "source": "dify"
+}
+```
+
+响应示例：
+
+```json
+{
+  "ok": true,
+  "requirement": {
+    "requestId": "REQ-ID",
+    "status": "pending_internal_review",
+    "latest": {
+      "version": 1,
+      "missingFields": [],
+      "validationErrors": []
+    }
+  }
+}
+```
+
+如果字段不完整，状态会是 `collecting`：
+
+```json
+{
+  "ok": true,
+  "requirement": {
+    "requestId": "REQ-ID",
+    "status": "collecting",
+    "latest": {
+      "missingFields": [
+        "formal_exam_time_range",
+        "subjects"
+      ],
+      "validationErrors": []
+    }
+  }
+}
+```
+
+Dify 应继续追问 `missingFields` 对应内容，然后再次调用 upsert：
+
+```json
+{
+  "requestId": "REQ-ID",
+  "customer": {
+    "name": "ATA客户"
+  },
+  "requirement": {
+    "exam_name": "2026招聘考试",
+    "formal_exam_time_range": "2026-07-01 09:00 - 2026-07-01 11:00",
+    "subjects": "英语，化学，物理"
+  },
+  "message": "补充考试时间和科目",
+  "source": "dify"
+}
+```
+
+## 查询需求
+
+```text
+GET /api/ai/requirements/:requestId
+```
+
+Dify 可以在后续节点里查询当前状态、缺失项和最新版本。
+
+## 记录客户确认
+
+```text
+POST /api/ai/requirements/:requestId/customer-confirmed
+Content-Type: application/json
+```
+
+请求：
+
+```json
+{
+  "customerReply": "客户确认以上需求无误",
+  "conversationId": "dify-conversation-id"
+}
+```
+
+响应状态会变成：
+
+```text
+customer_confirmed
+```
+
+注意：客户确认不等于自动进入执行。运营人员仍需在 `/requirements` 页面人工审核，并手动标记为 `ready_for_manual_execution`。
+
+## 记录客户变更
+
+```text
+POST /api/ai/requirements/:requestId/change-request
+Content-Type: application/json
+```
+
+请求：
+
+```json
+{
+  "customerMessage": "请增加政治科目",
+  "changes": {
+    "subjects": "英语，化学，物理，政治"
+  }
+}
+```
+
+响应状态会变成：
+
+```text
+change_requested
+```
+
+变更请求会单独记录，不直接覆盖已经确认的版本。运营人员审核后，再通过 staff 页面或 staff API 写入新的正式版本。
+
+## 人工审核边界
+
+运营人员在 `/requirements` 中处理以下动作：
+
+- `need_customer_clarification`：需求需要客户补充。
+- `reviewed_waiting_customer_confirmation`：人工审核通过，等待客户确认。
+- `ready_for_manual_execution`：客户确认后，人工标记可进入后续人工执行交接。
+- `linked_to_execution_task`：记录主版本或其他流程中创建的执行任务编号。
+
+Dify 不应直接调用 staff API。
+
+## 试运行检查清单
+
+每轮试运行至少检查：
+
+- Dify 是否复用了同一个 `requestId`。
+- 缺失字段是否能被继续追问并补齐。
+- 客户确认后是否没有绕过人工审核。
+- 客户变更是否出现在变更记录里，而不是静默覆盖旧版本。
+- `/requirements/:requestId` 是否能看到最新字段、版本历史、确认记录、变更记录和时间线。

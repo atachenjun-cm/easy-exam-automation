@@ -68,6 +68,15 @@ export function createRequirementRequestHandler(options = {}) {
     return parseJsonSafe(await readBody(req)) || {};
   }
 
+  async function runStoreOrBadRequest(res, action, payload) {
+    try {
+      return await runRequirementStore(action, payload);
+    } catch (error) {
+      json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      return undefined;
+    }
+  }
+
   return async function handleRequirementRequest(req, res, url = new URL(req.url, "http://127.0.0.1")) {
     const pathname = url.pathname;
 
@@ -135,10 +144,37 @@ export function createRequirementRequestHandler(options = {}) {
     const readyMatch = pathname.match(/^\/api\/requirements\/([^/]+)\/mark-ready$/);
     if (req.method === "POST" && readyMatch) {
       const payload = await readJson(req);
-      const requirement = await runRequirementStore("mark_ready", {
+      const requirement = await runStoreOrBadRequest(res, "mark_ready", {
         requestId: decodeSegment(readyMatch[1]),
         reviewer: payload.reviewer || "",
       });
+      if (!requirement) return true;
+      json(res, 200, { ok: true, requirement });
+      return true;
+    }
+
+    const clarificationMatch = pathname.match(/^\/api\/requirements\/([^/]+)\/request-clarification$/);
+    if (req.method === "POST" && clarificationMatch) {
+      const payload = await readJson(req);
+      const requirement = await runStoreOrBadRequest(res, "request_clarification", {
+        requestId: decodeSegment(clarificationMatch[1]),
+        reviewer: payload.reviewer || "",
+        message: payload.message || "",
+      });
+      if (!requirement) return true;
+      json(res, 200, { ok: true, requirement });
+      return true;
+    }
+
+    const reviewedMatch = pathname.match(/^\/api\/requirements\/([^/]+)\/mark-reviewed$/);
+    if (req.method === "POST" && reviewedMatch) {
+      const payload = await readJson(req);
+      const requirement = await runStoreOrBadRequest(res, "mark_reviewed", {
+        requestId: decodeSegment(reviewedMatch[1]),
+        reviewer: payload.reviewer || "",
+        message: payload.message || "",
+      });
+      if (!requirement) return true;
       json(res, 200, { ok: true, requirement });
       return true;
     }
@@ -146,10 +182,11 @@ export function createRequirementRequestHandler(options = {}) {
     const linkTaskMatch = pathname.match(/^\/api\/requirements\/([^/]+)\/link-task$/);
     if (req.method === "POST" && linkTaskMatch) {
       const payload = await readJson(req);
-      const requirement = await runRequirementStore("link_task", {
+      const requirement = await runStoreOrBadRequest(res, "link_task", {
         requestId: decodeSegment(linkTaskMatch[1]),
         taskId: payload.taskId || payload.task_id || "",
       });
+      if (!requirement) return true;
       json(res, 200, { ok: true, requirement });
       return true;
     }

@@ -21,6 +21,9 @@ REQUIRED_FIELDS = [
     "subjects",
 ]
 
+STATUS_READY_FOR_MANUAL_EXECUTION = "ready_for_manual_execution"
+STATUS_LINKED_TO_EXECUTION_TASK = "linked_to_execution_task"
+
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -291,6 +294,24 @@ class RequirementStore:
             })
         return self.get_requirement(request_id)
 
+    def request_customer_clarification(self, request_id, reviewer="", message=""):
+        return self._set_status(
+            request_id,
+            "need_customer_clarification",
+            "customer_clarification_requested",
+            reviewer or "staff",
+            {"message": message or ""},
+        )
+
+    def mark_reviewed_waiting_customer_confirmation(self, request_id, reviewer="", message=""):
+        return self._set_status(
+            request_id,
+            "reviewed_waiting_customer_confirmation",
+            "reviewed_waiting_customer_confirmation",
+            reviewer or "staff",
+            {"message": message or ""},
+        )
+
     def create_change_request(self, request_id, customer_message="", changes=None):
         now = utc_now()
         with self.connect() as db:
@@ -317,23 +338,37 @@ class RequirementStore:
         return self.get_requirement(request_id)
 
     def mark_ready_to_create_task(self, request_id, reviewer=""):
-        return self._set_status(request_id, "ready_to_create_task", "marked_ready", reviewer)
+        return self.mark_ready_for_manual_execution(request_id, reviewer)
+
+    def mark_ready_for_manual_execution(self, request_id, reviewer=""):
+        with self.connect() as db:
+            request = self._require_request(db, request_id)
+            if request["status"] != "customer_confirmed":
+                raise ValueError("Requirement must be customer confirmed before manual execution handoff")
+        return self._set_status(
+            request_id,
+            STATUS_READY_FOR_MANUAL_EXECUTION,
+            "ready_for_manual_execution",
+            reviewer,
+        )
 
     def link_task(self, request_id, task_id):
         if not task_id:
             raise ValueError("task_id is required")
         now = utc_now()
         with self.connect() as db:
-            self._require_request(db, request_id)
+            request = self._require_request(db, request_id)
+            if request["status"] != STATUS_READY_FOR_MANUAL_EXECUTION:
+                raise ValueError("Requirement must be ready for manual execution before linking a task")
             db.execute(
                 """UPDATE requirement_requests
-                SET status='task_created', linked_task_id=?, updated_at=? WHERE request_id=?""",
-                (task_id, now, request_id),
+                SET status=?, linked_task_id=?, updated_at=? WHERE request_id=?""",
+                (STATUS_LINKED_TO_EXECUTION_TASK, task_id, now, request_id),
             )
-            self._record_event(db, request_id, "task_linked", "staff", {"taskId": task_id})
+            self._record_event(db, request_id, "execution_task_linked", "staff", {"taskId": task_id})
         return self.get_requirement(request_id)
 
-    def _set_status(self, request_id, status, event_type, actor=""):
+    def _set_status(self, request_id, status, event_type, actor="", payload=None):
         now = utc_now()
         with self.connect() as db:
             self._require_request(db, request_id)
@@ -341,7 +376,9 @@ class RequirementStore:
                 "UPDATE requirement_requests SET status=?, updated_at=? WHERE request_id=?",
                 (status, now, request_id),
             )
-            self._record_event(db, request_id, event_type, actor or "staff", {"status": status})
+            event_payload = {"status": status}
+            event_payload.update(payload or {})
+            self._record_event(db, request_id, event_type, actor or "staff", event_payload)
         return self.get_requirement(request_id)
 
     def _require_request(self, db, request_id):
@@ -450,6 +487,18 @@ def main():
         result = store.mark_ready_to_create_task(
             payload.get("requestId") or payload.get("request_id"),
             payload.get("reviewer") or "",
+        )
+    elif action == "request_clarification":
+        result = store.request_customer_clarification(
+            payload.get("requestId") or payload.get("request_id"),
+            payload.get("reviewer") or "",
+            payload.get("message") or "",
+        )
+    elif action == "mark_reviewed":
+        result = store.mark_reviewed_waiting_customer_confirmation(
+            payload.get("requestId") or payload.get("request_id"),
+            payload.get("reviewer") or "",
+            payload.get("message") or "",
         )
     elif action == "link_task":
         result = store.link_task(

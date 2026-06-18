@@ -33,6 +33,12 @@ test("URL page layout replaces shared showView content switching", () => {
 test("requirement center renders list and detail surfaces", () => {
   assert.ok(html.includes('id="requirementsList"'));
   assert.ok(html.includes('id="requirementDetailView"'));
+  assert.ok(html.includes('id="requirementClarificationBtn"'));
+  assert.ok(html.includes('id="requirementReviewedBtn"'));
   assert.ok(html.includes('id="requirementMarkReadyBtn"'));
   assert.ok(html.includes('id="requirementLinkTaskBtn"'));
+  assert.ok(html.includes('id="requirementTimeline"'));
+  assert.ok(html.includes('id="requirementVersions"'));
+  assert.ok(html.includes('id="requirementChanges"'));
+  assert.ok(html.includes("ready_for_manual_execution"));
 });
