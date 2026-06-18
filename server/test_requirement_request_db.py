@@ -11,6 +11,7 @@ def complete_requirement(**overrides):
     data = {
         "exam_name": "2026招聘考试",
         "formal_exam_time_range": "2026-07-01 09:00 - 2026-07-01 11:00",
+        "mock_exam_time_range": "2026-06-30 15:00 - 2026-06-30 16:00",
         "early_login_minutes": "30分钟",
         "late_limit_minutes": "15分钟",
         "video_monitor_required": "是",
@@ -67,8 +68,27 @@ class RequirementStoreTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "collecting")
         self.assertIn("formal_exam_time_range", result["latest"]["missingFields"])
+        self.assertIn("mock_exam_time_range", result["latest"]["missingFields"])
         self.assertIn("subjects", result["latest"]["missingFields"])
         self.assertIn("leave_limit_count", result["latest"]["missingFields"])
+
+    def test_dify_flow_requires_mock_time_but_defaults_watermark_and_copy_policy(self):
+        requirement = complete_requirement()
+        requirement.pop("watermark_enabled")
+        requirement.pop("copy_forbidden")
+
+        result = self.store.create_or_update_requirement(requirement=requirement)
+
+        self.assertEqual(result["status"], "pending_internal_review")
+        self.assertEqual(result["latest"]["missingFields"], [])
+        self.assertEqual(result["latest"]["requirement"]["watermark_enabled"], True)
+        self.assertEqual(result["latest"]["requirement"]["copy_forbidden"], True)
+
+        missing_mock = dict(requirement)
+        missing_mock.pop("mock_exam_time_range")
+        collecting = self.store.create_or_update_requirement(requirement=missing_mock)
+        self.assertEqual(collecting["status"], "collecting")
+        self.assertIn("mock_exam_time_range", collecting["latest"]["missingFields"])
 
     def test_customer_confirmation_change_request_and_task_link_are_audited(self):
         created = self.store.create_or_update_requirement(requirement=complete_requirement())

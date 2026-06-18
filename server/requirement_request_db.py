@@ -10,14 +10,13 @@ from pathlib import Path
 REQUIRED_FIELDS = [
     "exam_name",
     "formal_exam_time_range",
+    "mock_exam_time_range",
     "early_login_minutes",
     "late_limit_minutes",
     "video_monitor_required",
     "video_record_required",
     "hawkeye_required",
     "exam_client_type",
-    "watermark_enabled",
-    "copy_forbidden",
     "subjects",
 ]
 
@@ -79,6 +78,8 @@ def normalize_requirement(payload):
     result = {}
     for key, value in source.items():
         result[key] = value
+    result.setdefault("watermark_enabled", True)
+    result.setdefault("copy_forbidden", True)
     for key in ["early_login_minutes", "late_limit_minutes", "leave_limit_count"]:
         if key in result:
             result[key] = normalize_minutes(result.get(key))

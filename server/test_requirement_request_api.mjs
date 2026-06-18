@@ -38,6 +38,22 @@ async function callRequirementHandler(method, pathname, body) {
   return { handled, statusCode: res.statusCode, body: res.body };
 }
 
+function completeRequirementPayload() {
+  return {
+    exam_name: "2026招聘考试",
+    formal_exam_time_range: "2026-07-01 09:00 - 2026-07-01 11:00",
+    mock_exam_time_range: "2026-06-30 15:00 - 2026-06-30 16:00",
+    early_login_minutes: "30分钟",
+    late_limit_minutes: "15分钟",
+    video_monitor_required: "是",
+    video_record_required: "是",
+    hawkeye_required: "否",
+    exam_client_type: "网页考试",
+    leave_limit_count: 8,
+    subjects: "英语，化学，物理",
+  };
+}
+
 test("Dify upsert route stores a requirement and returns missing fields", async () => {
   const result = await callRequirementHandler("POST", "/api/ai/requirements/upsert", {
     customer: { name: "ATA客户" },
@@ -64,20 +80,7 @@ test("staff routes can mark a confirmed requirement ready and link a task", asyn
   }
 
   const created = await call("POST", "/api/ai/requirements/upsert", {
-    requirement: {
-      exam_name: "2026招聘考试",
-      formal_exam_time_range: "2026-07-01 09:00 - 2026-07-01 11:00",
-      early_login_minutes: "30分钟",
-      late_limit_minutes: "15分钟",
-      video_monitor_required: "是",
-      video_record_required: "是",
-      hawkeye_required: "否",
-      exam_client_type: "网页考试",
-      leave_limit_count: 8,
-      watermark_enabled: "是",
-      copy_forbidden: "是",
-      subjects: "英语，化学，物理",
-    },
+    requirement: completeRequirementPayload(),
   });
   const requestId = created.body.requirement.requestId;
   await call("POST", `/api/ai/requirements/${requestId}/customer-confirmed`, {
@@ -107,20 +110,7 @@ test("customer confirmation does not bypass manual execution readiness", async (
   }
 
   const created = await call("POST", "/api/ai/requirements/upsert", {
-    requirement: {
-      exam_name: "2026招聘考试",
-      formal_exam_time_range: "2026-07-01 09:00 - 2026-07-01 11:00",
-      early_login_minutes: "30分钟",
-      late_limit_minutes: "15分钟",
-      video_monitor_required: "是",
-      video_record_required: "是",
-      hawkeye_required: "否",
-      exam_client_type: "网页考试",
-      leave_limit_count: 8,
-      watermark_enabled: "是",
-      copy_forbidden: "是",
-      subjects: "英语，化学，物理",
-    },
+    requirement: completeRequirementPayload(),
   });
   const requestId = created.body.requirement.requestId;
 
@@ -157,20 +147,7 @@ test("staff routes can request clarification and mark reviewed", async () => {
   }
 
   const created = await call("POST", "/api/ai/requirements/upsert", {
-    requirement: {
-      exam_name: "2026招聘考试",
-      formal_exam_time_range: "2026-07-01 09:00 - 2026-07-01 11:00",
-      early_login_minutes: "30分钟",
-      late_limit_minutes: "15分钟",
-      video_monitor_required: "是",
-      video_record_required: "是",
-      hawkeye_required: "否",
-      exam_client_type: "网页考试",
-      leave_limit_count: 8,
-      watermark_enabled: "是",
-      copy_forbidden: "是",
-      subjects: "英语，化学，物理",
-    },
+    requirement: completeRequirementPayload(),
   });
   const requestId = created.body.requirement.requestId;
 

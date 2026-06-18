@@ -22,11 +22,11 @@ Dify 负责：
 
 ## 推荐 Chatflow 顺序
 
-1. 收集客户基础信息：客户名称、联系人、联系方式。
-2. 收集考试基础信息：考试名称、正式考试时间、是否需要试考。
+1. 暂不收集客户基础信息；后续需要时再补客户名称、联系人、联系方式。
+2. 收集考试基础信息：考试名称、正式考试时间、试考时间。试考默认都需要，只确认试考时间。
 3. 收集登录和迟到规则：提前登录分钟数、迟到限制分钟数。
 4. 收集监控与客户端要求：视频监控、视频录制、鹰眼、考试类型。
-5. 收集网页考试控制项：允许离开次数、水印、禁止复制。
+5. 收集网页考试控制项：允许离开次数。水印和禁止复制不向客户确认，需求中心默认开启。
 6. 收集科目和考生名单要求。
 7. 调用 `POST /api/ai/requirements/upsert` 写入或更新需求。
 8. 如果返回 `missingFields` 非空，继续追问缺失项，并带同一个 `requestId` 再次 upsert。
@@ -56,10 +56,7 @@ Content-Type: application/json
 
 ```json
 {
-  "customer": {
-    "name": "ATA客户",
-    "contact": "ops@example.com"
-  },
+  "customer": {},
   "requirement": {
     "exam_name": "2026招聘考试",
     "formal_exam_time_range": "2026-07-01 09:00 - 2026-07-01 11:00",
@@ -75,8 +72,6 @@ Content-Type: application/json
     "hawkeye_required": "否",
     "exam_client_type": "网页考试",
     "leave_limit_count": 8,
-    "watermark_enabled": "是",
-    "copy_forbidden": "是",
     "subjects": "英语，化学，物理",
     "candidate_template_required": "是",
     "notes": "客户补充说明"
@@ -85,6 +80,8 @@ Content-Type: application/json
   "source": "dify"
 }
 ```
+
+`watermark_enabled` 和 `copy_forbidden` 不需要 Dify 收集；需求中心会默认写为 `true`。客户基础信息前期也可以为空对象。
 
 响应示例：
 
@@ -114,6 +111,7 @@ Content-Type: application/json
     "latest": {
       "missingFields": [
         "formal_exam_time_range",
+        "mock_exam_time_range",
         "subjects"
       ],
       "validationErrors": []
@@ -127,15 +125,14 @@ Dify 应继续追问 `missingFields` 对应内容，然后再次调用 upsert：
 ```json
 {
   "requestId": "REQ-ID",
-  "customer": {
-    "name": "ATA客户"
-  },
+  "customer": {},
   "requirement": {
     "exam_name": "2026招聘考试",
     "formal_exam_time_range": "2026-07-01 09:00 - 2026-07-01 11:00",
+    "mock_exam_time_range": "2026-06-30 15:00 - 2026-06-30 16:00",
     "subjects": "英语，化学，物理"
   },
-  "message": "补充考试时间和科目",
+  "message": "补充正式考试时间、试考时间和科目",
   "source": "dify"
 }
 ```

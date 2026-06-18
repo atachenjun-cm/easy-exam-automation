@@ -281,7 +281,7 @@ Then call:
 
 ```bash
 curl -sS http://127.0.0.1:8765/api/health
-curl -sS -X POST http://127.0.0.1:8765/api/ai/requirements/upsert -H 'Content-Type: application/json' --data '{"customer":{"name":"ATA客户"},"requirement":{"exam_name":"2026招聘考试","formal_exam_time_range":"2026-07-01 09:00 - 2026-07-01 11:00","early_login_minutes":"30分钟","late_limit_minutes":"15分钟","video_monitor_required":"是","video_record_required":"是","hawkeye_required":"否","exam_client_type":"网页考试","leave_limit_count":8,"watermark_enabled":"是","copy_forbidden":"是","subjects":"英语，化学，物理"}}'
+curl -sS -X POST http://127.0.0.1:8765/api/ai/requirements/upsert -H 'Content-Type: application/json' --data '{"customer":{},"requirement":{"exam_name":"2026招聘考试","formal_exam_time_range":"2026-07-01 09:00 - 2026-07-01 11:00","mock_exam_time_range":"2026-06-30 15:00 - 2026-06-30 16:00","early_login_minutes":"30分钟","late_limit_minutes":"15分钟","video_monitor_required":"是","video_record_required":"是","hawkeye_required":"否","exam_client_type":"网页考试","leave_limit_count":8,"subjects":"英语，化学，物理"}}'
 curl -sS -o /tmp/easy-exam-requirements.html -w '%{http_code} %{content_type}\n' http://127.0.0.1:8765/requirements
 ```
 
