@@ -1886,45 +1886,45 @@
         </div>
 
         <nav class="nav" aria-label="主导航">
-          <button class="nav-item nav-button" id="projectNavBtn" type="button">
+          <button class="nav-item nav-button" id="projectNavBtn" data-route-menu="projects" type="button">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 9h8M8 13h8M8 17h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             项目管理
           </button>
-          <button class="nav-item nav-button" id="examNavBtn" type="button">
+          <button class="nav-item nav-button" id="examNavBtn" data-route-menu="exams" type="button">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 8h6M9 12h6M9 16h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             考试列表
           </button>
-          <div class="nav-item active" id="autoNavItem">
+          <button class="nav-item nav-button" id="autoNavItem" data-route-menu="auto-config" type="button">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M4 5h16M4 12h16M4 19h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
             </svg>
             自动配置
-          </div>
-          <button class="nav-item nav-button" id="candidateNavBtn" type="button">
+          </button>
+          <button class="nav-item nav-button" id="candidateNavBtn" data-route-menu="candidate-import" type="button">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
             </svg>
             名单导入
           </button>
-          <div class="nav-item">
+          <button class="nav-item nav-button" id="requirementsNavBtn" data-route-menu="requirements" type="button">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M7 3h7l5 5v13H7z" fill="none" stroke="currentColor" stroke-width="2" />
               <path d="M14 3v6h5" fill="none" stroke="currentColor" stroke-width="2" />
             </svg>
             需求单记录
-          </div>
-          <div class="nav-item">
+          </button>
+          <button class="nav-item nav-button" id="templatesNavBtn" data-route-menu="templates" type="button">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 3v18M4 9h16M6 15h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
             </svg>
             配置模板
-          </div>
-          <div class="nav-item">
+          </button>
+          <button class="nav-item nav-button" id="logsNavBtn" data-route-menu="logs" type="button">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M5 19V5h14v14zM8 9h8M8 13h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
             </svg>
             执行日志
-          </div>
+          </button>
         </nav>
 
         <div class="side-status">
@@ -1935,14 +1935,14 @@
       </aside>
 
       <main class="main">
-        <div class="topbar" id="autoTopbar">
+        <div class="topbar" id="autoTopbar" hidden>
           <div>
             <h1>易考考试自动配置</h1>
             <p class="subtitle">导入 Excel 需求单后，自动完成后台配置，并在确认页停下等待人工核对。</p>
           </div>
         </div>
 
-        <section class="stack" id="autoConfigStack">
+        <section class="stack" id="autoConfigStack" hidden>
           <div class="panel">
             <div class="panel-head">
               <h2 class="panel-title">后台连接</h2>
@@ -2171,7 +2171,7 @@
           </div>
         </section>
 
-        <section class="panel candidate-panel" id="candidateImportPanel">
+        <section class="panel candidate-panel" id="candidateImportPanel" hidden>
           <div class="panel-head">
             <div class="candidate-title-block">
               <h2 class="panel-title">考生名单整理与导入</h2>
@@ -2365,8 +2365,18 @@
         </section>
 
         <section class="task-view" id="projectManagementView" hidden>
-          <div class="view-heading"><div><h1>项目管理</h1><p class="subtitle">一张需求单对应一个项目，汇总展示不同账号创建的任务。</p></div><button class="btn" id="refreshProjectsBtn" type="button">刷新</button></div>
+          <div class="view-heading"><div><h1>项目管理</h1><p class="subtitle">管理已持久化的考试项目。</p></div><div class="view-actions"><button class="btn" id="refreshProjectsBtn" type="button">刷新</button><button class="btn primary" id="newProjectBtn" type="button">新建项目</button></div></div>
+          <div class="task-overview" id="projectStats"></div>
+          <div class="panel"><div class="panel-body"><div class="settings-grid"><label class="field"><span class="field-label">搜索项目</span><input class="field-input" id="projectSearchInput" placeholder="项目名称 / 客户 / 账号" /></label><label class="field"><span class="field-label">项目状态</span><select class="field-input" id="projectStatusFilter"><option value="">全部状态</option><option value="running">进行中</option><option value="waiting_manual">待处理</option><option value="success">已完成</option><option value="failed">失败</option></select></label></div></div></div>
           <div class="project-grid" id="projectGrid"><div class="empty-state">暂无项目记录</div></div>
+        </section>
+
+        <section class="task-view" id="projectDetailView" hidden>
+          <div class="view-heading"><div><button class="btn" id="backToProjectsBtn" type="button">返回项目</button><h1 style="margin-top:12px;">项目详情</h1><p class="subtitle" id="projectDetailSubtitle"></p></div><button class="btn primary" id="projectAutoConfigBtn" type="button">进入自动配置</button></div>
+          <div class="task-overview" id="projectDetailOverview"></div>
+          <div class="panel"><div class="panel-head"><h2 class="panel-title">考试任务与场次</h2></div><div class="panel-body"><div class="exam-table-wrap"><table class="exam-table"><thead><tr><th>类型</th><th>场次</th><th>session_id</th><th>时间</th><th>考生</th><th>班级</th><th>状态</th></tr></thead><tbody id="projectDetailSessionRows"></tbody></table></div></div></div>
+          <div class="panel"><div class="panel-head"><h2 class="panel-title">相关文件</h2></div><div class="panel-body" id="projectFiles">暂无已归档文件</div></div>
+          <div class="panel"><div class="panel-head"><h2 class="panel-title">项目日志</h2></div><div class="panel-body"><div class="log-list" id="projectLogs"></div></div></div>
         </section>
 
         <section class="task-view" id="examListView" hidden>
@@ -2381,7 +2391,13 @@
           <div class="task-overview" id="taskOverview"></div>
           <div class="panel"><div class="panel-head"><h2 class="panel-title">场次列表</h2></div><div class="panel-body"><div class="exam-table-wrap"><table class="exam-table"><thead><tr><th>场次类型</th><th>场次名称</th><th>session_id</th><th>考试时间</th><th>考生数</th><th>班级数</th><th>状态</th></tr></thead><tbody id="taskSessionRows"></tbody></table></div></div></div>
           <div class="panel"><div class="panel-head"><div><h2 class="panel-title">进度步骤</h2><p class="subtitle">各步骤独立更新，按实际执行结果展示。</p></div></div><div class="panel-body"><div class="task-step-grid" id="taskStepGrid"></div></div></div>
+          <div class="panel"><div class="panel-head"><h2 class="panel-title">科目、试卷、考生与班级</h2></div><div class="panel-body" id="examResources">根据已持久化的任务步骤和场次信息汇总。</div></div>
+          <div class="panel"><div class="panel-head"><h2 class="panel-title">快捷操作与执行日志</h2></div><div class="panel-body"><div class="view-actions"><button class="btn" id="examContinueBtn" type="button">继续</button><button class="btn" id="examRefreshBtn" type="button">刷新状态</button></div><div class="log-list" id="examExecutionLogs" style="margin-top:12px;"></div></div></div>
         </section>
+
+        <section class="task-view" id="requirementsView" hidden><div class="view-heading"><div><h1>需求单记录</h1><p class="subtitle">查看已持久化项目关联的需求单记录。</p></div></div><div class="project-grid" id="requirementsList"></div></section>
+        <section class="task-view" id="templatesView" hidden><div class="view-heading"><div><h1>配置模板</h1><p class="subtitle">管理考试配置模板。</p></div></div><div class="panel"><div class="panel-body"><div class="empty-state">暂无已保存配置模板</div></div></div></section>
+        <section class="task-view" id="logsView" hidden><div class="view-heading"><div><h1>执行日志</h1><p class="subtitle">汇总展示已持久化的项目步骤日志。</p></div></div><div class="log-list" id="allTaskLogs"></div></section>
       </main>
     </div>
 
@@ -2404,7 +2420,16 @@
       </div>
     </div>
 
-    <script>
+    <script type="module">
+      import { createRouter } from "/web/router.mjs";
+      import { AppLayout } from "/web/layout.mjs";
+      import { AutoConfigPage } from "/web/pages/AutoConfigPage.mjs";
+      import { CandidateImportPage } from "/web/pages/CandidateImportPage.mjs";
+      import { ExamDetailPage } from "/web/pages/ExamDetailPage.mjs";
+      import { ExamListPage } from "/web/pages/ExamListPage.mjs";
+      import { ProjectDetailPage } from "/web/pages/ProjectDetailPage.mjs";
+      import { ProjectListPage } from "/web/pages/ProjectListPage.mjs";
+
       const runtime = {
         apiBase: window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "",
         ...(window.EASY_EXAM_RUNTIME || {}),

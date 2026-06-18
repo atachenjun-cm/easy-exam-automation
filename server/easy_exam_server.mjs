@@ -9,10 +9,12 @@ import {
   bindCoursesToFormalSession,
   createSessionsThenConfigureCourses,
 } from "./course_session_binding.mjs";
+import { isFrontendRoute, webContentType } from "./frontend_routes.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const webFile = path.join(rootDir, "outputs", "web_prototype", "easy_exam_automation.html");
+const webModulesDir = path.join(rootDir, "web");
 const runtimeDir = path.join(rootDir, ".easy_exam_runtime");
 const uploadsDir = path.join(runtimeDir, "uploads");
 const generatedDir = path.join(runtimeDir, "generated");
@@ -71,7 +73,10 @@ function json(res, code, payload) {
 }
 
 function sendHtml(res, html) {
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+  });
   res.end(html);
 }
 
@@ -1763,10 +1768,29 @@ async function buildHtml() {
   );
 }
 
+async function handleWebModule(urlPath, res) {
+  const relativePath = decodeURIComponent(urlPath.slice("/web/".length));
+  const filePath = path.resolve(webModulesDir, relativePath);
+  if (!filePath.startsWith(`${webModulesDir}${path.sep}`)) return notFound(res);
+  try {
+    const content = await fs.readFile(filePath);
+    res.writeHead(200, {
+      "Content-Type": webContentType(filePath),
+      "Cache-Control": "no-store",
+    });
+    res.end(content);
+  } catch {
+    return notFound(res);
+  }
+}
+
 async function requestHandler(req, res) {
   const url = new URL(req.url, "http://127.0.0.1");
   try {
-    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/easy_exam_automation.html")) {
+    if (req.method === "GET" && url.pathname.startsWith("/web/")) {
+      return await handleWebModule(url.pathname, res);
+    }
+    if (req.method === "GET" && (isFrontendRoute(url.pathname) || url.pathname === "/easy_exam_automation.html")) {
       return sendHtml(res, await buildHtml());
     }
     if (req.method === "GET" && url.pathname === "/api/health") {
