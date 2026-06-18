@@ -24,6 +24,15 @@ test("URL page layout replaces shared showView content switching", () => {
   assert.ok(html.includes('import { createRouter } from "/web/router.mjs"'));
   assert.ok(html.includes("ProjectListPage({ root: projectManagementView"));
   assert.ok(html.includes("ExamListPage({ root: examListView"));
+  assert.ok(html.includes("RequirementListPage({ root: requirementsView"));
+  assert.ok(html.includes("RequirementDetailPage({ root: requirementDetailView"));
   assert.equal(html.includes("function showView"), false);
   assert.equal(html.includes("syncActiveNavByScroll"), false);
+});
+
+test("requirement center renders list and detail surfaces", () => {
+  assert.ok(html.includes('id="requirementsList"'));
+  assert.ok(html.includes('id="requirementDetailView"'));
+  assert.ok(html.includes('id="requirementMarkReadyBtn"'));
+  assert.ok(html.includes('id="requirementLinkTaskBtn"'));
 });

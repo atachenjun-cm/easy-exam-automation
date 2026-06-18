@@ -7,6 +7,7 @@ const FRONTEND_ROUTE_PATTERNS = [
   /^\/exams\/[^/]+\/?$/,
   /^\/candidate-import\/?$/,
   /^\/requirements\/?$/,
+  /^\/requirements\/[^/]+\/?$/,
   /^\/templates\/?$/,
   /^\/logs\/?$/,
 ];

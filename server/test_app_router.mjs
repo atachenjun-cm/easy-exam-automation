@@ -12,6 +12,7 @@ const routeCases = [
   ["/exams/exam-456", "exam-detail", { examId: "exam-456" }],
   ["/candidate-import", "candidate-import", {}],
   ["/requirements", "requirements", {}],
+  ["/requirements/req-001", "requirement-detail", { requestId: "req-001" }],
   ["/templates", "templates", {}],
   ["/logs", "logs", {}],
 ];
@@ -28,6 +29,7 @@ test("matches every application route and dynamic parameter", () => {
 test("maps detail routes to exactly one navigation item", () => {
   assert.equal(menuKeyForRoute(matchRoute("/projects/p1")), "projects");
   assert.equal(menuKeyForRoute(matchRoute("/exams/e1")), "exams");
+  assert.equal(menuKeyForRoute(matchRoute("/requirements/r1")), "requirements");
   assert.equal(menuKeyForRoute(matchRoute("/auto-config")), "auto-config");
 });
 
