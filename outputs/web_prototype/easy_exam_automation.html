@@ -28,6 +28,10 @@
         box-sizing: border-box;
       }
 
+      [hidden] {
+        display: none !important;
+      }
+
       body {
         margin: 0;
         font-family:
@@ -1882,12 +1886,6 @@
         </div>
 
         <nav class="nav" aria-label="主导航">
-          <div class="nav-item active" id="autoNavItem">
-            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 5h16M4 12h16M4 19h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-            </svg>
-            自动配置
-          </div>
           <button class="nav-item nav-button" id="projectNavBtn" type="button">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 9h8M8 13h8M8 17h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             项目管理
@@ -1896,6 +1894,12 @@
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 8h6M9 12h6M9 16h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             考试列表
           </button>
+          <div class="nav-item active" id="autoNavItem">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 5h16M4 12h16M4 19h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+            自动配置
+          </div>
           <button class="nav-item nav-button" id="candidateNavBtn" type="button">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
