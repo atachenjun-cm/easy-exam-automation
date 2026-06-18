@@ -225,6 +225,25 @@ async function enterNewExamFromCurrentPage(page, emit) {
   return false;
 }
 
+async function gotoAddWizardAfterLogin(page, emit, timeout = 12_000) {
+  if (await waitForBasicInfoReady(page, 1000)) {
+    return true;
+  }
+  if ((await isLoginPage(page)) || page.url().includes("/login")) {
+    return false;
+  }
+
+  try {
+    emit(event("log", { level: "success", message: "登录态已确认，直接进入新建考试页。" }));
+    emit(event("status", { status: "running", message: "正在直接打开新建考试页" }));
+    await page.goto(EZTEST_ADD_URL, { waitUntil: "domcontentloaded", timeout });
+    return await waitForBasicInfoReady(page, timeout);
+  } catch (error) {
+    emit(event("log", { level: "warn", message: `直接进入新建考试页失败，改用页面点击兜底：${error.message}` }));
+    return false;
+  }
+}
+
 async function waitForLogin(page, emit, login) {
   if (await waitForBasicInfoReady(page, 5_000)) {
     return;
@@ -236,6 +255,11 @@ async function waitForLogin(page, emit, login) {
       emit(event("log", { level: "success", message: "检测到登录页，开始自动登录易考后台。" }));
       await performLogin(page, login, emit);
       triedAutoLogin = true;
+      if (await gotoAddWizardAfterLogin(page, emit)) {
+        emit(event("log", { level: "success", message: "已通过固定网址进入新建考试页。" }));
+        emit(event("status", { status: "running", message: "继续配置考试" }));
+        return;
+      }
     } else {
       emit(event("status", { status: "action_required", message: "请先在打开的 Chrome 窗口登录易考后台。" }));
       emit(event("log", { level: "warn", message: "检测到登录页，等待人工完成登录。" }));
@@ -265,6 +289,12 @@ async function waitForLogin(page, emit, login) {
       }
       await delay(1500);
       continue;
+    }
+
+    if (await gotoAddWizardAfterLogin(page, emit, 8000)) {
+      emit(event("log", { level: "success", message: "已通过固定网址进入新建考试页。" }));
+      emit(event("status", { status: "running", message: "继续配置考试" }));
+      return;
     }
 
     if (await openNewExamFromExamNav(page, emit)) {
@@ -2045,6 +2075,485 @@ async function setCheckboxNearText(page, text, desired = true) {
   );
 }
 
+async function getVisibleTextRect(page, text) {
+  return evaluate(page, (targetText) => {
+    const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (!norm(node.textContent).includes(targetText) || !visible(node.parentElement)) continue;
+      const range = document.createRange();
+      const start = String(node.textContent || "").indexOf(targetText);
+      if (start >= 0) {
+        range.setStart(node, start);
+        range.setEnd(node, start + targetText.length);
+      } else {
+        range.selectNodeContents(node);
+      }
+      const rect = range.getBoundingClientRect();
+      range.detach();
+      if (rect.width > 0 && rect.height > 0) {
+        return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+      }
+    }
+    const element = [...document.querySelectorAll("label, span, div, li")]
+      .filter((el) => visible(el) && norm(el.textContent).includes(targetText))
+      .sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        return ar.width * ar.height - br.width * br.height;
+      })[0];
+    if (!element) return null;
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0
+      ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+      : null;
+  }, text);
+}
+
+async function clickControlLeftOfTextByMouse(page, text, type) {
+  const rect = await getVisibleTextRect(page, text);
+  if (!rect) return false;
+  const centerY = rect.top + rect.height / 2;
+  const offsets = type === "radio" ? [-24, -34, -46, -60] : [-26, -38, -52, -68];
+  for (const offset of offsets) {
+    const x = Math.max(4, rect.left + offset);
+    await page.mouse.move(x, centerY);
+    await page.mouse.down();
+    await page.mouse.up();
+    await pause(120);
+    if (await isAntOptionCheckedNearText(page, text, type)) return true;
+  }
+  return false;
+}
+
+async function isAntOptionCheckedNearText(page, text, type) {
+  return evaluate(
+    page,
+    ({ targetText, optionType }) => {
+      const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const selector = optionType === "radio" ? ".ant-radio" : ".ant-checkbox";
+      const wrapperSelector = optionType === "radio" ? ".ant-radio-wrapper" : ".ant-checkbox-wrapper";
+      const wrapper = [...document.querySelectorAll(`${wrapperSelector}, label`)]
+        .filter((el) => visible(el) && norm(el.textContent).includes(targetText) && el.querySelector(selector))
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return ar.width * ar.height - br.width * br.height;
+        })[0];
+      if (wrapper) {
+        const el = wrapper.querySelector(selector);
+        return optionType === "radio" ? el?.classList.contains("ant-radio-checked") : el?.classList.contains("ant-checkbox-checked");
+      }
+      const textRect = (() => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          if (!norm(node.textContent).includes(targetText) || !visible(node.parentElement)) continue;
+          const range = document.createRange();
+          const start = String(node.textContent || "").indexOf(targetText);
+          if (start >= 0) {
+            range.setStart(node, start);
+            range.setEnd(node, start + targetText.length);
+          } else {
+            range.selectNodeContents(node);
+          }
+          const rect = range.getBoundingClientRect();
+          range.detach();
+          if (rect.width > 0 && rect.height > 0) return rect;
+        }
+        return null;
+      })();
+      if (!textRect) return false;
+      const cy = textRect.top + textRect.height / 2;
+      const control = [...document.querySelectorAll(selector)]
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          return { el, score: Math.abs(rect.top + rect.height / 2 - cy) * 30 + Math.abs(rect.left - textRect.left) };
+        })
+        .filter((item) => item.score < 1600)
+        .sort((a, b) => a.score - b.score)[0]?.el;
+      return optionType === "radio" ? control?.classList.contains("ant-radio-checked") : control?.classList.contains("ant-checkbox-checked");
+    },
+    { targetText: text, optionType: type },
+  );
+}
+
+async function ensureOptionCheckedByMouse(page, text, type) {
+  if (await isAntOptionCheckedNearText(page, text, type)) return true;
+  try {
+    const exactText = page.getByText(text, { exact: true }).last();
+    if ((await exactText.count()) > 0) {
+      await exactText.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
+      await exactText.click({ force: true, timeout: 1500 }).catch(() => {});
+      await pause(200);
+      if (await isAntOptionCheckedNearText(page, text, type)) return true;
+    }
+  } catch {}
+  await clickControlLeftOfTextByMouse(page, text, type);
+  await pause(250);
+  return isAntOptionCheckedNearText(page, text, type);
+}
+
+async function configureVideoMonitorDefaults(page) {
+  await page.waitForFunction(() => document.body.innerText.includes("登录验证"), { timeout: 8_000 });
+  await pause(300);
+  await evaluate(page, () => {
+    const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const controlRoot = (el, type) => {
+      if (!el) return null;
+      if (type === "radio") return el.closest(".ant-radio-wrapper") || el.closest(".ant-radio") || el.closest("label") || el;
+      return el.closest(".ant-checkbox-wrapper") || el.closest(".ant-checkbox") || el.closest("label") || el;
+    };
+    const isChecked = (el, type) => {
+      const root = controlRoot(el, type);
+      const antCheckbox = root?.querySelector?.(".ant-checkbox") || root?.closest?.(".ant-checkbox");
+      const antRadio = root?.querySelector?.(".ant-radio") || root?.closest?.(".ant-radio");
+      const input = root?.querySelector?.(`input[type='${type}']`) || (el?.matches?.(`input[type='${type}']`) ? el : null);
+      if (type === "checkbox" && antCheckbox) return antCheckbox.classList.contains("ant-checkbox-checked");
+      if (type === "radio" && antRadio) return antRadio.classList.contains("ant-radio-checked");
+      return Boolean(input?.checked);
+    };
+    const clickControl = (el, type) => {
+      const root = controlRoot(el, type);
+      const target =
+        root?.querySelector?.(type === "radio" ? ".ant-radio-inner" : ".ant-checkbox-inner") ||
+        root?.querySelector?.(`input[type='${type}']`) ||
+        root ||
+        el;
+      target.scrollIntoView?.({ block: "center", inline: "center" });
+      const rect = target.getBoundingClientRect?.();
+      for (const eventType of ["mouseover", "mousedown", "mouseup", "click"]) {
+        target.dispatchEvent(
+          new MouseEvent(eventType, {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: rect ? rect.left + rect.width / 2 : 0,
+            clientY: rect ? rect.top + rect.height / 2 : 0,
+          }),
+        );
+      }
+      const input = root?.querySelector?.("input");
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+      input?.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    const videoArea = [...document.querySelectorAll("div, li, section, form")]
+      .filter(
+        (el) =>
+          visible(el) &&
+          norm(el.textContent).includes("视频监控") &&
+          norm(el.textContent).includes("登录验证") &&
+          norm(el.textContent).includes("作弊侦测"),
+      )
+      .sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        const aArea = ar.width * ar.height;
+        const bArea = br.width * br.height;
+        return aArea - bArea;
+      })[0];
+    if (!videoArea) throw new Error("未找到视频监控展开配置区域");
+
+    const textRectIn = (scope, text) => {
+      const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (!norm(node.textContent).includes(text) || !visible(node.parentElement)) continue;
+        const range = document.createRange();
+        const start = String(node.textContent || "").indexOf(text);
+        if (start >= 0) {
+          range.setStart(node, start);
+          range.setEnd(node, start + text.length);
+        } else {
+          range.selectNodeContents(node);
+        }
+        const rect = range.getBoundingClientRect();
+        range.detach();
+        if (rect.width > 0 && rect.height > 0) return rect;
+      }
+      const element = [...scope.querySelectorAll("label, span, div, li")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(text))
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return ar.width * ar.height - br.width * br.height;
+        })[0];
+      if (element) {
+        const rect = element.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) return rect;
+      }
+      return null;
+    };
+    const textRect = (text) => textRectIn(videoArea, text) || textRectIn(document.body, text);
+    const findControlInTextContainer = (text, type) => {
+      const selector =
+        type === "radio"
+          ? ".ant-radio-wrapper, .ant-radio, input[type='radio']"
+          : ".ant-checkbox-wrapper, .ant-checkbox, input[type='checkbox']";
+      const containers = [...videoArea.querySelectorAll("label, .ant-radio-wrapper, .ant-checkbox-wrapper, div, li"), ...document.body.querySelectorAll("label, .ant-radio-wrapper, .ant-checkbox-wrapper")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(text) && el.querySelector(selector))
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return ar.width * ar.height - br.width * br.height;
+        });
+      for (const container of containers) {
+        const exactWrapper = [...container.querySelectorAll(".ant-radio-wrapper, .ant-checkbox-wrapper, label")]
+          .filter((el) => visible(el) && norm(el.textContent).includes(text) && el.querySelector(selector))
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return ar.width * ar.height - br.width * br.height;
+          })[0];
+        const isWrapperContainer = container.matches?.(".ant-radio-wrapper, .ant-checkbox-wrapper, label");
+        const target = exactWrapper || (isWrapperContainer ? container.querySelector(selector) : null);
+        if (!target) continue;
+        const root = controlRoot(target, type);
+        if (root) return root;
+      }
+      return null;
+    };
+    const findControlNearText = (text, type) => {
+      const inContainer = findControlInTextContainer(text, type);
+      if (inContainer) return inContainer;
+      const rect = textRect(text);
+      if (!rect) return null;
+      const centerY = rect.top + rect.height / 2;
+      const selector =
+        type === "radio"
+          ? ".ant-radio-wrapper, .ant-radio, .ant-radio-inner, input[type='radio']"
+          : ".ant-checkbox-wrapper, .ant-checkbox, .ant-checkbox-inner, input[type='checkbox']";
+      const controls = [...videoArea.querySelectorAll(selector)]
+        .map((control) => controlRoot(control, type))
+        .filter(Boolean)
+        .filter((control, index, list) => list.indexOf(control) === index)
+        .map((control) => {
+          const visual =
+            control.querySelector?.(type === "radio" ? ".ant-radio-inner" : ".ant-checkbox-inner") ||
+            control.querySelector?.(`input[type='${type}']`) ||
+            control;
+          const ir = (visible(visual) ? visual : control).getBoundingClientRect();
+          const cx = ir.left + ir.width / 2;
+          const cy = ir.top + ir.height / 2;
+          return {
+            control,
+            sameLine: Math.abs(cy - centerY) < Math.max(36, rect.height * 2.2),
+            score:
+              Math.abs(cy - centerY) * 30 +
+              Math.abs(cx - rect.left) +
+              (cx > rect.right + 40 ? 1000 : 0) +
+              (cx < rect.left - 260 ? 500 : 0),
+          };
+        })
+        .filter((item) => item.sameLine)
+        .sort((a, b) => a.score - b.score);
+      return controls[0]?.control || null;
+    };
+    const clickPoint = (x, y) => {
+      let target = document.elementFromPoint(x, y);
+      if (!target) return false;
+      target = target.closest?.(".ant-radio-wrapper, .ant-radio, .ant-checkbox-wrapper, .ant-checkbox, label, button, [role='switch']") || target;
+      const rect = target.getBoundingClientRect?.();
+      for (const eventType of ["mouseover", "mousedown", "mouseup", "click"]) {
+        target.dispatchEvent(
+          new MouseEvent(eventType, {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: rect ? rect.left + rect.width / 2 : x,
+            clientY: rect ? rect.top + rect.height / 2 : y,
+          }),
+        );
+      }
+      target.click?.();
+      return true;
+    };
+    const clickByTextOffset = (text, type) => {
+      const rect = textRect(text);
+      if (!rect) return false;
+      const centerY = rect.top + rect.height / 2;
+      const offsets = type === "radio" ? [-24, -32, -42, -55] : [-28, -42, -58, -72, -92];
+      for (const offset of offsets) {
+        const x = Math.max(2, rect.left + offset);
+        const y = centerY;
+        if (clickPoint(x, y)) return true;
+      }
+      return false;
+    };
+    const clickRadioInVerificationRow = (text) => {
+      const row = [...document.body.querySelectorAll("div, li, section")]
+        .filter((el) => visible(el) && norm(el.textContent).includes("验证方式") && norm(el.textContent).includes(text))
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return ar.width * ar.height - br.width * br.height;
+        })[0];
+      if (row) {
+        const label = [...row.querySelectorAll("label, .ant-radio-wrapper")]
+          .filter((el) => visible(el) && norm(el.textContent).includes(text))
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return ar.width * ar.height - br.width * br.height;
+          })[0];
+        const radio = label?.querySelector(".ant-radio-inner, .ant-radio, input[type='radio']");
+        if (radio) {
+          clickControl(radio, "radio");
+          return true;
+        }
+      }
+      const rect = textRect(text);
+      if (!rect) return false;
+      const y = rect.top + rect.height / 2;
+      for (const x of [rect.left - 24, rect.left - 34, rect.left - 46, rect.left - 62]) {
+        if (clickPoint(Math.max(2, x), y)) return true;
+      }
+      return false;
+    };
+    const setOption = (text, type, desired = true, required = true) => {
+      const control = findControlNearText(text, type);
+      if (!control) {
+        const clicked = desired ? clickByTextOffset(text, type) : false;
+        if (!clicked && required) throw new Error(`视频监控区域未找到选项：${text}`);
+        return;
+      }
+      if (isChecked(control, type) !== desired) clickControl(control, type);
+      if (isChecked(control, type) !== desired) {
+        if (desired && clickByTextOffset(text, type) && isChecked(control, type) === desired) return;
+        const input = control.querySelector?.(`input[type='${type}']`) || (control.matches?.(`input[type='${type}']`) ? control : null);
+        const descriptor =
+          input &&
+          (Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "checked") ||
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked"));
+        if (input && descriptor?.set) descriptor.set.call(input, desired);
+        else if (input) input.checked = desired;
+        input?.dispatchEvent(new Event("input", { bubbles: true }));
+        input?.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    };
+
+    setOption("登录验证", "checkbox", true);
+    setOption("自动验证", "radio", true, false);
+    if (!clickRadioInVerificationRow("考后公安验证")) {
+      setOption("考后公安验证", "radio", true, false);
+    }
+    setOption("作弊侦测", "checkbox", true, false);
+    setOption("基础版AI", "radio", true, false);
+  });
+
+  await ensureOptionCheckedByMouse(page, "考后公安验证", "radio");
+  await ensureOptionCheckedByMouse(page, "作弊侦测", "checkbox");
+  await ensureOptionCheckedByMouse(page, "基础版AI", "radio");
+
+  await pause(300);
+  const status = await evaluate(page, () => {
+    const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const area = [...document.querySelectorAll("div, li, section, form")]
+      .filter(
+        (el) =>
+          visible(el) &&
+          norm(el.textContent).includes("视频监控") &&
+          norm(el.textContent).includes("登录验证") &&
+          norm(el.textContent).includes("作弊侦测"),
+      )
+      .sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        return ar.width * ar.height - br.width * br.height;
+      })[0];
+    const checkedNear = (text, kind) => {
+      const scope = area || document.body;
+      const selector = kind === "radio" ? ".ant-radio" : ".ant-checkbox";
+      const wrapperSelector = kind === "radio" ? ".ant-radio-wrapper" : ".ant-checkbox-wrapper";
+      const directWrapper = [...scope.querySelectorAll(`${wrapperSelector}, label`), ...document.body.querySelectorAll(`${wrapperSelector}, label`)]
+        .filter((el) => visible(el) && norm(el.textContent).includes(text) && el.querySelector(selector))
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return ar.width * ar.height - br.width * br.height;
+        })[0];
+      if (directWrapper) {
+        const el = directWrapper.querySelector(selector);
+        return kind === "radio" ? el?.classList.contains("ant-radio-checked") : el?.classList.contains("ant-checkbox-checked");
+      }
+      const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+      let rect = null;
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (!norm(node.textContent).includes(text) || !visible(node.parentElement)) continue;
+        const range = document.createRange();
+        const start = String(node.textContent || "").indexOf(text);
+        if (start >= 0) {
+          range.setStart(node, start);
+          range.setEnd(node, start + text.length);
+        } else {
+          range.selectNodeContents(node);
+        }
+        rect = range.getBoundingClientRect();
+        range.detach();
+        break;
+      }
+      if (!rect) {
+        const element = [...scope.querySelectorAll("label, span, div, li"), ...document.body.querySelectorAll("label, span")]
+          .filter((el) => visible(el) && norm(el.textContent).includes(text))
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return ar.width * ar.height - br.width * br.height;
+          })[0];
+        rect = element?.getBoundingClientRect() || null;
+      }
+      if (!rect) return false;
+      const cy = rect.top + rect.height / 2;
+      const controls = [...scope.querySelectorAll(selector)]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          return { el, score: Math.abs(r.top + r.height / 2 - cy) * 30 + Math.abs(r.left - rect.left) };
+        })
+        .filter((item) => item.score < 1500)
+        .sort((a, b) => a.score - b.score);
+      const el = controls[0]?.el;
+      return kind === "radio" ? el?.classList.contains("ant-radio-checked") : el?.classList.contains("ant-checkbox-checked");
+    };
+    return {
+      loginValidation: checkedNear("登录验证", "checkbox"),
+      postPoliceVerify: checkedNear("考后公安验证", "radio"),
+      cheatDetection: checkedNear("作弊侦测", "checkbox"),
+    };
+  });
+  return status;
+}
+
+async function ensurePostPoliceVerifySelected(page) {
+  await ensureOptionCheckedByMouse(page, "自动验证", "radio");
+  await ensureOptionCheckedByMouse(page, "考后公安验证", "radio");
+}
+
 async function setWebExamLeaveLimit(page, value) {
   await evaluate(
     page,
@@ -2089,17 +2598,49 @@ async function toggleSwitchByText(page, label, desired) {
         return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
       };
 
-      const container = [...document.querySelectorAll("div, li, section")]
-        .filter((el) => visible(el) && norm(el.textContent).includes(targetLabel))
-        .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length)[0];
-      if (!container) {
+      const textRect = (() => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          if (!norm(node.textContent).includes(targetLabel) || !visible(node.parentElement)) continue;
+          const range = document.createRange();
+          const start = String(node.textContent || "").indexOf(targetLabel);
+          if (start >= 0) {
+            range.setStart(node, start);
+            range.setEnd(node, start + targetLabel.length);
+          } else {
+            range.selectNodeContents(node);
+          }
+          const rect = range.getBoundingClientRect();
+          range.detach();
+          if (rect.width > 0 && rect.height > 0) return rect;
+        }
+        const el = [...document.querySelectorAll("label, span, div, li")]
+          .filter((item) => visible(item) && norm(item.textContent).includes(targetLabel))
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return ar.width * ar.height - br.width * br.height;
+          })[0];
+        return el?.getBoundingClientRect() || null;
+      })();
+      if (!textRect) {
         throw new Error(`未找到开关：${targetLabel}`);
       }
 
-      const switchEl =
-        container.querySelector("[role='switch']") ||
-        container.querySelector(".ant-switch") ||
-        container.querySelector("button[aria-checked]");
+      const centerY = textRect.top + textRect.height / 2;
+      const switchEl = [...document.querySelectorAll("[role='switch'], .ant-switch, button[aria-checked]")]
+        .filter(visible)
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          return {
+            el,
+            sameLine: Math.abs(rect.top + rect.height / 2 - centerY) < Math.max(40, textRect.height * 2.5),
+            score: Math.abs(rect.top + rect.height / 2 - centerY) * 30 + Math.max(0, textRect.left - rect.left) * 20 + Math.abs(rect.left - textRect.right),
+          };
+        })
+        .filter((item) => item.sameLine)
+        .sort((a, b) => a.score - b.score)[0]?.el;
       if (!switchEl) {
         throw new Error(`未找到开关控件：${targetLabel}`);
       }
@@ -2896,7 +3437,7 @@ async function runBasicInfo(page, config, emit) {
     await enableMinuteOption(page, "提前登录", config.earlyLoginMinutes, emit);
     emit(event("log", { level: "success", message: `已填写提前登录：${config.earlyLoginMinutes} 分钟` }));
   }
-  if (config.preLoginPrompt) {
+  if (config.earlyLoginMinutes != null && config.preLoginPrompt) {
     await fillPreLoginPrompt(page, config.preLoginPrompt);
     emit(event("log", { level: "success", message: "已通过源码编辑填写考前等待提示。" }));
   }
@@ -2906,7 +3447,8 @@ async function runBasicInfo(page, config, emit) {
     emit(event("log", { level: "success", message: `已填写限制迟到：${config.lateLimitMinutes} 分钟` }));
   }
 
-  await selectRadioInGroup(page, "试卷扣时规则", config.timeRule || "迟到及离开扣时");
+  const timeRule = config.isMockExam ? "不扣时" : "迟到及离开扣时";
+  await selectRadioInGroup(page, "试卷扣时规则", timeRule);
   await selectRadioInGroup(page, "场次类型", "考试");
   await selectRadioInGroup(page, "考试地址", "独立考试地址");
   await selectRadioInGroup(page, "交卷后跳转", "不跳转");
@@ -2928,8 +3470,7 @@ async function runBasicInfo(page, config, emit) {
   }
 
   await expectBasicInfoReadyToSubmit(page, config, emit);
-  await clickButton(page, "下一步");
-  await waitForStep(page, "批量添加科目");
+  await nextStep(page, "批量添加科目");
   emit(event("log", { level: "success", message: "基础信息填写完成，已进入选择试卷页。" }));
 }
 
@@ -3057,13 +3598,35 @@ async function runPersonalInfo(page, config, emit) {
 async function runExamConfig(page, config, emit) {
   emit(event("stage", { stage: "考试配置", percent: 88, stepIndex: 4, caption: "正在配置承诺书、视频监控、鹰眼、客户端和防复制项" }));
 
-  await setMasterCheckboxByLabel(page, "考试承诺书", true);
-  await fillPledgeContent(page, config.pledgeContent || "测试考试");
+  if (String(config.pledgeContent || "").trim()) {
+    await setMasterCheckboxByLabel(page, "考试承诺书", true);
+    await fillPledgeContent(page, config.pledgeContent);
+    emit(event("log", { level: "success", message: "已按需求单填写考试承诺书。" }));
+  } else {
+    await setMasterCheckboxByLabel(page, "考试承诺书", false);
+    emit(event("log", { level: "success", message: "需求单未填写考试承诺书内容，已保持考试承诺书未勾选。" }));
+  }
 
   if (config.videoMonitor) {
     await setMasterCheckboxByLabel(page, "视频监控", true);
+    if (config.videoRecord) {
+      await toggleSwitchByText(page, "视频录制", true);
+    }
+    const videoStatus = await configureVideoMonitorDefaults(page);
+    await ensurePostPoliceVerifySelected(page);
+    const failed = Object.entries(videoStatus || {})
+      .filter(([, ok]) => !ok)
+      .map(([key]) => key);
+    emit(
+      event("log", {
+        level: failed.length ? "warn" : "success",
+        message: failed.length
+          ? `已执行视频监控默认项点击，页面继续下一步；读取校验未命中：${failed.join(", ")}`
+          : "已配置视频监控默认项：登录验证、自动验证、考后公安验证、作弊侦测。",
+      }),
+    );
   }
-  if (config.videoRecord) {
+  if (config.videoRecord && !config.videoMonitor) {
     await toggleSwitchByText(page, "视频录制", true);
   }
   if (config.hawkeye) {
@@ -3091,8 +3654,44 @@ async function runExamConfig(page, config, emit) {
     await setMasterCheckboxByLabel(page, "禁止复制", true);
   }
 
-  await clickButton(page, "下一步");
+  await nextStep(page, "完成");
   emit(event("log", { level: "success", message: "考试配置已按需求单写入，准备进入确认页。" }));
+}
+
+function buildMockExamConfig(config) {
+  if (!config?.mockExamEnabled) {
+    return null;
+  }
+  return {
+    ...config,
+    examName: config.mockExamName || `${config.examName || "考试"}-试考`,
+    startTimeDisplay: config.mockStartTimeDisplay || "",
+    endTimeDisplay: config.mockEndTimeDisplay || "",
+    startTimeIso: config.mockStartTimeIso || "",
+    endTimeIso: config.mockEndTimeIso || "",
+    earlyLoginMinutes: null,
+    lateLimitMinutes: null,
+    preLoginPrompt: "",
+    isMockExam: true,
+    timeRule: "不扣时",
+    videoRecord: false,
+    clientLoginLimit: 10,
+    subjects: [],
+    subjectImportPath: "",
+  };
+}
+
+async function createSingleExam(page, config, emit, options = {}) {
+  const isMock = Boolean(options.isMock);
+  const doneCaption = isMock ? "正在点击创建完成并等待试考返回" : "正在点击创建完成并等待后台返回";
+
+  await runBasicInfo(page, config, emit);
+  await runSubjects(page, config, emit);
+  await runPersonalInfo(page, config, emit);
+  await runExamConfig(page, config, emit);
+
+  emit(event("stage", { stage: "创建完成", percent: 100, stepIndex: 5, caption: doneCaption }));
+  await finishCreation(page);
 }
 
 export async function runEasyExamJob({ job, runtimeDir, emit }) {
@@ -3128,15 +3727,24 @@ export async function runEasyExamJob({ job, runtimeDir, emit }) {
     await waitForLogin(page, emit, job.login);
     await normalizeBrowserView(page, context);
 
-    await runBasicInfo(page, job.config, emit);
-    await runSubjects(page, job.config, emit);
-    await runPersonalInfo(page, job.config, emit);
-    await runExamConfig(page, job.config, emit);
+    await createSingleExam(page, job.config, emit);
+    emit(event("log", { level: "success", message: `主考试已创建完成：${job.config.examName || "空"}` }));
 
-    emit(event("stage", { stage: "创建完成", percent: 100, stepIndex: 5, caption: "正在点击创建完成并等待后台返回" }));
-    await finishCreation(page);
-    emit(event("status", { status: "completed", message: "考试已创建完成。" }));
-    emit(event("log", { level: "success", message: "已点击创建完成，考试创建流程结束。" }));
+    const mockConfig = buildMockExamConfig(job.config);
+    if (mockConfig) {
+      emit(event("status", { status: "running", message: "主考试完成，正在新建试考" }));
+      emit(event("log", { level: "success", message: `开始创建试考：${mockConfig.examName}；时间 ${mockConfig.startTimeDisplay} - ${mockConfig.endTimeDisplay}` }));
+      await page.goto(EZTEST_ADD_URL, { waitUntil: "domcontentloaded" });
+      await normalizeBrowserView(page, context);
+      if (!(await waitForBasicInfoReady(page, 20_000))) {
+        throw new Error("主考试创建完成后，未能重新进入新建考试基本信息页，试考创建已停止。");
+      }
+      await createSingleExam(page, mockConfig, emit, { isMock: true });
+      emit(event("log", { level: "success", message: `试考已创建完成：${mockConfig.examName}` }));
+    }
+
+    emit(event("status", { status: "completed", message: mockConfig ? "主考试和试考都已创建完成。" : "考试已创建完成。" }));
+    emit(event("log", { level: "success", message: mockConfig ? "已完成主考试与试考两次创建流程。" : "已点击创建完成，考试创建流程结束。" }));
     emit(event("done", { result: "created" }));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -38,19 +38,62 @@ def parse_minutes(value):
     return int(match.group(1)) if match else None
 
 
-def parse_subjects_text(value):
+def split_subject_names(value):
     text = normalize_text(value)
     if not text:
         return []
-    parts = re.split(r"[\n,，;；]+", text)
+    parts = re.split(r"[\n,，、;；]+", text)
     return [part.strip() for part in parts if part and part.strip()]
+
+
+def parse_subjects_text(value):
+    return split_subject_names(value)
+
+
+def split_form_codes(value):
+    text = normalize_text(value)
+    if not text:
+        return []
+    parts = re.split(r"[\n,，;；\s]+", text)
+    return [part.strip() for part in parts if part and part.strip()]
+
+
+def normalize_course_record(name="", code="", form_codes=""):
+    course_name = normalize_text(name)
+    course_code = normalize_text(code)
+    forms = split_form_codes(form_codes)
+    if not course_name and not course_code:
+        return None
+    return {
+        "name": course_name,
+        "code": course_code,
+        "form_codes": forms,
+    }
+
+
+def parse_course_records_text(value):
+    text = normalize_text(value)
+    if not text:
+        return []
+    records = []
+    for line in re.split(r"[\n;；]+", text):
+        parts = [part.strip() for part in re.split(r"[|｜\t]", line) if part and part.strip()]
+        if len(parts) >= 2:
+            record = normalize_course_record(
+                parts[0],
+                parts[1],
+                parts[2] if len(parts) > 2 else "",
+            )
+            if record and record["name"] and record["code"]:
+                records.append(record)
+    return records
 
 
 def parse_time_range(value):
     text = normalize_text(value)
     if not text:
         return None, None
-    parts = [part.strip() for part in text.split("-") if part.strip()]
+    parts = [part.strip() for part in re.split(r"\s*(?:-|–|—|~|至)\s*", text) if part.strip()]
     if len(parts) != 2:
         return None, None
     return parse_datetime(parts[0]), parse_datetime(parts[1])
@@ -104,8 +147,72 @@ def read_subjects(sheet):
             continue
         name = normalize_text(row[1] if len(row) > 1 else "")
         if name:
-            subjects.append(name)
+            subjects.extend(split_subject_names(name))
     return subjects
+
+
+def read_course_records(sheet):
+    rows = list(sheet.iter_rows(values_only=True))
+    if not rows:
+        return []
+
+    headers = [normalize_text(value).lower() for value in rows[0]]
+
+    def find_index(*names):
+        normalized_names = [normalize_text(name).lower() for name in names]
+        for index, header in enumerate(headers):
+            if header in normalized_names:
+                return index
+        for index, header in enumerate(headers):
+            if any(name and name in header for name in normalized_names):
+                return index
+        return None
+
+    name_index = find_index("name", "科目名称", "科目")
+    code_index = find_index("code", "course_code", "科目编号", "科目代码")
+    form_index = find_index("form_codes", "form code", "试卷编码", "试卷编号", "试卷代码")
+
+    if name_index is None:
+        name_index = 1
+    if code_index is None:
+        code_index = 2
+    if form_index is None:
+        form_index = 3
+
+    records = []
+    for row in rows[1:]:
+        if not row:
+            continue
+        name = row[name_index] if len(row) > name_index else ""
+        code = row[code_index] if len(row) > code_index else ""
+        form_codes = row[form_index] if len(row) > form_index else ""
+        if normalize_text(name) and not normalize_text(code) and not normalize_text(form_codes):
+            for subject in split_subject_names(name):
+                record = normalize_course_record(subject, "", "")
+                if record:
+                    records.append(record)
+            continue
+        record = normalize_course_record(name, code, form_codes)
+        if record and (record["name"] or record["code"]):
+            records.append(record)
+    return records
+
+
+def build_generated_courses(subjects, start_dt):
+    if not subjects or not start_dt:
+        return []
+    prefix = start_dt.strftime("%Y%m%d")
+    courses = []
+    for index, subject in enumerate(subjects, start=1):
+        course_code = f"{prefix}-{index:02d}"
+        courses.append(
+            {
+                "name": subject,
+                "code": course_code,
+                "form_codes": [course_code],
+            }
+        )
+    return courses
 
 
 def build_preview(config):
@@ -138,6 +245,9 @@ def build_preview(config):
         f'{"是" if config["videoMonitor"] else "否"} / {"是" if config["videoRecord"] else "否"}',
         "自动勾选",
     )
+    if config["videoMonitor"]:
+        add("考试中", "登录验证", "自动验证；考后公安验证", "视频监控默认启用")
+        add("考试中", "作弊侦测", "基础版AI", "视频监控默认启用")
     add("考试中", "鹰眼监控", "是" if config["hawkeye"] else "否", "自动勾选")
     add(
         "考试中",
@@ -153,6 +263,18 @@ def build_preview(config):
     )
     add("考试中", "答题水印", "是" if config["watermark"] else "否", "自动勾选")
     add("考试中", "禁止复制", "是" if config["disableCopy"] else "否", "自动勾选")
+    if config["mockExamEnabled"]:
+        add("试考", "试考名称", config["mockExamName"], "自动新建")
+        add(
+            "试考",
+            "试考时间",
+            f'{config["mockStartTimeDisplay"]} 至 {config["mockEndTimeDisplay"]}',
+            "自动填写",
+        )
+        add("试考", "提前登录时间", "不设置", "自动跳过")
+        add("试考", "限制迟到时间", "不设置", "自动跳过")
+        add("试考", "试卷扣时规则", "不扣时", "自动选择")
+        add("试考", "科目设置", "跳过", "自动跳过")
     add("完成", "最终创建", "点击创建完成", "自动创建")
     return preview
 
@@ -182,11 +304,24 @@ def parse_workbook(path_str):
         return ""
 
     start_dt, end_dt = parse_time_range(get_field("考试日期时间", "考试时间", "考试起止时间"))
-    subjects = parse_subjects_text(get_field("科目信息", "科目"))
-    if not subjects and subjects_sheet:
-        subjects = read_subjects(subjects_sheet)
+    mock_start_dt, mock_end_dt = parse_time_range(get_field("试考日期时间", "试考时间", "试考起止时间"))
+    courses = parse_course_records_text(get_field("科目信息", "科目"))
+    subjects = [course["name"] or course["code"] for course in courses]
+    if not subjects:
+        subjects = parse_subjects_text(get_field("科目信息", "科目"))
+    if subjects_sheet:
+        sheet_courses = read_course_records(subjects_sheet)
+        if sheet_courses:
+            courses = sheet_courses
+            subjects = [course["name"] or course["code"] for course in courses]
+        elif not subjects:
+            subjects = read_subjects(subjects_sheet)
+    if subjects and not [course for course in courses if course.get("code")]:
+        courses = build_generated_courses(subjects, start_dt)
     subject_import_dir = path.parent / "exam_request"
     subject_import_path = build_subject_workbook(subjects, subject_import_dir) if subjects else ""
+
+    time_rule = get_field("试卷扣时规则", "扣时规则", "扣时")
 
     config = {
         "examName": get_field("考试名称", "考试名"),
@@ -196,12 +331,13 @@ def parse_workbook(path_str):
         "endTimeIso": end_dt.isoformat() if end_dt else "",
         "earlyLoginMinutes": parse_minutes(get_field("提前登录时间", "提前登录分钟", "提前登录")),
         "lateLimitMinutes": parse_minutes(get_field("限制迟到时间", "限制迟到分钟", "限制迟到")),
-        "timeRule": get_field("试卷扣时规则") or "不扣时",
+        "timeRule": time_rule,
         "preLoginPrompt": get_field("考前等待提示", "考前提示", "考前等待"),
         "welcomeText": get_field("欢迎语"),
         "pledgeContent": get_field("考试承诺书内容", "承诺书内容"),
         "videoMonitor": parse_bool(get_field("视频监控")),
         "videoRecord": parse_bool(get_field("视频录制")),
+        "loginVerifyMode": "考后公安验证",
         "hawkeye": parse_bool(get_field("鹰眼监控")),
         "examType": get_field("考试类型"),
         "clientExam": get_field("考试类型") == "客户端考试",
@@ -211,7 +347,14 @@ def parse_workbook(path_str):
         "watermark": parse_bool(field_map.get("答题水印")),
         "disableCopy": parse_bool(field_map.get("禁止复制")),
         "subjects": subjects,
+        "courses": courses,
         "subjectImportPath": subject_import_path,
+        "mockExamEnabled": bool(mock_start_dt and mock_end_dt),
+        "mockExamName": f'{get_field("考试名称", "考试名")}-试考' if get_field("考试名称", "考试名") else "",
+        "mockStartTimeDisplay": format_datetime(mock_start_dt),
+        "mockEndTimeDisplay": format_datetime(mock_end_dt),
+        "mockStartTimeIso": mock_start_dt.isoformat() if mock_start_dt else "",
+        "mockEndTimeIso": mock_end_dt.isoformat() if mock_end_dt else "",
         "visibleFields": ["姓名", "身份证号"],
         "editableFields": [],
         "requiredFields": [],
@@ -223,8 +366,12 @@ def parse_workbook(path_str):
         warnings.append("缺少考试名称。")
     if not config["startTimeIso"] or not config["endTimeIso"]:
         warnings.append("考试日期时间无法解析，请检查需求单格式。")
+    if get_field("试考日期时间", "试考时间", "试考起止时间") and not config["mockExamEnabled"]:
+        warnings.append("试考日期时间无法解析，试考自动创建会跳过。")
     if not subjects:
         warnings.append("未读取到科目信息，批量导入科目步骤会跳过。")
+    if subjects and not courses:
+        warnings.append("科目信息缺少考试日期，无法按规则生成 code/form_codes。")
 
     return {
         "filename": path.name,

@@ -4,11 +4,31 @@
 node_modules
 node_modules/
 
+# Environment files
+.env
+.env.local
+.env.*.local
+!.env.example
+
 # Runtime and local generated state
 .easy_exam_runtime/
 .codex_tmp_spreadsheet/
+uploads/
+temp/
+generated/
 __pycache__/
 server/__pycache__/
 
 # Build and output artifacts
-outputs/
+outputs/*
+!outputs/web_prototype/
+outputs/web_prototype/*
+!outputs/web_prototype/easy_exam_automation.html
+
+# Logs
+*.log
+
+# Uploaded customer files and generated spreadsheet data
+*.xlsx
+*.xls
+*.csv

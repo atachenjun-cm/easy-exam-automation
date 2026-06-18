@@ -7,7 +7,7 @@
     <style>
       :root {
         color-scheme: light;
-        --bg: #f6f7f9;
+        --bg: #f5f7fb;
         --panel: #ffffff;
         --panel-soft: #f9fafb;
         --line: #d9dee7;
@@ -31,7 +31,7 @@
       body {
         margin: 0;
         font-family:
-          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Inter, ui-sans-serif, system-ui,
           "PingFang SC", "Microsoft YaHei", sans-serif;
         background: var(--bg);
         color: var(--text);
@@ -50,6 +50,11 @@
       }
 
       .sidebar {
+        position: sticky;
+        top: 0;
+        align-self: start;
+        height: 100vh;
+        overflow-y: auto;
         background: #ffffff;
         border-right: 1px solid var(--line);
         padding: 22px 18px;
@@ -101,6 +106,18 @@
         border-radius: 6px;
         color: #394150;
         font-size: 14px;
+      }
+
+      .nav-button {
+        width: 100%;
+        border: 0;
+        text-align: left;
+        background: transparent;
+        cursor: pointer;
+      }
+
+      .nav-button:hover {
+        background: #f1f5f9;
       }
 
       .nav-item.active {
@@ -168,6 +185,11 @@
         gap: 10px;
         flex-wrap: wrap;
         justify-content: flex-end;
+      }
+
+      .import-actions {
+        margin: 14px 0 2px;
+        justify-content: center;
       }
 
       .btn {
@@ -274,6 +296,35 @@
         padding: 9px 11px;
         background: #fff;
         color: var(--text);
+      }
+
+      .secret-input {
+        position: relative;
+      }
+
+      .secret-input .field-input {
+        padding-right: 68px;
+      }
+
+      .secret-toggle {
+        position: absolute;
+        right: 8px;
+        top: 50%;
+        transform: translateY(-50%);
+        border: 0;
+        background: transparent;
+        color: var(--blue);
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1;
+        padding: 6px 4px;
+      }
+
+      .secret-toggle:focus-visible {
+        outline: 2px solid rgba(31, 117, 203, 0.35);
+        outline-offset: 2px;
+        border-radius: 4px;
       }
 
       .field-input:focus {
@@ -1175,6 +1226,562 @@
         font-size: 13px;
       }
 
+      .candidate-panel {
+        margin-top: 16px;
+        border-color: #e5e7eb;
+        border-radius: 24px;
+        overflow: hidden;
+        background: #ffffff;
+        box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06);
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      }
+
+      .candidate-panel .panel-head {
+        min-height: 86px;
+        padding: 24px 28px;
+        align-items: flex-start;
+        border-bottom-color: #eef2f7;
+      }
+
+      .candidate-panel .panel-body {
+        padding: 28px;
+        background: #ffffff;
+      }
+
+      .candidate-title-block {
+        display: grid;
+        gap: 8px;
+      }
+
+      .candidate-title-block .panel-title {
+        color: #111827;
+        font-size: 24px;
+        font-weight: 800;
+        letter-spacing: 0;
+      }
+
+      .candidate-grid {
+        display: grid;
+        grid-template-columns: minmax(360px, 38%) minmax(540px, 62%);
+        gap: 24px;
+        align-items: start;
+      }
+
+      .candidate-left,
+      .candidate-right {
+        min-width: 0;
+      }
+
+      .candidate-card {
+        border: 1px solid #e5e7eb;
+        border-radius: 20px;
+        background: #ffffff;
+        box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06);
+      }
+
+      .candidate-card + .candidate-card,
+      .candidate-issues + .candidate-card {
+        margin-top: 14px;
+      }
+
+      .candidate-card-body {
+        padding: 20px;
+      }
+
+      .candidate-pass-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        border-radius: 999px;
+        padding: 9px 14px;
+        background: #f8fafc;
+        color: #6b7280;
+        font-size: 13px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      .candidate-pass-badge.is-ok {
+        background: #f0fdf4;
+        color: #16803f;
+      }
+
+      .candidate-pass-badge.is-error {
+        background: #fff1f0;
+        color: #b42318;
+      }
+
+      .candidate-pass-badge::before {
+        content: "✓";
+        width: 16px;
+        height: 16px;
+        border-radius: 999px;
+        display: grid;
+        place-items: center;
+        border: 1px solid currentColor;
+        font-size: 11px;
+      }
+
+      .candidate-upload-box {
+        display: grid;
+        grid-template-columns: 150px minmax(0, 1fr);
+        gap: 20px;
+        align-items: center;
+        justify-items: stretch;
+        text-align: left;
+        min-height: 220px;
+        padding: 24px;
+        border: 1px solid #cfe0ff;
+        border-radius: 20px;
+        background:
+          radial-gradient(circle at 74px 150px, rgba(10, 132, 255, 0.2), transparent 46px),
+          linear-gradient(135deg, #f7fbff 0%, #ffffff 58%, #f2f7ff 100%);
+        cursor: pointer;
+      }
+
+      .candidate-upload-box .file-badge {
+        justify-self: center;
+        width: 82px;
+        height: 104px;
+        border-radius: 10px;
+        border-color: #c8d7ec;
+        font-size: 15px;
+        box-shadow: 0 18px 28px rgba(0, 113, 227, 0.08);
+      }
+
+      .candidate-upload-box .drop-title {
+        display: block;
+        color: #111827;
+        font-size: 20px;
+        font-weight: 800;
+        line-height: 1.35;
+        margin-bottom: 10px;
+      }
+
+      .candidate-upload-box .drop-note {
+        display: block;
+        color: #6b7280;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .candidate-upload-status {
+        display: none;
+        align-items: center;
+        gap: 7px;
+        color: #16803f;
+        font-size: 13px;
+        font-weight: 750;
+        margin-bottom: 8px;
+      }
+
+      .candidate-upload-box.has-upload .candidate-upload-status {
+        display: inline-flex;
+      }
+
+      .candidate-upload-status::before {
+        content: "✓";
+        width: 16px;
+        height: 16px;
+        border-radius: 999px;
+        display: grid;
+        place-items: center;
+        border: 1px solid currentColor;
+        font-size: 11px;
+      }
+
+      .candidate-help-box {
+        margin-top: 14px;
+        border: 1px solid #e5edf8;
+        border-radius: 12px;
+        background: rgba(247, 251, 255, 0.86);
+        color: #64748b;
+        padding: 10px 12px;
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .candidate-card-head {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+
+      .candidate-card-head .panel-title {
+        font-size: 16px;
+        color: #111827;
+      }
+
+      .candidate-actions,
+      .candidate-session-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .mapping-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+
+      .mapping-card {
+        border: 1px solid #edf1f6;
+        border-radius: 14px;
+        padding: 12px 14px;
+        background: #ffffff;
+        display: grid;
+        grid-template-columns: 112px minmax(0, 1fr);
+        gap: 14px;
+        align-items: center;
+        min-height: 64px;
+      }
+
+      .mapping-card .field-label {
+        color: #253044;
+        font-size: 14px;
+        font-weight: 800;
+      }
+
+      .mapping-card select,
+      .session-select {
+        width: 100%;
+        min-height: 44px;
+        border: 1px solid #d8dee8;
+        border-radius: 12px;
+        background: #ffffff;
+        color: #111827;
+        padding: 9px 12px;
+        font-size: 14px;
+      }
+
+      .mapping-card select:focus,
+      .session-select:focus,
+      .room-size-card .field-input:focus {
+        outline: 0;
+        border-color: #0071e3;
+        box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.12);
+      }
+
+      .candidate-actions {
+        margin-top: 12px;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .candidate-actions .btn {
+        min-height: 44px;
+        border-radius: 12px;
+        justify-content: center;
+        font-weight: 800;
+      }
+
+      .candidate-actions .btn.primary {
+        background: #0071e3;
+        border-color: #0071e3;
+        color: #ffffff;
+      }
+
+      .candidate-actions .btn.primary:hover {
+        background: #005bbf;
+      }
+
+      .candidate-issues {
+        display: grid;
+        gap: 8px;
+        margin-top: 14px;
+      }
+
+      .candidate-issue {
+        border-left: 3px solid #c77700;
+        background: #fff8ec;
+        border-radius: 16px;
+        padding: 14px 16px;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .candidate-issue.success {
+        position: relative;
+        border-left: 0;
+        background: #f0fdf4;
+        color: #14532d;
+        padding-left: 48px;
+      }
+
+      .candidate-issue.success::before {
+        content: "✓";
+        position: absolute;
+        left: 16px;
+        top: 17px;
+        width: 22px;
+        height: 22px;
+        border-radius: 999px;
+        display: grid;
+        place-items: center;
+        background: #22c55e;
+        color: #ffffff;
+        font-weight: 900;
+      }
+
+      .candidate-issue.error {
+        border-left-color: #b42318;
+        background: #fff1f0;
+      }
+
+      .candidate-session-card .candidate-card-body {
+        display: grid;
+        gap: 14px;
+      }
+
+      .candidate-session-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 180px;
+        gap: 18px;
+        align-items: end;
+      }
+
+      .candidate-form-block {
+        display: grid;
+        gap: 8px;
+      }
+
+      .candidate-form-title {
+        color: #111827;
+        font-size: 14px;
+        font-weight: 850;
+      }
+
+      .candidate-form-note {
+        color: #6b7280;
+        font-size: 12px;
+      }
+
+      .room-size-card {
+        display: grid;
+        gap: 8px;
+      }
+
+      .room-size-card .field-input {
+        min-height: 44px;
+        border-color: #d8dee8;
+        border-radius: 12px;
+        font-size: 18px;
+        padding-inline: 14px;
+      }
+
+      .candidate-session-actions .btn.primary {
+        width: 100%;
+        min-height: 56px;
+        justify-content: center;
+        padding-inline: 22px;
+        border: 0;
+        border-radius: 14px;
+        background: linear-gradient(135deg, #0a84ff 0%, #005bbf 100%);
+        color: #ffffff;
+        font-size: 18px;
+        font-weight: 850;
+        box-shadow: 0 12px 24px rgba(0, 113, 227, 0.18);
+      }
+
+      .candidate-session-actions .btn.primary::after {
+        content: "→";
+        font-size: 22px;
+        line-height: 1;
+      }
+
+      .selected-session {
+        margin-top: 10px;
+        border: 1px solid #e5e7eb;
+        border-radius: 14px;
+        padding: 12px 14px;
+        background: #f8fafc;
+        display: grid;
+        gap: 6px;
+        color: #111827;
+        font-size: 13px;
+      }
+
+      .candidate-stats {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 12px;
+        margin: 0 0 20px;
+      }
+
+      .stat-box {
+        position: relative;
+        border: 1px solid #e5e7eb;
+        background: #ffffff;
+        border-radius: 16px;
+        padding: 18px 16px 18px 52px;
+        min-height: 108px;
+        box-shadow: 0 12px 32px rgba(15, 23, 42, 0.04);
+      }
+
+      .stat-icon {
+        position: absolute;
+        left: 16px;
+        top: 19px;
+        width: 26px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+        color: #0a84ff;
+      }
+
+      .stat-icon svg {
+        width: 24px;
+        height: 24px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.9;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .stat-box.stat-error .stat-icon {
+        color: #ef4444;
+      }
+
+      .stat-label {
+        color: #6b7280;
+        font-size: 13px;
+        font-weight: 750;
+        line-height: 1.35;
+      }
+
+      .stat-value {
+        margin-top: 8px;
+        color: #111827;
+        font-size: 30px;
+        font-weight: 900;
+      }
+
+      .candidate-preview-title {
+        margin: 0 0 12px;
+        color: #111827;
+        font-size: 15px;
+        font-weight: 850;
+      }
+
+      .candidate-preview {
+        max-height: 520px;
+        overflow: auto;
+        border: 1px solid #e5e7eb;
+        border-radius: 16px;
+        background: #ffffff;
+        box-shadow: 0 12px 32px rgba(15, 23, 42, 0.04);
+      }
+
+      .candidate-preview::-webkit-scrollbar,
+      .candidate-issues::-webkit-scrollbar,
+      .candidate-log-list::-webkit-scrollbar {
+        width: 8px;
+      }
+
+      .candidate-preview::-webkit-scrollbar-thumb,
+      .candidate-issues::-webkit-scrollbar-thumb,
+      .candidate-log-list::-webkit-scrollbar-thumb {
+        border-radius: 999px;
+        background: #c7ccd4;
+      }
+
+      .candidate-preview table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      .candidate-preview table th {
+        height: 44px;
+        background: #f3f4f6;
+        color: #425066;
+        font-size: 13px;
+        font-weight: 850;
+      }
+
+      .candidate-preview table td {
+        height: 44px;
+        color: #111827;
+        font-size: 13px;
+      }
+
+      .candidate-preview table th,
+      .candidate-preview table td {
+        white-space: nowrap;
+        border-color: #edf1f6;
+        padding: 10px 14px;
+      }
+
+      .monitor-account-card[hidden] {
+        display: none;
+      }
+
+      .monitor-account-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .monitor-file-download {
+        width: 100%;
+        justify-content: flex-start;
+        font-size: 15px;
+        font-weight: 800;
+      }
+
+      .monitor-account-preview {
+        max-height: 220px;
+        margin-top: 10px;
+      }
+
+      .candidate-log-list {
+        max-height: 238px;
+      }
+
+      .task-view[hidden] { display: none; }
+      .task-view { display: grid; gap: 18px; }
+      .view-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+      .view-heading h1 { margin: 0; font-size: 25px; }
+      .view-actions { display: flex; gap: 10px; }
+      .project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+      .project-card { border: 1px solid var(--line); border-radius: 16px; background: #fff; padding: 18px; box-shadow: 0 10px 28px rgba(15,23,42,.05); cursor: pointer; }
+      .project-card:hover { border-color: #a8ccff; box-shadow: 0 14px 34px rgba(15,23,42,.08); }
+      .project-card-head, .task-summary { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; }
+      .project-title { font-size: 17px; font-weight: 800; margin-bottom: 6px; }
+      .task-meta { color: var(--muted); font-size: 12px; line-height: 1.7; }
+      .status-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 4px 9px; border-radius: 999px; background: #f1f5f9; color: #64748b; font-size: 12px; font-weight: 800; white-space: nowrap; }
+      .status-chip.success { background: #ecfdf3; color: #15803d; }
+      .status-chip.running { background: #eaf3ff; color: #0670d8; }
+      .status-chip.failed { background: #fff1f2; color: #dc2626; }
+      .status-chip.waiting_manual { background: #fff7e6; color: #b56700; }
+      .mini-progress { height: 7px; background: #e8edf4; border-radius: 999px; overflow: hidden; margin-top: 14px; }
+      .mini-progress > span { display: block; height: 100%; background: #1683f5; border-radius: inherit; }
+      .exam-table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
+      .exam-table { min-width: 980px; }
+      .exam-table td { vertical-align: middle; }
+      .task-overview { background: #fff; border: 1px solid var(--line); border-radius: 18px; padding: 20px; box-shadow: 0 10px 28px rgba(15,23,42,.05); }
+      .task-overview-grid { display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 20px; margin-top: 18px; }
+      .task-overview-label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+      .task-overview-value { font-weight: 800; overflow-wrap: anywhere; }
+      .task-progress-value { color: var(--blue); font-size: 28px; font-weight: 850; }
+      .task-step-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+      .task-step-card { border: 1px solid var(--line); border-radius: 14px; background: #fff; padding: 15px; cursor: pointer; min-height: 156px; }
+      .task-step-card.running { border-color: #87bfff; background: #f7fbff; }
+      .task-step-card.success { border-color: #a7e3ba; }
+      .task-step-card.failed { border-color: #f8b4b4; background: #fffafa; }
+      .task-step-card.waiting_manual { border-color: #f6cf8b; background: #fffcf6; }
+      .task-step-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+      .task-step-name { font-weight: 800; line-height: 1.45; }
+      .task-step-times { margin-top: 12px; color: var(--muted); font-size: 12px; line-height: 1.75; }
+      .task-step-detail { display: none; margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; font-size: 12px; color: #475569; white-space: pre-wrap; }
+      .task-step-card.open .task-step-detail { display: block; }
+      .retry-step { margin-top: 10px; border: 1px solid #f0a5a5; background: #fff; color: #c62828; border-radius: 9px; padding: 6px 10px; font-weight: 750; cursor: pointer; }
+      .empty-state { padding: 48px 20px; text-align: center; color: var(--muted); border: 1px dashed #ccd6e3; border-radius: 14px; background: #fff; }
+
       @media (max-width: 1120px) {
         .app-shell {
           grid-template-columns: 1fr;
@@ -1185,7 +1792,18 @@
         }
 
         .dashboard,
-        .lower-grid {
+        .lower-grid,
+        .candidate-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .candidate-upload-box {
+          grid-template-columns: 1fr;
+          justify-items: center;
+          text-align: center;
+        }
+
+        .candidate-session-grid {
           grid-template-columns: 1fr;
         }
       }
@@ -1212,7 +1830,10 @@
 
         .summary-grid,
         .step-list,
-        .capture-grid {
+        .capture-grid,
+        .mapping-grid,
+        .candidate-stats,
+        .candidate-actions {
           grid-template-columns: 1fr;
         }
 
@@ -1261,12 +1882,26 @@
         </div>
 
         <nav class="nav" aria-label="主导航">
-          <div class="nav-item active">
+          <div class="nav-item active" id="autoNavItem">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M4 5h16M4 12h16M4 19h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
             </svg>
             自动配置
           </div>
+          <button class="nav-item nav-button" id="projectNavBtn" type="button">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 9h8M8 13h8M8 17h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            项目管理
+          </button>
+          <button class="nav-item nav-button" id="examNavBtn" type="button">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 8h6M9 12h6M9 16h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            考试列表
+          </button>
+          <button class="nav-item nav-button" id="candidateNavBtn" type="button">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+            名单导入
+          </button>
           <div class="nav-item">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M7 3h7l5 5v13H7z" fill="none" stroke="currentColor" stroke-width="2" />
@@ -1296,34 +1931,14 @@
       </aside>
 
       <main class="main">
-        <div class="topbar">
+        <div class="topbar" id="autoTopbar">
           <div>
             <h1>易考考试自动配置</h1>
             <p class="subtitle">导入 Excel 需求单后，自动完成后台配置，并在确认页停下等待人工核对。</p>
           </div>
-          <div class="toolbar">
-            <button class="btn" id="resetBtn" type="button" title="清空当前导入和执行记录">
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 4v6h6M20 20v-6h-6M20 9A8 8 0 0 0 6.7 5.4L4 8M4 15a8 8 0 0 0 13.3 3.6L20 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-              </svg>
-              重置
-            </button>
-            <button class="btn" id="demoBtn" type="button" title="使用当前测试需求单模拟导入">
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-              </svg>
-              模拟导入
-            </button>
-            <button class="btn primary" id="runBtn" type="button" disabled title="开始自动配置">
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M5 3l14 9-14 9z" fill="currentColor" />
-              </svg>
-              开始配置
-            </button>
-          </div>
         </div>
 
-        <section class="stack">
+        <section class="stack" id="autoConfigStack">
           <div class="panel">
             <div class="panel-head">
               <h2 class="panel-title">后台连接</h2>
@@ -1341,11 +1956,21 @@
                 </label>
                 <label class="field">
                   <span class="field-label">密码</span>
-                  <input class="field-input" id="loginPasswordInput" type="password" placeholder="请输入后台密码" />
+                  <span class="secret-input">
+                    <input class="field-input" id="loginPasswordInput" type="password" placeholder="请输入后台密码" autocomplete="current-password" />
+                    <button class="secret-toggle" type="button" data-secret-toggle="loginPasswordInput" aria-label="显示密码">显示</button>
+                  </span>
+                </label>
+                <label class="field">
+                  <span class="field-label">租户 API Key</span>
+                  <span class="secret-input">
+                    <input class="field-input" id="tenantApiKeyInput" type="password" placeholder="用于获取场次和导入考生" autocomplete="off" />
+                    <button class="secret-toggle" type="button" data-secret-toggle="tenantApiKeyInput" aria-label="显示租户 API Key">显示</button>
+                  </span>
                 </label>
               </div>
               <div class="settings-actions">
-                <span class="settings-note">账号密码单独保存到本地运行目录；自动登录后进入新建考试页。</span>
+                <span class="settings-note">账号密码和租户 API Key 单独保存到本地运行目录；API Key 用于获取场次和导入考生。</span>
                 <button class="btn" id="saveLoginBtn" type="button">保存登录配置</button>
               </div>
             </div>
@@ -1365,6 +1990,27 @@
                 <span class="drop-note" id="dropNote">支持 .xlsx 文件；导入后会展示关键配置和风险提示。</span>
                 <input class="hidden-input" id="fileInput" type="file" accept=".xlsx,.xls" />
               </label>
+
+              <div class="toolbar import-actions">
+                <button class="btn" id="resetBtn" type="button" title="清空当前导入和执行记录">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 4v6h6M20 20v-6h-6M20 9A8 8 0 0 0 6.7 5.4L4 8M4 15a8 8 0 0 0 13.3 3.6L20 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                  </svg>
+                  重置
+                </button>
+                <button class="btn" id="demoBtn" type="button" title="使用当前测试需求单模拟导入">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                  </svg>
+                  模拟导入
+                </button>
+                <button class="btn primary" id="runBtn" type="button" disabled title="开始自动配置">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M5 3l14 9-14 9z" fill="currentColor" />
+                  </svg>
+                  开始配置
+                </button>
+              </div>
 
               <div class="summary-grid" aria-label="导入摘要">
                 <div class="metric">
@@ -1520,6 +2166,218 @@
             </div>
           </div>
         </section>
+
+        <section class="panel candidate-panel" id="candidateImportPanel">
+          <div class="panel-head">
+            <div class="candidate-title-block">
+              <h2 class="panel-title">考生名单整理与导入</h2>
+              <p class="subtitle">上传并整理考生名单，校验通过后导入到指定考试场次</p>
+            </div>
+            <span class="candidate-pass-badge" id="candidateState">等待上传</span>
+          </div>
+          <div class="panel-body">
+            <div class="candidate-grid">
+              <div class="candidate-left">
+                <div class="candidate-card">
+                  <div class="candidate-card-body">
+                    <label class="drop-zone candidate-upload-box" id="candidateDropZone" for="candidateFileInput">
+                      <span class="file-badge">DATA</span>
+                      <span>
+                        <span class="candidate-upload-status">文件上传成功</span>
+                        <span class="drop-title" id="candidateDropTitle">上传客户原始名单</span>
+                        <span class="drop-note">支持 .xlsx、.xls、.csv；整理后固定输出准考证号 / 姓名 / 身份证号。</span>
+                        <span class="candidate-help-box">支持 .xlsx、.xls、.csv 格式<br />整理后应含字段：准考证号 / 姓名 / 身份证号</span>
+                      </span>
+                      <input class="hidden-input" id="candidateFileInput" type="file" accept=".xlsx,.xls,.csv" />
+                    </label>
+                  </div>
+                </div>
+
+                <div class="candidate-card">
+                  <div class="candidate-card-body">
+                    <div class="candidate-card-head">
+                      <h3 class="panel-title">字段映射</h3>
+                      <span class="panel-meta">请选择文件中对应的字段</span>
+                    </div>
+                    <div class="mapping-grid" aria-label="字段映射确认">
+                      <label class="mapping-card">
+                        <span class="field-label">姓名</span>
+                        <select id="candidateMapFullName"></select>
+                      </label>
+                      <label class="mapping-card">
+                        <span class="field-label">身份证号</span>
+                        <select id="candidateMapIdentityId"></select>
+                      </label>
+                      <label class="mapping-card">
+                        <span class="field-label">准考证号</span>
+                        <select id="candidateMapPermit"></select>
+                      </label>
+                    </div>
+                    <div class="candidate-actions" style="margin-top: 12px;">
+                      <button class="btn" id="candidateDownloadBtn" type="button" disabled>下载导入模板</button>
+                      <button class="btn" id="loadSessionsBtn" type="button" disabled>加载考试场次</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="candidate-issues" id="candidateIssues"></div>
+
+                <div class="candidate-card candidate-session-card">
+                  <div class="candidate-card-body">
+                    <div class="candidate-session-grid">
+                      <div class="candidate-form-block">
+                        <div class="candidate-form-title">导入考试场次选择</div>
+                        <div class="candidate-form-note">选择需要导入的考试场次</div>
+                        <select class="session-select" id="sessionSelect" disabled>
+                          <option value="">请先加载场次</option>
+                        </select>
+                      </div>
+                      <label class="room-size-card">
+                        <span class="candidate-form-title">每个班级人数</span>
+                        <span class="candidate-form-note">自动分班人数，可手动调整</span>
+                        <input class="field-input" id="roomTargetSizeInput" type="number" min="1" step="1" value="30" />
+                      </label>
+                    </div>
+                    <div class="candidate-session-actions">
+                      <button class="btn primary" id="candidateImportBtn" type="button" disabled>确认导入到所选场次</button>
+                    </div>
+                    <div class="selected-session monitor-account-card" id="monitorAccountCard" hidden>
+                      <div class="monitor-account-head">
+                        <h3 class="panel-title">监考账号文件</h3>
+                      </div>
+                      <button class="btn monitor-file-download" id="monitorAccountDownloadBtn" type="button"></button>
+                      <div class="candidate-preview monitor-account-preview">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>场次ID</th>
+                              <th>场次名称</th>
+                              <th>班级名称</th>
+                              <th>考生人数</th>
+                              <th>监控账号</th>
+                              <th>监控口令</th>
+                              <th>监考地址</th>
+                            </tr>
+                          </thead>
+                          <tbody id="monitorAccountRows">
+                            <tr><td colspan="7">等待自动分班完成</td></tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                    <div class="selected-session" id="selectedSession">
+                      <div>当前选择场次：未选择</div>
+                    </div>
+                    <div class="selected-session" id="roomAssignResult">
+                      <div>自动分班：等待考生导入成功后执行</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="candidate-right">
+                <div class="candidate-stats">
+                  <div class="stat-box">
+                    <div class="stat-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="9.5" cy="7" r="4"></circle>
+                        <path d="M20.5 21v-2a3.5 3.5 0 0 0-2.8-3.4"></path>
+                        <path d="M16.5 3.4a4 4 0 0 1 0 7.2"></path>
+                      </svg>
+                    </div>
+                    <div class="stat-label">总人数</div>
+                    <div class="stat-value" id="candidateTotal">0</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="stat-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <ellipse cx="12" cy="5" rx="7" ry="3"></ellipse>
+                        <path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"></path>
+                        <path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"></path>
+                      </svg>
+                    </div>
+                    <div class="stat-label">空值数量</div>
+                    <div class="stat-value" id="candidateEmpty">0</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="stat-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <path d="M12 3 19 6v5c0 5-3.2 8.5-7 10-3.8-1.5-7-5-7-10V6l7-3Z"></path>
+                        <path d="M9 12l2 2 4-4"></path>
+                      </svg>
+                    </div>
+                    <div class="stat-label">重复准考证号</div>
+                    <div class="stat-value" id="candidateDuplicatePermit">0</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="stat-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+                        <circle cx="8.5" cy="11" r="2"></circle>
+                        <path d="M6 16c.7-1.2 1.5-1.8 2.5-1.8S10.3 14.8 11 16"></path>
+                        <path d="M14 10h4"></path>
+                        <path d="M14 14h4"></path>
+                      </svg>
+                    </div>
+                    <div class="stat-label">重复证件号</div>
+                    <div class="stat-value" id="candidateDuplicateIdentity">0</div>
+                  </div>
+                  <div class="stat-box stat-error">
+                    <div class="stat-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <path d="M12 3 22 20H2L12 3Z"></path>
+                        <path d="M12 9v5"></path>
+                        <path d="M12 17h.01"></path>
+                      </svg>
+                    </div>
+                    <div class="stat-label">错误行号</div>
+                    <div class="stat-value" id="candidateErrorRows">0</div>
+                  </div>
+                </div>
+
+                <h3 class="candidate-preview-title">数据预览（前 10 行）</h3>
+                <div class="candidate-preview">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>准考证号</th>
+                        <th>姓名</th>
+                        <th>身份证号</th>
+                      </tr>
+                    </thead>
+                    <tbody id="candidatePreviewRows">
+                      <tr><td colspan="3">等待上传客户名单</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="log-list candidate-log-list" id="candidateLogList" style="margin-top: 12px;">
+                  <div class="log"><div>[名单解析] 等待上传客户名单</div><div class="log-time">系统就绪</div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="task-view" id="projectManagementView" hidden>
+          <div class="view-heading"><div><h1>项目管理</h1><p class="subtitle">一张需求单对应一个项目，汇总展示不同账号创建的任务。</p></div><button class="btn" id="refreshProjectsBtn" type="button">刷新</button></div>
+          <div class="project-grid" id="projectGrid"><div class="empty-state">暂无项目记录</div></div>
+        </section>
+
+        <section class="task-view" id="examListView" hidden>
+          <div class="view-heading"><div><h1>考试列表</h1><p class="subtitle">汇总展示正式考试与试考场次。</p></div><button class="btn" id="refreshExamsBtn" type="button">刷新</button></div>
+          <div class="exam-table-wrap">
+            <table class="exam-table"><thead><tr><th>场次类型</th><th>场次名称</th><th>session_id</th><th>考试时间</th><th>来源账号</th><th>考生数</th><th>班级数</th><th>状态</th><th>操作</th></tr></thead><tbody id="examListRows"><tr><td colspan="9">暂无考试记录</td></tr></tbody></table>
+          </div>
+        </section>
+
+        <section class="task-view" id="taskDetailView" hidden>
+          <div class="view-heading"><div><button class="btn" id="backToExamsBtn" type="button">返回</button><h1 style="margin-top:12px;">考试任务详情</h1><p class="subtitle" id="taskDetailSubtitle"></p></div><div class="view-actions"><button class="btn" id="refreshTaskBtn" type="button">刷新状态</button></div></div>
+          <div class="task-overview" id="taskOverview"></div>
+          <div class="panel"><div class="panel-head"><h2 class="panel-title">场次列表</h2></div><div class="panel-body"><div class="exam-table-wrap"><table class="exam-table"><thead><tr><th>场次类型</th><th>场次名称</th><th>session_id</th><th>考试时间</th><th>考生数</th><th>班级数</th><th>状态</th></tr></thead><tbody id="taskSessionRows"></tbody></table></div></div></div>
+          <div class="panel"><div class="panel-head"><div><h2 class="panel-title">进度步骤</h2><p class="subtitle">各步骤独立更新，按实际执行结果展示。</p></div></div><div class="panel-body"><div class="task-step-grid" id="taskStepGrid"></div></div></div>
+        </section>
       </main>
     </div>
 
@@ -1556,6 +2414,8 @@
       const loginUrlInput = document.querySelector("#loginUrlInput");
       const loginUsernameInput = document.querySelector("#loginUsernameInput");
       const loginPasswordInput = document.querySelector("#loginPasswordInput");
+      const tenantApiKeyInput = document.querySelector("#tenantApiKeyInput");
+      const secretToggleButtons = Array.from(document.querySelectorAll("[data-secret-toggle]"));
       const saveLoginBtn = document.querySelector("#saveLoginBtn");
       const runBtn = document.querySelector("#runBtn");
       const demoBtn = document.querySelector("#demoBtn");
@@ -1579,6 +2439,182 @@
       const shotModalSubtitle = document.querySelector("#shotModalSubtitle");
       const closeShotModal = document.querySelector("#closeShotModal");
       const largeShot = document.querySelector("#largeShot");
+      const autoNavItem = document.querySelector("#autoNavItem");
+      const projectNavBtn = document.querySelector("#projectNavBtn");
+      const examNavBtn = document.querySelector("#examNavBtn");
+      const candidateNavBtn = document.querySelector("#candidateNavBtn");
+      const autoTopbar = document.querySelector("#autoTopbar");
+      const autoConfigStack = document.querySelector("#autoConfigStack");
+      const candidateImportPanel = document.querySelector("#candidateImportPanel");
+      const projectManagementView = document.querySelector("#projectManagementView");
+      const examListView = document.querySelector("#examListView");
+      const taskDetailView = document.querySelector("#taskDetailView");
+      const projectGrid = document.querySelector("#projectGrid");
+      const examListRows = document.querySelector("#examListRows");
+      const taskOverview = document.querySelector("#taskOverview");
+      const taskSessionRows = document.querySelector("#taskSessionRows");
+      const taskStepGrid = document.querySelector("#taskStepGrid");
+      const taskDetailSubtitle = document.querySelector("#taskDetailSubtitle");
+      const refreshProjectsBtn = document.querySelector("#refreshProjectsBtn");
+      const refreshExamsBtn = document.querySelector("#refreshExamsBtn");
+      const refreshTaskBtn = document.querySelector("#refreshTaskBtn");
+      const backToExamsBtn = document.querySelector("#backToExamsBtn");
+      const candidateState = document.querySelector("#candidateState");
+      const candidateFileInput = document.querySelector("#candidateFileInput");
+      const candidateDropZone = document.querySelector("#candidateDropZone");
+      const candidateDropTitle = document.querySelector("#candidateDropTitle");
+      const candidateMapFullName = document.querySelector("#candidateMapFullName");
+      const candidateMapIdentityId = document.querySelector("#candidateMapIdentityId");
+      const candidateMapPermit = document.querySelector("#candidateMapPermit");
+      const candidateDownloadBtn = document.querySelector("#candidateDownloadBtn");
+      const loadSessionsBtn = document.querySelector("#loadSessionsBtn");
+      const candidateIssues = document.querySelector("#candidateIssues");
+      const candidateTotal = document.querySelector("#candidateTotal");
+      const candidateEmpty = document.querySelector("#candidateEmpty");
+      const candidateDuplicatePermit = document.querySelector("#candidateDuplicatePermit");
+      const candidateDuplicateIdentity = document.querySelector("#candidateDuplicateIdentity");
+      const candidateErrorRows = document.querySelector("#candidateErrorRows");
+      const candidatePreviewRows = document.querySelector("#candidatePreviewRows");
+      const sessionSelect = document.querySelector("#sessionSelect");
+      const selectedSession = document.querySelector("#selectedSession");
+      const candidateImportBtn = document.querySelector("#candidateImportBtn");
+      const roomTargetSizeInput = document.querySelector("#roomTargetSizeInput");
+      const roomAssignResult = document.querySelector("#roomAssignResult");
+      const monitorAccountCard = document.querySelector("#monitorAccountCard");
+      const monitorAccountRows = document.querySelector("#monitorAccountRows");
+      const monitorAccountDownloadBtn = document.querySelector("#monitorAccountDownloadBtn");
+      const candidateLogList = document.querySelector("#candidateLogList");
+
+      let currentView = "auto";
+
+      function setActiveNav(section) {
+        autoNavItem.classList.toggle("active", section === "auto");
+        candidateNavBtn.classList.toggle("active", section === "candidate");
+        projectNavBtn.classList.toggle("active", section === "projects");
+        examNavBtn.classList.toggle("active", section === "exams" || section === "task");
+      }
+
+      function showView(section) {
+        currentView = section;
+        const isAuto = section === "auto";
+        const isCandidate = section === "candidate";
+        autoTopbar.hidden = !(isAuto || isCandidate);
+        autoConfigStack.hidden = !isAuto;
+        candidateImportPanel.hidden = !isCandidate;
+        projectManagementView.hidden = section !== "projects";
+        examListView.hidden = section !== "exams";
+        taskDetailView.hidden = section !== "task";
+        setActiveNav(section);
+        window.scrollTo({ top: 0, behavior: "instant" });
+      }
+
+      function syncActiveNavByScroll() {
+        if (!(["auto", "candidate"].includes(currentView))) return;
+        const rect = candidateImportPanel.getBoundingClientRect();
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+        const candidateInView = rect.top < viewportHeight * 0.55 && rect.bottom > viewportHeight * 0.25;
+        setActiveNav(candidateInView ? "candidate" : "auto");
+      }
+
+      const taskStatusLabels = {
+        pending: "未开始", running: "进行中", success: "已完成", failed: "失败",
+        waiting_manual: "待人工确认", skipped: "已跳过",
+      };
+
+      function safeText(value) {
+        return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
+      }
+
+      function formatTaskTime(value) {
+        if (!value) return "--";
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? safeText(value) : date.toLocaleString("zh-CN", { hour12: false });
+      }
+
+      function formatDuration(ms) {
+        if (ms === null || ms === undefined) return "--";
+        const seconds = Math.max(0, Math.round(Number(ms) / 1000));
+        if (seconds < 60) return `${seconds}秒`;
+        return `${Math.floor(seconds / 60)}分${seconds % 60}秒`;
+      }
+
+      function statusChip(status) {
+        return `<span class="status-chip ${safeText(status)}">${taskStatusLabels[status] || safeText(status)}</span>`;
+      }
+
+      const taskViewState = { tasks: [], sessions: [], currentTaskId: "" };
+
+      async function fetchJson(url, options) {
+        const response = await fetch(`${runtime.apiBase}${url}`, { cache: "no-store", ...options });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `请求失败：${response.status}`);
+        return data;
+      }
+
+      async function loadProjects() {
+        const data = await fetchJson(`/api/tasks?_=${Date.now()}`);
+        taskViewState.tasks = data.tasks || [];
+        projectGrid.innerHTML = taskViewState.tasks.length
+          ? taskViewState.tasks.map((task) => `
+              <article class="project-card" data-task-id="${safeText(task.taskId)}">
+                <div class="project-card-head"><div><div class="project-title">${safeText(task.projectName)}</div><div class="task-meta">来源账号：${safeText(task.sourceAccount || "未记录")}<br>更新时间：${formatTaskTime(task.updatedAt)}<br>当前阶段：${safeText(task.currentStage || "等待执行")}</div></div>${statusChip(task.status)}</div>
+                <div class="mini-progress"><span style="width:${Math.max(0, Math.min(100, Number(task.progress || 0)))}%"></span></div>
+                <div class="task-meta" style="margin-top:7px;">整体进度 ${Number(task.progress || 0).toFixed(1)}%</div>
+              </article>`).join("")
+          : `<div class="empty-state">暂无项目记录。导入需求单后会自动建立项目。</div>`;
+      }
+
+      async function loadExams() {
+        const data = await fetchJson(`/api/exams?_=${Date.now()}`);
+        taskViewState.sessions = data.sessions || [];
+        examListRows.innerHTML = taskViewState.sessions.length
+          ? taskViewState.sessions.map((session) => `
+              <tr>
+                <td><span class="status-chip ${session.sessionType === "formal" ? "running" : "success"}">${session.sessionType === "formal" ? "正式考试" : "试考"}</span></td>
+                <td>${safeText(session.name)}</td><td>${safeText(session.session_id || "--")}</td>
+                <td>${safeText(session.start || "--")}<br>${safeText(session.end || "--")}</td>
+                <td>${safeText(session.sourceAccount || "未记录")}</td><td>${Number(session.candidateCount || 0)}</td><td>${Number(session.roomCount || 0)}</td>
+                <td>${statusChip(session.status)}</td><td><button class="btn task-detail-btn" data-task-id="${safeText(session.taskId)}" type="button">查看</button></td>
+              </tr>`).join("")
+          : `<tr><td colspan="9">暂无考试记录。新创建场次会自动显示在这里。</td></tr>`;
+      }
+
+      function renderTaskDetail(task) {
+        taskViewState.currentTaskId = task.taskId;
+        taskDetailSubtitle.textContent = task.projectName || "";
+        taskOverview.innerHTML = `
+          <div class="task-summary"><div><div class="project-title">${safeText(task.projectName)}</div>${statusChip(task.status)}</div><div class="task-progress-value">${Number(task.progress || 0).toFixed(1)}%</div></div>
+          <div class="task-overview-grid">
+            <div><div class="task-overview-label">任务编号</div><div class="task-overview-value">${safeText(task.taskId)}</div></div>
+            <div><div class="task-overview-label">来源账号</div><div class="task-overview-value">${safeText(task.sourceAccount || "未记录")}</div></div>
+            <div><div class="task-overview-label">创建时间</div><div class="task-overview-value">${formatTaskTime(task.createdAt)}</div></div>
+            <div><div class="task-overview-label">最后更新时间</div><div class="task-overview-value">${formatTaskTime(task.updatedAt)}</div></div>
+            <div><div class="task-overview-label">当前总体阶段</div><div class="task-overview-value">${safeText(task.currentStage || "等待执行")}</div></div>
+          </div>`;
+        taskSessionRows.innerHTML = (task.sessions || []).length
+          ? task.sessions.map((session) => `<tr><td>${session.sessionType === "formal" ? "正式考试" : "试考"}</td><td>${safeText(session.name)}</td><td>${safeText(session.session_id || "--")}</td><td>${safeText(session.start || "--")} ~ ${safeText(session.end || "--")}</td><td>${Number(session.candidateCount || 0)}</td><td>${Number(session.roomCount || 0)}</td><td>${statusChip(session.status)}</td></tr>`).join("")
+          : `<tr><td colspan="7">尚未创建场次</td></tr>`;
+        taskStepGrid.innerHTML = (task.steps || []).map((step) => {
+          const sub = step.subStatus || {};
+          const subHtml = Object.keys(sub).length
+            ? `<div>正式考试：${taskStatusLabels[sub.formalExamStatus] || "未开始"}<br>试考：${taskStatusLabels[sub.trialExamStatus] || "未开始"}</div>` : "";
+          const logs = (step.logs || []).map((log) => `${formatTaskTime(log.time)} ${log.message}`).join("\n") || "暂无执行日志";
+          const stepStatus = step.stepKey === "paper_bind" && step.status === "waiting_manual"
+            ? `<span class="status-chip waiting_manual">科目已创建，待试卷绑定</span>`
+            : statusChip(step.status);
+          return `<article class="task-step-card ${safeText(step.status)}" data-step-key="${safeText(step.stepKey)}">
+            <div class="task-step-head"><div class="task-step-name">${safeText(step.stepName)}</div>${stepStatus}</div>
+            <div class="task-step-times">开始：${formatTaskTime(step.startedAt)}<br>完成：${formatTaskTime(step.completedAt)}<br>耗时：${formatDuration(step.durationMs)}</div>
+            <div class="task-step-detail">${subHtml}${step.errorMessage ? `<div style="color:#c62828;margin-top:8px;">${safeText(step.errorMessage)}</div>` : ""}<div style="margin-top:8px;">${safeText(logs)}</div>${step.status === "failed" || (step.stepKey === "paper_bind" && step.status === "waiting_manual") ? `<button class="retry-step" data-retry-step="${safeText(step.stepKey)}" type="button">${step.stepKey === "paper_bind" && step.status === "waiting_manual" ? "继续绑定" : "重试此步骤"}</button>` : ""}</div>
+          </article>`;
+        }).join("");
+      }
+
+      async function openTaskDetail(taskId) {
+        const task = await fetchJson(`/api/tasks/${encodeURIComponent(taskId)}?_=${Date.now()}`);
+        renderTaskDetail(task);
+        showView("task");
+      }
 
       const demoData = {
         filename: "易考新建考试需求单_美化版.xlsx",
@@ -1603,6 +2639,7 @@
 
       const uiState = {
         uploadId: "",
+        taskId: "",
         jobId: "",
         eventSource: null,
         imported: null,
@@ -1613,7 +2650,29 @@
           url: "https://eztest.org/manager/accounts/login",
           username: "",
           password: "",
+          tenantApiKey: "",
         },
+      };
+
+      const candidateUiState = {
+        uploadId: "",
+        filename: "",
+        columns: [],
+        rawRows: [],
+        mapping: {
+          full_name: "",
+          identity_id: "",
+          permit: "",
+        },
+        candidates: [],
+        errors: [],
+        warnings: [],
+        sessions: [],
+        selectedSession: null,
+        rooms: [],
+        roomProgressbar: null,
+        monitorAccounts: [],
+        logs: [],
       };
 
       function nowText() {
@@ -1647,17 +2706,581 @@
         renderLogs();
       }
 
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function candidateLog(message, level = "") {
+        candidateUiState.logs.unshift({ message, level, ts: nowText() });
+        candidateLogList.innerHTML = candidateUiState.logs
+          .map(
+            (entry) =>
+              `<div class="log ${logClass(entry.level)}"><div>${escapeHtml(entry.message)}</div><div class="log-time">${entry.ts}</div></div>`,
+          )
+          .join("");
+      }
+
+      function fillMappingSelect(select, value) {
+        const options = ['<option value="">未选择</option>']
+          .concat(
+            candidateUiState.columns.map(
+              (column) =>
+                `<option value="${escapeHtml(column)}"${column === value ? " selected" : ""}>${escapeHtml(column)}</option>`,
+            ),
+          )
+          .join("");
+        select.innerHTML = options;
+      }
+
+      function renderMappingControls() {
+        fillMappingSelect(candidateMapFullName, candidateUiState.mapping.full_name);
+        fillMappingSelect(candidateMapIdentityId, candidateUiState.mapping.identity_id);
+        fillMappingSelect(candidateMapPermit, candidateUiState.mapping.permit);
+      }
+
+      function rebuildCandidatesFromMapping() {
+        candidateUiState.mapping = {
+          full_name: candidateMapFullName.value,
+          identity_id: candidateMapIdentityId.value,
+          permit: candidateMapPermit.value,
+        };
+        candidateUiState.candidates = candidateUiState.rawRows.map((row) => ({
+          permit: String(row[candidateUiState.mapping.permit] ?? "").trim(),
+          full_name: String(row[candidateUiState.mapping.full_name] ?? "").trim(),
+          identity_id: String(row[candidateUiState.mapping.identity_id] ?? "").trim(),
+          __row: row.__row,
+        }));
+        const validation = validateCandidatesClient(candidateUiState.candidates, candidateUiState.mapping);
+        candidateUiState.errors = validation.errors;
+        candidateUiState.warnings = validation.warnings;
+        renderCandidateResult();
+      }
+
+      function validateCandidatesClient(candidates, mapping) {
+        const errors = [];
+        const warnings = [];
+        ["permit", "full_name", "identity_id"].forEach((field) => {
+          if (!mapping[field]) errors.push(`缺少字段映射：${field}`);
+        });
+        const permitRows = new Map();
+        const identityRows = new Map();
+        candidates.forEach((candidate, index) => {
+          const rowNum = candidate.__row || index + 2;
+          ["permit", "full_name", "identity_id"].forEach((field) => {
+            if (!String(candidate[field] || "").trim()) {
+              errors.push(`第 ${rowNum} 行缺少 ${field}`);
+            }
+          });
+          if (/^\s*\d+(?:\.\d+)?[eE]\+?\d+\s*$/.test(candidate.identity_id || "")) {
+            errors.push(`第 ${rowNum} 行 identity_id 为科学计数法格式，请修正原始文件后再导入`);
+          }
+          if (/^\s*\d+(?:\.\d+)?[eE]\+?\d+\s*$/.test(candidate.permit || "")) {
+            errors.push(`第 ${rowNum} 行 permit 为科学计数法格式，请修正原始文件后再导入`);
+          }
+          if (candidate.permit) permitRows.set(candidate.permit, [...(permitRows.get(candidate.permit) || []), rowNum]);
+          if (candidate.identity_id) {
+            identityRows.set(candidate.identity_id, [...(identityRows.get(candidate.identity_id) || []), rowNum]);
+          }
+        });
+        for (const [permit, rows] of permitRows.entries()) {
+          if (rows.length > 1) errors.push(`准考证号重复：${permit}，行号：${rows.join("、")}`);
+        }
+        for (const [identityId, rows] of identityRows.entries()) {
+          if (rows.length > 1) errors.push(`证件号重复：${identityId}，行号：${rows.join("、")}`);
+        }
+        return { errors, warnings };
+      }
+
+      function candidateStats() {
+        const emptyCount = candidateUiState.candidates.reduce(
+          (sum, row) =>
+            sum +
+            ["permit", "full_name", "identity_id"].filter((field) => !String(row[field] || "").trim()).length,
+          0,
+        );
+        const duplicateCount = (field) => {
+          const seen = new Set();
+          const duplicates = new Set();
+          candidateUiState.candidates.forEach((row) => {
+            const value = String(row[field] || "").trim();
+            if (!value) return;
+            if (seen.has(value)) duplicates.add(value);
+            seen.add(value);
+          });
+          return duplicates.size;
+        };
+        const errorRows = new Set();
+        candidateUiState.errors.forEach((error) => {
+          const match = error.match(/第\s*(\d+)\s*行/);
+          if (match) errorRows.add(match[1]);
+        });
+        return {
+          total: candidateUiState.candidates.length,
+          emptyCount,
+          duplicatePermit: duplicateCount("permit"),
+          duplicateIdentity: duplicateCount("identity_id"),
+          errorRows: errorRows.size,
+        };
+      }
+
+      function renderCandidateResult() {
+        const stats = candidateStats();
+        candidateTotal.textContent = String(stats.total);
+        candidateEmpty.textContent = String(stats.emptyCount);
+        candidateDuplicatePermit.textContent = String(stats.duplicatePermit);
+        candidateDuplicateIdentity.textContent = String(stats.duplicateIdentity);
+        candidateErrorRows.textContent = String(stats.errorRows);
+        candidatePreviewRows.innerHTML = candidateUiState.candidates.length
+          ? candidateUiState.candidates
+              .slice(0, 10)
+              .map(
+                (row) =>
+                  `<tr><td>${escapeHtml(row.permit)}</td><td>${escapeHtml(row.full_name)}</td><td>${escapeHtml(row.identity_id)}</td></tr>`,
+              )
+              .join("")
+          : '<tr><td colspan="3">等待上传客户名单</td></tr>';
+
+        const issues = [
+          ...candidateUiState.errors.map((message) => ({ message, level: "error" })),
+          ...candidateUiState.warnings.map((message) => ({ message, level: "warn" })),
+        ];
+        candidateIssues.innerHTML = !candidateUiState.uploadId
+          ? ""
+          : issues.length
+            ? issues
+                .map((issue) => `<div class="candidate-issue ${issue.level === "error" ? "error" : ""}">${escapeHtml(issue.message)}</div>`)
+                .join("")
+            : '<div class="candidate-issue success">名单校验通过<br><span class="panel-meta">未发现错误或重复数据，数据可正常导入。</span></div>';
+
+        const mappingComplete = ["full_name", "identity_id", "permit"].every((field) =>
+          String(candidateUiState.mapping[field] || "").trim(),
+        );
+        const isValid = candidateUiState.candidates.length > 0 && mappingComplete && candidateUiState.errors.length === 0;
+        candidateDownloadBtn.disabled = !isValid;
+        loadSessionsBtn.disabled = !isValid;
+        candidateDownloadBtn.classList.toggle("primary", isValid);
+        loadSessionsBtn.classList.toggle("primary", isValid);
+        candidateImportBtn.disabled = !isValid || !candidateUiState.selectedSession;
+        candidateState.classList.toggle("is-ok", Boolean(candidateUiState.uploadId && isValid));
+        candidateState.classList.toggle("is-error", Boolean(candidateUiState.uploadId && !isValid));
+        candidateState.textContent = !candidateUiState.uploadId ? "等待上传" : isValid ? "校验通过" : "存在错误";
+      }
+
+      async function parseCandidateFile(file) {
+        if (!file) return;
+        const suffix = file.name.split(".").pop()?.toLowerCase();
+        if (!["xlsx", "xls", "csv"].includes(suffix)) {
+          throw new Error("文件格式不支持，仅支持 .xlsx、.xls、.csv");
+        }
+        candidateLog("[名单解析] 开始读取客户名单");
+        const response = await fetch(`${runtime.apiBase}/api/candidates/parse?filename=${encodeURIComponent(file.name)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: await file.arrayBuffer(),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "名单解析失败");
+        }
+        candidateUiState.uploadId = data.uploadId;
+        candidateUiState.filename = data.filename || file.name;
+        candidateUiState.columns = data.columns || [];
+        candidateUiState.rawRows = data.rawRows || [];
+        candidateUiState.mapping = {
+          full_name: data.mapping?.full_name || "",
+          identity_id: data.mapping?.identity_id || "",
+          permit: data.mapping?.permit || "",
+        };
+        candidateUiState.candidates = (data.candidates || []).map((candidate, index) => ({
+          ...candidate,
+          __row: candidateUiState.rawRows[index]?.__row || index + 2,
+        }));
+        candidateUiState.errors = data.errors || [];
+        candidateUiState.warnings = data.warnings || [];
+        candidateDropZone.classList.add("is-ready");
+        candidateDropZone.classList.add("has-upload");
+        candidateDropTitle.textContent = candidateUiState.filename;
+        renderMappingControls();
+        renderCandidateResult();
+        const mappedFields = Object.entries(candidateUiState.mapping)
+          .filter(([, value]) => value)
+          .map(([key]) => key);
+        candidateLog(`[名单解析] 字段识别成功：${mappedFields.join("、") || "未完全识别"}`, mappedFields.length === 3 ? "success" : "warn");
+        candidateLog(`[名单校验] 共识别 ${candidateUiState.candidates.length} 名考生`, "success");
+        candidateLog(candidateUiState.errors.length ? `[名单校验] 存在 ${candidateUiState.errors.length} 个错误` : "[名单校验] 校验通过", candidateUiState.errors.length ? "warn" : "success");
+      }
+
+      async function downloadCandidateTemplate() {
+        const response = await fetch(`${runtime.apiBase}/api/candidates/generate-template`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            candidates: candidateUiState.candidates.map(({ permit, full_name, identity_id }) => ({
+              permit,
+              full_name,
+              identity_id,
+            })),
+          }),
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || "下载整理模板失败");
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "yikao_candidates_template.xlsx";
+        link.click();
+        URL.revokeObjectURL(url);
+        candidateLog("[名单整理] 已下载整理后的导入模板", "success");
+      }
+
+      function renderSessions(message = "无可用未过期场次") {
+        sessionSelect.innerHTML = candidateUiState.sessions.length
+          ? '<option value="">请选择场次</option>' +
+            candidateUiState.sessions
+              .map(
+                (session) =>
+                  `<option value="${escapeHtml(session.session_id)}">${escapeHtml(session.session_id)} - ${escapeHtml(session.name)}</option>`,
+              )
+              .join("")
+          : `<option value="">${escapeHtml(message)}</option>`;
+        sessionSelect.disabled = !candidateUiState.sessions.length;
+      }
+
+      async function loadCandidateSessions() {
+        candidateLog("[场次选择] 开始加载 GET /tenant/api/session/");
+        const response = await fetch(`${runtime.apiBase}/api/sessions?_=${Date.now()}`, { cache: "no-store" });
+        const data = await response.json();
+        const diagnostics = data?.diagnostics || {};
+        if (diagnostics.status) {
+          candidateLog(`[场次选择] 租户 API 状态：${diagnostics.status}，Key ${diagnostics.keyHint || "未知"}`);
+        }
+        if (diagnostics.rawCount !== undefined) {
+          candidateLog(
+            `[场次选择] 接口返回 ${diagnostics.rawCount} 个场次，有效 ${diagnostics.validCount || 0} 个，未过期 ${diagnostics.unexpiredCount || 0} 个，已过期 ${diagnostics.expiredCount || 0} 个`,
+            diagnostics.unexpiredCount ? "success" : "warn",
+          );
+        }
+        if (diagnostics.droppedInvalid) {
+          candidateLog(`[场次选择] ${diagnostics.droppedInvalid} 个场次缺少 session_id 或 name，已忽略`, "warn");
+        }
+        if (diagnostics.expiredCount && !diagnostics.unexpiredCount) {
+          const samples = (diagnostics.expiredSamples || [])
+            .map((item) => `${item.session_id || ""} - ${item.name || ""}（${item.end || "无结束时间"}）`)
+            .filter(Boolean)
+            .join("；");
+          candidateLog(`[场次选择] 接口有场次但均被未过期过滤排除。服务器时间：${diagnostics.serverNow || "未知"}${samples ? `；样例：${samples}` : ""}`, "warn");
+        }
+        if (!response.ok) {
+          candidateUiState.sessions = [];
+          candidateUiState.selectedSession = null;
+          renderSessions(data.error || "场次列表加载失败");
+          renderSelectedSession();
+          const detail = data?.detail ? `；详情：${JSON.stringify(data.detail).slice(0, 500)}` : "";
+          throw new Error(`${data.error || "场次列表加载失败"}${detail}`);
+        }
+        candidateUiState.sessions = Array.isArray(data) ? data : data.sessions || [];
+        candidateUiState.selectedSession = null;
+        renderSessions();
+        renderSelectedSession();
+        candidateLog(`[场次选择] 已加载 ${candidateUiState.sessions.length} 个未过期场次`, candidateUiState.sessions.length ? "success" : "warn");
+      }
+
+      function renderSelectedSession() {
+        const session = candidateUiState.selectedSession;
+        selectedSession.innerHTML = session
+          ? `<div>当前选择场次：</div><div>场次名称：${escapeHtml(session.name)}</div><div>考试口令 / session_id：${escapeHtml(session.session_id)}</div><div>考试时间：${escapeHtml(session.start)} ~ ${escapeHtml(session.end)}</div>`
+          : "<div>当前选择场次：未选择</div>";
+        candidateImportBtn.disabled =
+          !session || !candidateUiState.candidates.length || candidateUiState.errors.length > 0;
+      }
+
+      function renderRoomAssignResult(message = "自动分班：等待考生导入成功后执行") {
+        if (!candidateUiState.rooms.length) {
+          roomAssignResult.innerHTML = `<div>${escapeHtml(message)}</div>`;
+          return;
+        }
+        roomAssignResult.innerHTML = `
+          <div>自动分班结果：</div>
+          <div>progressbar id：${escapeHtml(String(candidateUiState.roomProgressbar?.id || ""))}</div>
+          <div style="overflow:auto;">
+            <table>
+              <thead><tr><th>班级名称</th><th>考生人数</th><th>监控账号</th><th>监控口令</th></tr></thead>
+              <tbody>
+                ${candidateUiState.rooms
+                  .map(
+                    (room) =>
+                      `<tr><td>${escapeHtml(room.name)}</td><td>${escapeHtml(String(room.num))}</td><td>${escapeHtml(room.account)}</td><td>${escapeHtml(room.pwd)}</td></tr>`,
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+        `;
+      }
+
+      function sanitizeDownloadName(value) {
+        return String(value || "监考账号").replace(/[\\/:*?"<>|]/g, "_").slice(0, 140);
+      }
+
+      function monitorAccountFileName(session) {
+        if (!session) return "监考账号.xlsx";
+        return `${sanitizeDownloadName(`${session.session_id}-${session.name}`)}.xlsx`;
+      }
+
+      function buildMonitorAccounts(session, rooms) {
+        const sessionUrl = session?.url || "";
+        return rooms.map((room) => ({
+          session_id: session.session_id,
+          session_name: session.name,
+          name: room.name,
+          num: room.num,
+          account: room.account,
+          pwd: room.pwd,
+          monitor_url: room.monitor_url || room.monitorUrl || room.url || sessionUrl,
+        }));
+      }
+
+      function renderMonitorAccountCard() {
+        const rows = candidateUiState.monitorAccounts || [];
+        monitorAccountCard.hidden = !rows.length;
+        monitorAccountDownloadBtn.textContent = candidateUiState.selectedSession
+          ? monitorAccountFileName(candidateUiState.selectedSession)
+          : "监考账号.xlsx";
+        monitorAccountDownloadBtn.disabled = !rows.length;
+        monitorAccountRows.innerHTML = rows.length
+          ? rows
+              .map(
+                (row) => `
+                  <tr>
+                    <td>${escapeHtml(row.session_id)}</td>
+                    <td>${escapeHtml(row.session_name)}</td>
+                    <td>${escapeHtml(row.name)}</td>
+                    <td>${escapeHtml(String(row.num))}</td>
+                    <td>${escapeHtml(row.account)}</td>
+                    <td>${escapeHtml(row.pwd)}</td>
+                    <td>${escapeHtml(row.monitor_url || "")}</td>
+                  </tr>`,
+              )
+              .join("")
+          : `<tr><td colspan="7">等待自动分班完成</td></tr>`;
+      }
+
+      async function downloadMonitorAccountsExcel() {
+        const session = candidateUiState.selectedSession;
+        const rows = candidateUiState.monitorAccounts || [];
+        if (!session || !rows.length) {
+          throw new Error("暂无可下载的监考账号");
+        }
+        const response = await fetch(`${runtime.apiBase}/api/rooms/monitor-accounts/excel`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session: {
+              session_id: session.session_id,
+              name: session.name,
+              url: session.url || "",
+            },
+            rooms: rows.map((row) => ({
+              name: row.name,
+              num: row.num,
+              account: row.account,
+              pwd: row.pwd,
+              monitor_url: row.monitor_url || "",
+            })),
+          }),
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || "监考账号 Excel 生成失败");
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = monitorAccountFileName(session);
+        link.click();
+        URL.revokeObjectURL(url);
+      }
+
+      async function autoAssignRoomsAfterImport() {
+        const session = candidateUiState.selectedSession;
+        if (!session) {
+          throw new Error("未选择场次，无法自动分班");
+        }
+        const targetSize = Number(roomTargetSizeInput.value || 30);
+        if (!Number.isInteger(targetSize) || targetSize <= 0) {
+          throw new Error("每个班级人数必须是正整数");
+        }
+
+        candidateUiState.rooms = [];
+        candidateUiState.roomProgressbar = null;
+        candidateUiState.monitorAccounts = [];
+        renderRoomAssignResult();
+        renderMonitorAccountCard();
+
+        candidateLog("[自动分班] 开始读取场次最新考生统计和班级状态");
+        candidateLog(`[自动分班] session_id = ${session.session_id}`);
+        const previewResponse = await fetch(`${runtime.apiBase}/api/sessions/${encodeURIComponent(session.session_id)}/rooms/preview`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ targetSize }),
+        });
+        const preview = await previewResponse.json();
+        if (!previewResponse.ok) {
+          throw new Error(preview.error || "自动分班预览失败");
+        }
+        candidateLog(`[自动分班] entries_num = ${preview.entries_num}`);
+        candidateLog(`[自动分班] 当前班级数 = ${preview.rooms_count ?? 0}`);
+        candidateLog(`[自动分班] 默认每班约 ${targetSize} 人，允许最后一个班超过 ${targetSize}`);
+        candidateLog(`[自动分班] 计算结果：${preview.rooms.map((room) => `${room.name} ${room.num} 人`).join("，")}`, "success");
+
+        async function submitRooms(overwrite = false) {
+          const response = await fetch(`${runtime.apiBase}/api/sessions/${encodeURIComponent(session.session_id)}/rooms/auto`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ rooms: preview.rooms, targetSize, overwrite }),
+          });
+          const data = await response.json();
+          if (response.status === 409 && data.needConfirmOverwrite) {
+            if (!window.confirm(data.message || "当前场次已存在班级，是否删除后重新分班？")) {
+              candidateLog("[自动分班] 用户取消覆盖已有班级", "warn");
+              return null;
+            }
+            candidateLog("[自动分班] 用户确认覆盖已有班级，开始删除后重新分班");
+            return await submitRooms(true);
+          }
+          if (!response.ok) {
+            throw new Error(data.error || "自动分班失败");
+          }
+          return data;
+        }
+
+        candidateLog(`[自动分班] 用户确认，开始调用 POST /tenant/api/session/${session.session_id}/rooms/`);
+        const result = await submitRooms(false);
+        if (!result) return;
+        candidateUiState.rooms = result.rooms || preview.rooms;
+        candidateUiState.roomProgressbar = result.progressbar || null;
+        if (result.latest_state) {
+          candidateLog(
+            `[自动分班] 执行前最新状态：${result.latest_state.entries_num || 0} 人，${result.latest_state.rooms_count_before || 0} 个班级`,
+            "success",
+          );
+        }
+        candidateLog(`[自动分班] progressbar id = ${result.progressbar_id}`, "success");
+        candidateLog(`[自动分班] progress = ${result.progressbar?.percent ?? 100}%，status = ${result.progressbar?.status || "finished"}`, "success");
+        candidateLog("[自动分班] 分班完成，已生成监考账号", "success");
+        renderRoomAssignResult();
+        candidateUiState.monitorAccounts = buildMonitorAccounts(session, candidateUiState.rooms);
+        renderMonitorAccountCard();
+        await downloadMonitorAccountsExcel();
+        candidateLog("[监考账号] 已下载监考账号 Excel", "success");
+      }
+
+      async function importCandidatesToSession() {
+        if (!candidateUiState.selectedSession) {
+          throw new Error("未选择场次");
+        }
+        candidateUiState.rooms = [];
+        candidateUiState.roomProgressbar = null;
+        candidateUiState.monitorAccounts = [];
+        renderRoomAssignResult();
+        renderMonitorAccountCard();
+        candidateLog(`[考生导入] 开始调用 POST /tenant/api/session/${candidateUiState.selectedSession.session_id}/entry/`);
+        const response = await fetch(`${runtime.apiBase}/api/candidates/import`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: candidateUiState.selectedSession.session_id,
+            candidates: candidateUiState.candidates.map(({ permit, full_name, identity_id }) => ({
+              permit,
+              full_name,
+              identity_id,
+            })),
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "考生导入失败");
+        }
+        if (data.before_state && !data.before_state.error) {
+          candidateLog(
+            `[考生导入] 导入前最新状态：${data.before_state.entriesNum || 0} 人，${data.before_state.roomsCount || 0} 个班级`,
+            "success",
+          );
+        }
+        candidateLog(`[考生导入] 导入完成，成功 ${data.succeed} 人，失败 ${data.fail} 人`, data.fail ? "warn" : "success");
+        if (data.attempts?.length) {
+          data.attempts.forEach((attempt) => {
+            candidateLog(
+              `[考生导入] 第 ${attempt.attempt} 次后刷新状态：${attempt.entries_num || 0} 人，${attempt.rooms_count || 0} 个班级`,
+              attempt.fail ? "warn" : "success",
+            );
+            if (attempt.duplicate_cleanup) {
+              const cleanupFailedCount =
+                attempt.duplicate_cleanup.failed_count ?? attempt.duplicate_cleanup.failed?.length ?? 0;
+              candidateLog(
+                `[考生导入] 重复准考证号清理：请求 ${attempt.duplicate_cleanup.requested || 0} 条，成功 ${attempt.duplicate_cleanup.succeeded || 0} 条，失败 ${cleanupFailedCount} 条`,
+                cleanupFailedCount ? "warn" : "success",
+              );
+              if (attempt.duplicate_cleanup.failed_statuses) {
+                candidateLog(
+                  `[考生导入] 清理失败状态码：${JSON.stringify(attempt.duplicate_cleanup.failed_statuses)}`,
+                  "warn",
+                );
+              }
+            }
+            if (attempt.blocked_by_soft_deleted_permit_conflict) {
+              candidateLog("[考生导入] 当前场次 0 人，但准考证号仍被易考返回 4002 占用；已停止重试，不会自动修改准考证号", "warn");
+            }
+          });
+        }
+        if (data.import_state && !data.import_state.error) {
+          candidateLog(
+            `[考生导入] 导入后最新状态：${data.import_state.entriesNum || data.entries_num || 0} 人，${data.import_state.roomsCount || 0} 个班级`,
+            data.fail ? "warn" : "success",
+          );
+        } else if (data.entries_num) {
+          candidateLog(`[考生导入] 当前场次接口统计 ${data.entries_num} 人`, data.fail ? "warn" : "success");
+        }
+        if (data.diagnosis?.messages?.length) {
+          data.diagnosis.messages.forEach((message) => candidateLog(`[考生导入] ${message}`, data.fail ? "warn" : "success"));
+        }
+        if (data.errors?.length) {
+          data.errors.forEach((error) => candidateLog(`[考生导入] ${JSON.stringify(error)}`, "warn"));
+        }
+        if (Number(data.fail || 0) > 0) {
+          if (data.diagnosis?.canContinueRoomAssign) {
+            candidateLog("[自动分班] 导入接口有失败记录，但场次考生数已满足名单人数，继续自动分班", "warn");
+          } else {
+            candidateLog("[自动分班] 考生导入存在失败记录且场次人数不足，已跳过自动分班", "warn");
+            return;
+          }
+        }
+        await autoAssignRoomsAfterImport();
+      }
+
       function applyLoginState(login) {
         uiState.login = {
           url: login?.url || "https://eztest.org/manager/accounts/login",
           username: login?.username || "",
           password: login?.password || "",
+          tenantApiKey: login?.tenantApiKey || "",
         };
         loginUrlInput.value = uiState.login.url;
         loginUsernameInput.value = uiState.login.username;
         loginPasswordInput.value = uiState.login.password;
+        tenantApiKeyInput.value = uiState.login.tenantApiKey;
         const ready = uiState.login.url && uiState.login.username && uiState.login.password;
-        loginState.textContent = ready ? "已保存" : "未配置";
+        const apiReady = Boolean(uiState.login.tenantApiKey);
+        loginState.textContent = ready && apiReady ? "已保存" : ready ? "缺少 API Key" : "未配置";
       }
 
       function collectLoginState() {
@@ -1665,7 +3288,17 @@
           url: loginUrlInput.value.trim(),
           username: loginUsernameInput.value.trim(),
           password: loginPasswordInput.value,
+          tenantApiKey: tenantApiKeyInput.value.trim(),
         };
+      }
+
+      function toggleSecretInput(button) {
+        const input = document.querySelector(`#${button.dataset.secretToggle}`);
+        if (!input) return;
+        const isHidden = input.type === "password";
+        input.type = isHidden ? "text" : "password";
+        button.textContent = isHidden ? "隐藏" : "显示";
+        button.setAttribute("aria-label", `${isHidden ? "隐藏" : "显示"}${input === loginPasswordInput ? "密码" : "租户 API Key"}`);
       }
 
       function setProgress(percent, caption, stageIndex) {
@@ -1993,12 +3626,13 @@
           throw new Error(data.error || "导入失败");
         }
         uiState.uploadId = data.uploadId;
+        uiState.taskId = data.taskId || "";
         uiState.imported = data;
         applyImportResult(file.name, data);
       }
 
       async function loadSettings() {
-        const response = await fetch(`${runtime.apiBase}/api/settings`);
+        const response = await fetch(`${runtime.apiBase}/api/settings?_=${Date.now()}`, { cache: "no-store" });
         const data = await response.json();
         if (!response.ok) {
           throw new Error(data.error || "读取设置失败");
@@ -2045,6 +3679,145 @@
           addLog(error.message || String(error), "warn");
         }
       });
+
+      candidateFileInput.addEventListener("change", async (event) => {
+        try {
+          await parseCandidateFile(event.target.files[0]);
+        } catch (error) {
+          candidateLog(`[名单解析] ${error.message || String(error)}`, "warn");
+        }
+      });
+
+      candidateDropZone.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        candidateDropZone.classList.add("is-ready");
+      });
+
+      candidateDropZone.addEventListener("dragleave", () => {
+        if (!candidateUiState.uploadId) candidateDropZone.classList.remove("is-ready");
+      });
+
+      candidateDropZone.addEventListener("drop", (event) => {
+        event.preventDefault();
+        parseCandidateFile(event.dataTransfer.files[0]).catch((error) =>
+          candidateLog(`[名单解析] ${error.message || String(error)}`, "warn"),
+        );
+      });
+
+      [candidateMapFullName, candidateMapIdentityId, candidateMapPermit].forEach((select) => {
+        select.addEventListener("change", rebuildCandidatesFromMapping);
+      });
+
+      candidateDownloadBtn.addEventListener("click", async () => {
+        try {
+          await downloadCandidateTemplate();
+        } catch (error) {
+          candidateLog(`[名单整理] ${error.message || String(error)}`, "warn");
+        }
+      });
+
+      loadSessionsBtn.addEventListener("click", async () => {
+        try {
+          const latestLogin = collectLoginState();
+          const savedLogin = uiState.login || {};
+          const changed =
+            latestLogin.url !== savedLogin.url ||
+            latestLogin.username !== savedLogin.username ||
+            latestLogin.password !== savedLogin.password ||
+            latestLogin.tenantApiKey !== savedLogin.tenantApiKey;
+          if (changed) {
+            await saveLoginSettings();
+            candidateLog("[场次选择] 已保存最新后台连接配置，使用最新租户 API Key 加载场次", "success");
+          }
+          await loadCandidateSessions();
+        } catch (error) {
+          candidateLog(`[场次选择] ${error.message || String(error)}`, "warn");
+        }
+      });
+
+      sessionSelect.addEventListener("change", () => {
+        candidateUiState.selectedSession =
+          candidateUiState.sessions.find((session) => session.session_id === sessionSelect.value) || null;
+        candidateUiState.rooms = [];
+        candidateUiState.roomProgressbar = null;
+        candidateUiState.monitorAccounts = [];
+        renderSelectedSession();
+        renderRoomAssignResult();
+        renderMonitorAccountCard();
+        if (candidateUiState.selectedSession) {
+          candidateLog(`[场次选择] 已选择场次：${candidateUiState.selectedSession.name}`, "success");
+          candidateLog(`[场次选择] session_id：${candidateUiState.selectedSession.session_id}`, "success");
+        }
+      });
+
+      monitorAccountDownloadBtn.addEventListener("click", async () => {
+        try {
+          await downloadMonitorAccountsExcel();
+          candidateLog("[监考账号] 已下载监考账号 Excel", "success");
+        } catch (error) {
+          candidateLog(`[监考账号] ${error.message || String(error)}`, "warn");
+        }
+      });
+
+      roomTargetSizeInput.addEventListener("wheel", (event) => {
+        if (document.activeElement !== roomTargetSizeInput) return;
+        event.preventDefault();
+        const current = Number(roomTargetSizeInput.value || 30);
+        const next = Math.max(1, current + (event.deltaY < 0 ? 1 : -1));
+        roomTargetSizeInput.value = String(next);
+        roomTargetSizeInput.dispatchEvent(new Event("input", { bubbles: true }));
+        roomTargetSizeInput.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+
+      candidateImportBtn.addEventListener("click", async () => {
+        try {
+          await importCandidatesToSession();
+        } catch (error) {
+          candidateLog(`[考生导入] ${error.message || String(error)}`, "warn");
+        }
+      });
+
+      candidateNavBtn.addEventListener("click", () => {
+        showView("candidate");
+      });
+
+      autoNavItem.addEventListener("click", () => showView("auto"));
+      projectNavBtn.addEventListener("click", async () => {
+        showView("projects");
+        try { await loadProjects(); } catch (error) { projectGrid.innerHTML = `<div class="empty-state">${safeText(error.message)}</div>`; }
+      });
+      examNavBtn.addEventListener("click", async () => {
+        showView("exams");
+        try { await loadExams(); } catch (error) { examListRows.innerHTML = `<tr><td colspan="9">${safeText(error.message)}</td></tr>`; }
+      });
+      refreshProjectsBtn.addEventListener("click", () => loadProjects().catch((error) => { projectGrid.innerHTML = `<div class="empty-state">${safeText(error.message)}</div>`; }));
+      refreshExamsBtn.addEventListener("click", () => loadExams().catch((error) => { examListRows.innerHTML = `<tr><td colspan="9">${safeText(error.message)}</td></tr>`; }));
+      refreshTaskBtn.addEventListener("click", () => taskViewState.currentTaskId && openTaskDetail(taskViewState.currentTaskId));
+      backToExamsBtn.addEventListener("click", async () => { showView("exams"); await loadExams(); });
+      projectGrid.addEventListener("click", (event) => {
+        const card = event.target.closest("[data-task-id]");
+        if (card) openTaskDetail(card.dataset.taskId).catch((error) => alert(error.message));
+      });
+      examListRows.addEventListener("click", (event) => {
+        const button = event.target.closest(".task-detail-btn");
+        if (button) openTaskDetail(button.dataset.taskId).catch((error) => alert(error.message));
+      });
+      taskStepGrid.addEventListener("click", async (event) => {
+        const retry = event.target.closest("[data-retry-step]");
+        if (retry) {
+          event.stopPropagation();
+          try {
+            const task = await fetchJson(`/api/tasks/${encodeURIComponent(taskViewState.currentTaskId)}/steps/${encodeURIComponent(retry.dataset.retryStep)}/retry`, { method: "POST" });
+            renderTaskDetail(task);
+          } catch (error) { alert(error.message); }
+          return;
+        }
+        const card = event.target.closest(".task-step-card");
+        if (card) card.classList.toggle("open");
+      });
+
+      window.addEventListener("scroll", syncActiveNavByScroll, { passive: true });
+      window.addEventListener("resize", syncActiveNavByScroll);
 
       captureGrid.addEventListener("click", (event) => {
         const card = event.target.closest("[data-shot]");
@@ -2147,6 +3920,7 @@
             throw new Error(data.error || "创建任务失败");
           }
           uiState.jobId = data.jobId;
+          uiState.taskId = data.taskId || uiState.taskId;
           connectEvents(data.jobId);
         } catch (error) {
           addLog(error.message || String(error), "warn");
@@ -2156,12 +3930,17 @@
         }
       });
 
+      secretToggleButtons.forEach((button) => {
+        button.addEventListener("click", () => toggleSecretInput(button));
+      });
+
       resetBtn.addEventListener("click", () => {
         if (uiState.eventSource) {
           uiState.eventSource.close();
           uiState.eventSource = null;
         }
         uiState.uploadId = "";
+        uiState.taskId = "";
         uiState.jobId = "";
         uiState.imported = null;
         uiState.logs = [];
@@ -2179,12 +3958,45 @@
         renderCaptures([]);
         renderPreview([]);
         renderLogs();
+        candidateUiState.uploadId = "";
+        candidateUiState.filename = "";
+        candidateUiState.columns = [];
+        candidateUiState.rawRows = [];
+        candidateUiState.mapping = { full_name: "", identity_id: "", permit: "" };
+        candidateUiState.candidates = [];
+        candidateUiState.errors = [];
+        candidateUiState.warnings = [];
+        candidateUiState.sessions = [];
+        candidateUiState.selectedSession = null;
+        candidateUiState.rooms = [];
+        candidateUiState.roomProgressbar = null;
+        candidateUiState.monitorAccounts = [];
+        candidateUiState.logs = [];
+        candidateFileInput.value = "";
+        roomTargetSizeInput.value = "30";
+        candidateDropZone.classList.remove("is-ready");
+        candidateDropZone.classList.remove("has-upload");
+        candidateDropTitle.textContent = "上传客户原始名单";
+        candidateState.textContent = "等待上传";
+        renderMappingControls();
+        renderCandidateResult();
+        renderSessions();
+        renderSelectedSession();
+        renderRoomAssignResult();
+        renderMonitorAccountCard();
+        candidateLog("[名单解析] 等待上传客户名单");
         runBtn.disabled = true;
         stageText.textContent = "尚未开始";
         setProgress(0, "导入需求单后可开始配置", -1);
       });
 
       renderLogs();
+      renderMappingControls();
+      renderCandidateResult();
+      renderSessions();
+      renderSelectedSession();
+      renderRoomAssignResult();
+      showView("auto");
       loadSettings().catch((error) => addLog(error.message || String(error), "warn"));
     </script>
   </body>
