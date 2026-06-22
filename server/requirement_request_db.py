@@ -73,6 +73,26 @@ def normalize_subjects(value):
     return [part.strip() for part in parts if part.strip()]
 
 
+def normalize_text_list(value):
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = re.split(r"[\n\r]+", str(value))
+    return [str(item).strip(" \t-•、;；") for item in raw_items if str(item).strip(" \t-•、;；")]
+
+
+def build_customer_clarification_prompt(message="", questions=None):
+    questions = normalize_text_list(questions)
+    intro = str(message or "人工审核后需要补充信息").strip()
+    if not questions:
+        return intro
+    lines = ["请补充以下信息："]
+    lines.extend(f"{index}. {question}" for index, question in enumerate(questions, start=1))
+    return f"{intro}\n" + "\n".join(lines)
+
+
 def normalize_requirement(payload):
     source = dict(payload or {})
     result = {}
@@ -295,13 +315,21 @@ class RequirementStore:
             })
         return self.get_requirement(request_id)
 
-    def request_customer_clarification(self, request_id, reviewer="", message=""):
+    def request_customer_clarification(self, request_id, reviewer="", message="", questions=None, missing_fields=None):
+        questions = normalize_text_list(questions)
+        missing_fields = normalize_text_list(missing_fields)
+        customer_prompt = build_customer_clarification_prompt(message, questions)
         return self._set_status(
             request_id,
             "need_customer_clarification",
             "customer_clarification_requested",
             reviewer or "staff",
-            {"message": message or ""},
+            {
+                "message": message or "",
+                "questions": questions,
+                "missingFields": missing_fields,
+                "customerPrompt": customer_prompt,
+            },
         )
 
     def mark_reviewed_waiting_customer_confirmation(self, request_id, reviewer="", message=""):
@@ -494,6 +522,8 @@ def main():
             payload.get("requestId") or payload.get("request_id"),
             payload.get("reviewer") or "",
             payload.get("message") or "",
+            payload.get("questions") or [],
+            payload.get("missingFields") or payload.get("missing_fields") or [],
         )
     elif action == "mark_reviewed":
         result = store.mark_reviewed_waiting_customer_confirmation(

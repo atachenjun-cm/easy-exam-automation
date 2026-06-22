@@ -154,6 +154,8 @@ test("staff routes can request clarification and mark reviewed", async () => {
   const clarification = await call("POST", `/api/requirements/${requestId}/request-clarification`, {
     reviewer: "ops-a",
     message: "请补充考生名单模板要求",
+    questions: ["是否需要我们提供考生名单模板？", "考生名单预计什么时候确认？"],
+    missingFields: ["candidate_template_required"],
   });
   const reviewed = await call("POST", `/api/requirements/${requestId}/mark-reviewed`, {
     reviewer: "ops-a",
@@ -162,6 +164,17 @@ test("staff routes can request clarification and mark reviewed", async () => {
 
   assert.equal(clarification.statusCode, 200);
   assert.equal(clarification.body.requirement.status, "need_customer_clarification");
+  const clarificationEvent = clarification.body.requirement.events.find(
+    (event) => event.eventType === "customer_clarification_requested",
+  );
+  assert.ok(clarificationEvent);
+  assert.deepEqual(clarificationEvent.payload.questions, [
+    "是否需要我们提供考生名单模板？",
+    "考生名单预计什么时候确认？",
+  ]);
+  assert.deepEqual(clarificationEvent.payload.missingFields, ["candidate_template_required"]);
+  assert.match(clarificationEvent.payload.customerPrompt, /请补充以下信息/);
+  assert.match(clarificationEvent.payload.customerPrompt, /是否需要我们提供考生名单模板/);
   assert.equal(reviewed.statusCode, 200);
   assert.equal(reviewed.body.requirement.status, "reviewed_waiting_customer_confirmation");
 });

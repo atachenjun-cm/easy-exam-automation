@@ -266,6 +266,25 @@ change_requested
 
 Dify 不应直接调用 staff API。
 
+当运营人员标记 `need_customer_clarification` 时，应填写要发给客户的补充问题：
+
+```json
+{
+  "reviewer": "admin-op",
+  "message": "人工审核后需客户补充信息",
+  "questions": [
+    "请确认正式考试是否分批次。",
+    "请确认考生名单预计何时提供。"
+  ],
+  "missingFields": [
+    "formal_batch_rule",
+    "candidate_list_time"
+  ]
+}
+```
+
+时间线事件会记录 `questions`、`missingFields` 和面向客户的 `customerPrompt`。管理页会展示这段补充话术，客户在 Dify 中继续回复这些问题后，再由 Dify 合并到同一个需求草稿。
+
 ## 试运行检查清单
 
 每轮试运行至少检查：

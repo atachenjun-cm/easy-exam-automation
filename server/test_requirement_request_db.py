@@ -160,8 +160,16 @@ class RequirementStoreTest(unittest.TestCase):
             request_id,
             reviewer="ops-a",
             message="请补充候选人名单是否需要模板",
+            questions=["是否需要候选人名单模板？", "候选人名单预计何时确认？"],
+            missing_fields=["candidate_template_required"],
         )
         self.assertEqual(clarification["status"], "need_customer_clarification")
+        clarification_event = next(
+            event for event in clarification["events"] if event["eventType"] == "customer_clarification_requested"
+        )
+        self.assertEqual(clarification_event["payload"]["questions"][0], "是否需要候选人名单模板？")
+        self.assertEqual(clarification_event["payload"]["missingFields"], ["candidate_template_required"])
+        self.assertIn("请补充以下信息", clarification_event["payload"]["customerPrompt"])
 
         reviewed = self.store.mark_reviewed_waiting_customer_confirmation(
             request_id,

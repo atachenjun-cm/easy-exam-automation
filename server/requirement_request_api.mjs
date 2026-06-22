@@ -206,6 +206,8 @@ export function createRequirementRequestHandler(options = {}) {
         requestId: decodeSegment(clarificationMatch[1]),
         reviewer: payload.reviewer || "",
         message: payload.message || "",
+        questions: Array.isArray(payload.questions) ? payload.questions : [],
+        missingFields: Array.isArray(payload.missingFields) ? payload.missingFields : [],
       });
       if (!requirement) return true;
       json(res, 200, { ok: true, requirement });

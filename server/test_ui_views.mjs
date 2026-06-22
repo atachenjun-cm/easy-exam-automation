@@ -34,6 +34,8 @@ test("requirement center renders list and detail surfaces", () => {
   assert.ok(html.includes('id="requirementsList"'));
   assert.ok(html.includes('id="requirementDetailView"'));
   assert.ok(html.includes('id="requirementClarificationBtn"'));
+  assert.ok(html.includes('id="requirementClarificationQuestions"'));
+  assert.ok(html.includes('id="requirementClarificationPrompt"'));
   assert.ok(html.includes('id="requirementReviewedBtn"'));
   assert.ok(html.includes('id="requirementMarkReadyBtn"'));
   assert.ok(html.includes('id="requirementLinkTaskBtn"'));
@@ -41,4 +43,7 @@ test("requirement center renders list and detail surfaces", () => {
   assert.ok(html.includes('id="requirementVersions"'));
   assert.ok(html.includes('id="requirementChanges"'));
   assert.ok(html.includes("ready_for_manual_execution"));
+  assert.ok(html.includes("发给客户的补充问题"));
+  assert.ok(html.includes("formatRequirementEvent"));
+  assert.equal(html.includes("JSON.stringify(item.payload || {})"), false);
 });
