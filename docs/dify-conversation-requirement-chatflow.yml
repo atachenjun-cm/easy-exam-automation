@@ -1,0 +1,237 @@
+app:
+  description: 易考对话式需求收集原型：客户自然描述考试服务需求，由大模型抽取结构化草稿并写入 easy-exam-automation 需求中心；不执行平台配置。
+  icon: 💬
+  icon_background: '#DCFCE7'
+  mode: advanced-chat
+  name: 易考需求对话收集
+  use_icon_as_answer_icon: false
+dependencies: []
+kind: app
+version: 0.3.1
+workflow:
+  conversation_variables: []
+  environment_variables: []
+  features:
+    file_upload:
+      enabled: false
+    opening_statement: '请直接描述考试需求。我会逐步追问缺失信息，并在整理完成后生成结构化需求单供你确认。'
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions:
+    - '我们 7 月 1 日上午 9 点到 11 点考试，科目是英语和化学，需要视频监控。'
+    - '我已经有一份需求表，想让你帮我整理成系统能接收的结构化需求。'
+    suggested_questions_after_answer:
+      enabled: true
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+    - id: start-to-extract
+      source: start
+      sourceHandle: source
+      target: extract_requirement
+      targetHandle: target
+      data:
+        sourceType: start
+        targetType: llm
+        isInIteration: false
+        isInLoop: false
+      type: custom
+      zIndex: 0
+    - id: extract-to-upsert
+      source: extract_requirement
+      sourceHandle: source
+      target: upsert_requirement
+      targetHandle: target
+      data:
+        sourceType: llm
+        targetType: http-request
+        isInIteration: false
+        isInLoop: false
+      type: custom
+      zIndex: 0
+    - id: upsert-to-answer
+      source: upsert_requirement
+      sourceHandle: source
+      target: answer
+      targetHandle: target
+      data:
+        sourceType: http-request
+        targetType: answer
+        isInIteration: false
+        isInLoop: false
+      type: custom
+      zIndex: 0
+    nodes:
+    - id: start
+      type: custom
+      position:
+        x: 80
+        y: 260
+      positionAbsolute:
+        x: 80
+        y: 260
+      sourcePosition: right
+      targetPosition: left
+      data:
+        desc: 客户自由描述需求
+        title: Start
+        type: start
+        variables: []
+    - id: extract_requirement
+      type: custom
+      position:
+        x: 390
+        y: 260
+      positionAbsolute:
+        x: 390
+        y: 260
+      sourcePosition: right
+      targetPosition: left
+      data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: 抽取结构化需求草稿
+        memory:
+          query_prompt_template: '{{#sys.query#}}'
+          role_prefix:
+            assistant: ''
+            user: ''
+          window:
+            enabled: true
+            size: 10
+        model:
+          completion_params:
+            temperature: 0.2
+          mode: chat
+          name: qwen3.6-plus
+          provider: langgenius/tongyi/tongyi
+        prompt_template:
+        - role: system
+          text: |-
+            你是易考考试服务需求顾问。你的任务是通过自然对话收集客户考试需求，并输出 easy-exam-automation 需求中心可以接收的 JSON。
+
+            业务边界：
+            - 暂不收集客户基础信息，customer 固定为空对象。
+            - 试考默认都需要，只确认试考时间 mock_exam_time_range。
+            - 不询问水印和禁止复制，后端会默认开启。
+            - 不负责创建考试、创建场次、绑定试卷、导入考生、生成监考账号或任何平台执行。
+            - 不要承诺已经完成平台配置，只能说明已整理需求并提交人工审核。
+            - 第一次接口返回 requestId 后，后续同一轮对话必须复用这个 requestId，不能创建新需求。
+
+            必填字段：
+            - exam_name：考试名称。
+            - formal_exam_time_range：正式考试时间范围。
+            - mock_exam_time_range：试考时间范围。
+            - early_login_minutes：提前登录分钟数，输出为“30分钟”这类文本。
+            - late_limit_minutes：限制迟到分钟数，输出为“15分钟”这类文本。
+            - video_monitor_required：是或否。
+            - video_record_required：是或否。
+            - hawkeye_required：是或否。
+            - exam_client_type：网页考试或客户端考试。
+            - leave_limit_count：允许离开次数，数字。
+            - subjects：科目，多个科目用中文逗号分隔。
+
+            可选字段：
+            - candidate_template_required：是或否。
+            - waiting_notice、paper_time_rule、welcome_message、commitment_text、notes。
+
+            输出规则：
+            - 只输出 JSON，不要输出 Markdown，不要解释。
+            - 不确定的字段不要猜，不要填“未知”“待定”。
+            - 如果历史消息里已经出现需求中心返回的 requestId，必须把这个 requestId 原样放入输出 JSON 的 requestId 字段。
+            - 如果客户是在补充上一轮缺失项，必须合并历史中已经确认的字段和本轮新增字段。
+            - 如果必填字段缺失，next_question 只问一个最重要的缺失项。
+            - 如果必填字段完整但客户尚未明确确认，intent 为 ready_for_confirmation，并提供 customer_summary。
+            - 只有客户明确说“确认”“没问题”“以上无误”等，intent 才能是 customer_confirmed。
+            - 如果客户在确认后提出调整，intent 为 change_request。
+
+            JSON 格式：
+            {
+              "intent": "collecting",
+              "requestId": "",
+              "customer": {},
+              "requirement": {},
+              "next_question": "",
+              "customer_summary": "",
+              "message": "Dify 对话抽取"
+            }
+        - role: user
+          text: '{{#sys.query#}}'
+        selected: false
+        title: 抽取需求草稿
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+    - id: upsert_requirement
+      type: custom
+      position:
+        x: 720
+        y: 260
+      positionAbsolute:
+        x: 720
+        y: 260
+      sourcePosition: right
+      targetPosition: left
+      data:
+        desc: 写入 easy-exam-automation 需求中心
+        title: 写入需求中心
+        type: http-request
+        method: POST
+        url: http://host.docker.internal:8765/api/ai/requirements/upsert
+        authorization:
+          type: no-auth
+        headers: 'Content-Type: application/json'
+        params: ''
+        body:
+          type: json
+          data: '{{#extract_requirement.text#}}'
+        timeout:
+          connect: 10
+          read: 30
+          write: 30
+        retry_config:
+          enabled: false
+          max_retries: 1
+          retry_interval: 1000
+          exponential_backoff:
+            enabled: false
+            multiplier: 2
+            max_interval: 10000
+    - id: answer
+      type: custom
+      position:
+        x: 1060
+        y: 260
+      positionAbsolute:
+        x: 1060
+        y: 260
+      sourcePosition: right
+      targetPosition: left
+      data:
+        answer: |-
+          我已根据你的描述整理需求草稿，并提交到需求中心。
+
+          本轮抽取结果：{{#extract_requirement.text#}}
+
+          接口状态：{{#upsert_requirement.status_code#}}
+
+          需求中心返回：{{#upsert_requirement.body#}}
+
+          如果返回中还有 missingFields，我会继续追问缺失项；字段完整后请你确认摘要，确认后仍会进入人工审核，不会自动执行平台配置。
+        desc: ''
+        title: Answer
+        type: answer
+        variables: []
+    viewport:
+      x: 0
+      y: 0
+      zoom: 0.7
