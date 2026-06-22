@@ -173,6 +173,7 @@ test("staff routes can request clarification and mark reviewed", async () => {
     "考生名单预计什么时候确认？",
   ]);
   assert.deepEqual(clarificationEvent.payload.missingFields, ["candidate_template_required"]);
+  assert.match(clarificationEvent.payload.customerPrompt, new RegExp(requestId));
   assert.match(clarificationEvent.payload.customerPrompt, /请补充以下信息/);
   assert.match(clarificationEvent.payload.customerPrompt, /是否需要我们提供考生名单模板/);
   assert.equal(reviewed.statusCode, 200);

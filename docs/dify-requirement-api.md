@@ -283,7 +283,7 @@ Dify 不应直接调用 staff API。
 }
 ```
 
-时间线事件会记录 `questions`、`missingFields` 和面向客户的 `customerPrompt`。管理页会展示这段补充话术，客户在 Dify 中继续回复这些问题后，再由 Dify 合并到同一个需求草稿。
+时间线事件会记录 `questions`、`missingFields` 和面向客户的 `customerPrompt`。`customerPrompt` 会包含 `需求编号`，这是跨 Dify 对话关联同一张需求单的锚点。管理页会展示这段补充话术，客户在 Dify 中继续回复这些问题时，应带上这段话术或需求编号，再由 Dify 合并到同一个需求草稿。
 
 ## 试运行检查清单
 

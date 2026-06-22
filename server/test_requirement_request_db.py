@@ -169,6 +169,7 @@ class RequirementStoreTest(unittest.TestCase):
         )
         self.assertEqual(clarification_event["payload"]["questions"][0], "是否需要候选人名单模板？")
         self.assertEqual(clarification_event["payload"]["missingFields"], ["candidate_template_required"])
+        self.assertIn(request_id, clarification_event["payload"]["customerPrompt"])
         self.assertIn("请补充以下信息", clarification_event["payload"]["customerPrompt"])
 
         reviewed = self.store.mark_reviewed_waiting_customer_confirmation(

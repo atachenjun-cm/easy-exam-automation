@@ -83,14 +83,15 @@ def normalize_text_list(value):
     return [str(item).strip(" \t-•、;；") for item in raw_items if str(item).strip(" \t-•、;；")]
 
 
-def build_customer_clarification_prompt(message="", questions=None):
+def build_customer_clarification_prompt(message="", questions=None, request_id=""):
     questions = normalize_text_list(questions)
     intro = str(message or "人工审核后需要补充信息").strip()
+    prefix = f"需求编号：{request_id}\n" if request_id else ""
     if not questions:
-        return intro
+        return f"{prefix}{intro}"
     lines = ["请补充以下信息："]
     lines.extend(f"{index}. {question}" for index, question in enumerate(questions, start=1))
-    return f"{intro}\n" + "\n".join(lines)
+    return f"{prefix}{intro}\n" + "\n".join(lines)
 
 
 def normalize_requirement(payload):
@@ -318,7 +319,7 @@ class RequirementStore:
     def request_customer_clarification(self, request_id, reviewer="", message="", questions=None, missing_fields=None):
         questions = normalize_text_list(questions)
         missing_fields = normalize_text_list(missing_fields)
-        customer_prompt = build_customer_clarification_prompt(message, questions)
+        customer_prompt = build_customer_clarification_prompt(message, questions, request_id)
         return self._set_status(
             request_id,
             "need_customer_clarification",
