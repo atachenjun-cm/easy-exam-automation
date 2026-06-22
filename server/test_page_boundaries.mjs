@@ -4,6 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { CandidateImportPage } from "../web/pages/CandidateImportPage.mjs";
+
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (relativePath) => fs.readFileSync(path.join(rootDir, relativePath), "utf8");
 
@@ -46,4 +48,19 @@ test("only AutoConfigPage imports auto configuration components", () => {
 test("AutoConfigPage owns every auto component root", () => {
   const autoPage = read("web/pages/AutoConfigPage.mjs");
   assert.match(autoPage, /roots:\s*\[[\s\S]*\.\.\.components\.map\(\(component\) => component\.element\)/);
+});
+
+test("CandidateImportPage loads task context when entering the route", async () => {
+  let entered = 0;
+  const root = {};
+  const page = CandidateImportPage({
+    root,
+    loadContext: async () => {
+      entered += 1;
+    },
+  });
+
+  await page.enter();
+
+  assert.equal(entered, 1);
 });

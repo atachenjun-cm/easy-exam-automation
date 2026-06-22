@@ -54,3 +54,10 @@ test("requirement center remains present while exam views change", () => {
   assert.ok(html.includes("RequirementListPage({ root: requirementsView"));
   assert.ok(html.includes("RequirementDetailPage({ root: requirementDetailView"));
 });
+
+test("candidate page loads and preselects task-scoped sessions", () => {
+  assert.ok(html.includes("async function loadCandidateTaskContext()"));
+  assert.ok(html.includes("resolveCandidateTaskContext(task, sessionId)"));
+  assert.ok(html.includes("loadContext: loadCandidateTaskContext"));
+  assert.ok(html.includes("sessionSelect.value = String(candidateUiState.selectedSession.session_id)"));
+});

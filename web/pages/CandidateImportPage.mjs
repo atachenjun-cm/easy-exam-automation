@@ -1,3 +1,3 @@
-export function CandidateImportPage({ root }) {
-  return { name: "candidate-import", roots: [root], enter: async () => {} };
+export function CandidateImportPage({ root, loadContext = async () => {} }) {
+  return { name: "candidate-import", roots: [root], enter: () => loadContext() };
 }

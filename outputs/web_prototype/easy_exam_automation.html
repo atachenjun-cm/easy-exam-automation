@@ -3159,6 +3159,9 @@
               .join("")
           : `<option value="">${escapeHtml(message)}</option>`;
         sessionSelect.disabled = !candidateUiState.sessions.length;
+        if (candidateUiState.selectedSession) {
+          sessionSelect.value = String(candidateUiState.selectedSession.session_id);
+        }
       }
 
       async function loadCandidateSessions() {
@@ -3207,6 +3210,34 @@
           : "<div>当前选择场次：未选择</div>";
         candidateImportBtn.disabled =
           !session || !candidateUiState.candidates.length || candidateUiState.errors.length > 0;
+      }
+
+      async function loadCandidateTaskContext() {
+        const params = new URLSearchParams(window.location.search);
+        const taskId = String(params.get("taskId") || "").trim();
+        if (!taskId) return;
+        const sessionId = String(params.get("sessionId") || "").trim();
+        candidateLog(`[场次选择] 正在加载考试任务 ${taskId}`);
+        try {
+          const task = await fetchJson(`/api/tasks/${encodeURIComponent(taskId)}?_=${Date.now()}`);
+          const context = resolveCandidateTaskContext(task, sessionId);
+          candidateUiState.sessions = context.sessions;
+          candidateUiState.selectedSession = context.selectedSession;
+          renderSessions("该任务尚无可用场次");
+          renderSelectedSession();
+          const selectionMessage = context.selectedSession
+            ? `，已选择 session_id=${context.selectedSession.session_id}`
+            : sessionId
+              ? "，目标 session_id 不属于该任务"
+              : "";
+          candidateLog(`[场次选择] 已带入正式考试和试考，共 ${context.sessions.length} 个场次${selectionMessage}`, context.sessions.length ? "success" : "warn");
+        } catch (error) {
+          candidateUiState.sessions = [];
+          candidateUiState.selectedSession = null;
+          renderSessions("任务场次加载失败，可手动加载");
+          renderSelectedSession();
+          candidateLog(`[场次选择] ${error.message || String(error)}`, "warn");
+        }
       }
 
       function renderRoomAssignResult(message = "自动分班：等待考生导入成功后执行") {
@@ -3992,7 +4023,7 @@
         AutoConfigPage({ documentObject: document }),
         ExamListPage({ root: examListView, loadExams }),
         ExamDetailPage({ root: taskDetailView, loadExam: openTaskDetail }),
-        CandidateImportPage({ root: candidateImportPanel }),
+        CandidateImportPage({ root: candidateImportPanel, loadContext: loadCandidateTaskContext }),
         RequirementListPage({ root: requirementsView, loadRequirements }),
         RequirementDetailPage({ root: requirementDetailView, loadRequirement: loadRequirementDetail }),
         staticPage("templates", templatesView),
