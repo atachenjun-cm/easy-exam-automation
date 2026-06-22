@@ -36,3 +36,21 @@ test("requirement center renders list and detail surfaces", () => {
   assert.ok(html.includes('id="requirementMarkReadyBtn"'));
   assert.ok(html.includes('id="requirementLinkTaskBtn"'));
 });
+
+test("exam list is task-aggregated and exam detail owns dual session cards", () => {
+  assert.ok(
+    html.includes(
+      'import { aggregateExamSessions, matchesExamTask, resolveCandidateTaskContext } from "/web/exam_task_view_model.mjs"',
+    ),
+  );
+  assert.ok(html.includes('id="taskSessionCards"'));
+  assert.ok(html.includes("data-candidate-task-id"));
+  assert.equal(html.includes('id="examTypeFilter"'), false);
+});
+
+test("requirement center remains present while exam views change", () => {
+  assert.ok(html.includes('id="requirementsView"'));
+  assert.ok(html.includes('id="requirementDetailView"'));
+  assert.ok(html.includes("RequirementListPage({ root: requirementsView"));
+  assert.ok(html.includes("RequirementDetailPage({ root: requirementDetailView"));
+});
