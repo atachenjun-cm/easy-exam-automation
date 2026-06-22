@@ -3230,7 +3230,7 @@
             : sessionId
               ? "，目标 session_id 不属于该任务"
               : "";
-          candidateLog(`[场次选择] 已带入正式考试和试考，共 ${context.sessions.length} 个场次${selectionMessage}`, context.sessions.length ? "success" : "warn");
+          candidateLog(`[场次选择] 已带入目标考试场次，共 ${context.sessions.length} 个场次${selectionMessage}`, context.sessions.length ? "success" : "warn");
         } catch (error) {
           candidateUiState.sessions = [];
           candidateUiState.selectedSession = null;

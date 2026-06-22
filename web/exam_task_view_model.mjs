@@ -49,11 +49,14 @@ export function matchesExamTask(task, query = "") {
 }
 
 export function resolveCandidateTaskContext(task, requestedSessionId = "") {
-  const sessions = (task?.sessions || []).filter(
+  const selectedSession = (task?.sessions || []).find(
     (session) =>
-      ["formal", "trial"].includes(session.sessionType) && String(session.session_id || "").trim(),
-  );
-  const selectedSession =
-    sessions.find((session) => String(session.session_id) === String(requestedSessionId)) || null;
-  return { sessions, selectedSession };
+      ["formal", "trial"].includes(session.sessionType) &&
+      String(session.session_id || "").trim() &&
+      String(session.session_id) === String(requestedSessionId),
+  ) || null;
+  return {
+    sessions: selectedSession ? [selectedSession] : [],
+    selectedSession,
+  };
 }

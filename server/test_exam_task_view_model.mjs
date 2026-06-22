@@ -65,11 +65,15 @@ test("searches all task and session identifiers", () => {
   assert.equal(matchesExamTask(task, "不存在"), false);
 });
 
-test("resolves both task sessions and selects only a valid requested session", () => {
+test("resolves only the valid requested session", () => {
   const task = { sessions: sessions.filter((item) => item.taskId === "task-1") };
-  const valid = resolveCandidateTaskContext(task, "1002");
+  const formal = resolveCandidateTaskContext(task, "1001");
+  const trial = resolveCandidateTaskContext(task, "1002");
 
-  assert.equal(valid.sessions.length, 2);
-  assert.equal(valid.selectedSession.session_id, "1002");
-  assert.equal(resolveCandidateTaskContext(task, "other").selectedSession, null);
+  assert.deepEqual(formal.sessions.map((session) => session.session_id), ["1001"]);
+  assert.equal(formal.selectedSession.session_id, "1001");
+  assert.deepEqual(trial.sessions.map((session) => session.session_id), ["1002"]);
+  assert.equal(trial.selectedSession.session_id, "1002");
+  assert.deepEqual(resolveCandidateTaskContext(task, "other"), { sessions: [], selectedSession: null });
+  assert.deepEqual(resolveCandidateTaskContext(task), { sessions: [], selectedSession: null });
 });

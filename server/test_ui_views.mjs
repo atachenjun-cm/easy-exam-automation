@@ -60,4 +60,6 @@ test("candidate page loads and preselects task-scoped sessions", () => {
   assert.ok(html.includes("resolveCandidateTaskContext(task, sessionId)"));
   assert.ok(html.includes("loadContext: loadCandidateTaskContext"));
   assert.ok(html.includes("sessionSelect.value = String(candidateUiState.selectedSession.session_id)"));
+  assert.ok(html.includes("已带入目标考试场次"));
+  assert.equal(html.includes("已带入正式考试和试考"), false);
 });
