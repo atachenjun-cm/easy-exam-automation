@@ -159,10 +159,18 @@ workflow:
               "requestId": "",
               "customer": {},
               "requirement": {},
+              "customerReply": "",
+              "customerMessage": "",
+              "changes": {},
               "next_question": "",
               "customer_summary": "",
               "message": "Dify 对话抽取"
             }
+
+            字段含义：
+            - collecting 或 ready_for_confirmation：把已知需求字段放入 requirement。
+            - customer_confirmed：必须带 requestId；customerReply 放客户确认原话或确认摘要；requirement 可以为空。
+            - change_request：必须带 requestId；customerMessage 放客户变更原话；changes 只放客户要求变更的字段。
         - role: user
           text: '{{#sys.query#}}'
         selected: false
@@ -186,7 +194,7 @@ workflow:
         title: 写入需求中心
         type: http-request
         method: POST
-        url: http://host.docker.internal:8765/api/ai/requirements/upsert
+        url: http://host.docker.internal:8765/api/ai/requirements/dispatch
         authorization:
           type: no-auth
         headers: 'Content-Type: application/json'
@@ -218,7 +226,7 @@ workflow:
       targetPosition: left
       data:
         answer: |-
-          我已根据你的描述整理需求草稿，并提交到需求中心。
+          我已根据你的描述处理需求，并同步到需求中心。
 
           本轮抽取结果：{{#extract_requirement.text#}}
 
@@ -226,7 +234,9 @@ workflow:
 
           需求中心返回：{{#upsert_requirement.body#}}
 
-          如果返回中还有 missingFields，我会继续追问缺失项；字段完整后请你确认摘要，确认后仍会进入人工审核，不会自动执行平台配置。
+          如果返回中还有 missingFields，我会继续追问缺失项；字段完整后请你确认摘要。
+
+          如果你已经确认，需求中心会记录客户确认，但仍然进入人工审核，不会自动执行平台配置。
         desc: ''
         title: Answer
         type: answer

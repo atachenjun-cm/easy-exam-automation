@@ -165,3 +165,71 @@ test("staff routes can request clarification and mark reviewed", async () => {
   assert.equal(reviewed.statusCode, 200);
   assert.equal(reviewed.body.requirement.status, "reviewed_waiting_customer_confirmation");
 });
+
+test("Dify dispatch route records customer confirmation intent", async () => {
+  const dbPath = path.join(os.tmpdir(), `requirements-${Date.now()}-${Math.random()}.sqlite3`);
+  const handler = createRequirementRequestHandler({ dbPath, pythonBin: "python3" });
+
+  async function call(method, pathname, body) {
+    const req = makeReq(method, pathname, body);
+    const res = makeRes();
+    const handled = await handler(req, res, new URL(pathname, "http://127.0.0.1"));
+    return { handled, statusCode: res.statusCode, body: res.body };
+  }
+
+  const created = await call("POST", "/api/ai/requirements/upsert", {
+    requirement: completeRequirementPayload(),
+  });
+  const requestId = created.body.requirement.requestId;
+
+  const confirmed = await call("POST", "/api/ai/requirements/dispatch", {
+    intent: "customer_confirmed",
+    requestId,
+    customer_summary: "考试名称：2026招聘考试；客户确认无误。",
+    customerReply: "确认无误",
+    conversationId: "conv-dispatch-1",
+  });
+
+  assert.equal(confirmed.handled, true);
+  assert.equal(confirmed.statusCode, 200);
+  assert.equal(confirmed.body.ok, true);
+  assert.equal(confirmed.body.action, "customer_confirmed");
+  assert.equal(confirmed.body.requirement.status, "customer_confirmed");
+  assert.equal(confirmed.body.requirement.confirmations[0].conversationId, "conv-dispatch-1");
+});
+
+test("Dify dispatch route records change request intent", async () => {
+  const dbPath = path.join(os.tmpdir(), `requirements-${Date.now()}-${Math.random()}.sqlite3`);
+  const handler = createRequirementRequestHandler({ dbPath, pythonBin: "python3" });
+
+  async function call(method, pathname, body) {
+    const req = makeReq(method, pathname, body);
+    const res = makeRes();
+    const handled = await handler(req, res, new URL(pathname, "http://127.0.0.1"));
+    return { handled, statusCode: res.statusCode, body: res.body };
+  }
+
+  const created = await call("POST", "/api/ai/requirements/upsert", {
+    requirement: completeRequirementPayload(),
+  });
+  const requestId = created.body.requirement.requestId;
+  await call("POST", `/api/ai/requirements/${requestId}/customer-confirmed`, {
+    customerReply: "确认",
+  });
+
+  const changed = await call("POST", "/api/ai/requirements/dispatch", {
+    intent: "change_request",
+    requestId,
+    customerMessage: "请增加数学科目",
+    changes: {
+      subjects: "英语，化学，物理，数学",
+    },
+  });
+
+  assert.equal(changed.handled, true);
+  assert.equal(changed.statusCode, 200);
+  assert.equal(changed.body.ok, true);
+  assert.equal(changed.body.action, "change_request");
+  assert.equal(changed.body.requirement.status, "change_requested");
+  assert.equal(changed.body.requirement.changeRequests[0].changes.subjects.join("，"), "英语，化学，物理，数学");
+});

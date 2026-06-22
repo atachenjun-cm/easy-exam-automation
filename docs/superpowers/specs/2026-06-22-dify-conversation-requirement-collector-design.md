@@ -120,10 +120,13 @@ The second Dify iteration should add branching:
 
 ```text
 LLM intent
--> collecting/ready_for_confirmation: upsert
--> customer_confirmed: customer-confirmed
--> change_request: change-request
+-> POST /api/ai/requirements/dispatch
+-> collecting/ready_for_confirmation: backend upserts the requirement draft
+-> customer_confirmed: backend records customer confirmation
+-> change_request: backend records a change request
 ```
+
+The backend dispatch endpoint keeps the Dify graph simple and avoids fragile JSON parsing or dynamic URL composition inside Dify. Dify remains responsible for deciding intent and producing the normalized JSON payload.
 
 ## Manual Review Boundary
 

@@ -80,6 +80,52 @@ export function createRequirementRequestHandler(options = {}) {
   return async function handleRequirementRequest(req, res, url = new URL(req.url, "http://127.0.0.1")) {
     const pathname = url.pathname;
 
+    if (req.method === "POST" && pathname === "/api/ai/requirements/dispatch") {
+      const payload = await readJson(req);
+      const intent = String(payload.intent || "collecting").trim();
+      const requestId = payload.requestId || payload.request_id || "";
+
+      if (intent === "customer_confirmed") {
+        if (!requestId) {
+          json(res, 400, { error: "requestId is required for customer_confirmed intent" });
+          return true;
+        }
+        const requirement = await runStoreOrBadRequest(res, "confirm", {
+          requestId,
+          customerReply: payload.customerReply || payload.customer_reply || payload.customer_summary || "",
+          conversationId: payload.conversationId || payload.conversation_id || "",
+        });
+        if (!requirement) return true;
+        json(res, 200, { ok: true, action: "customer_confirmed", requirement });
+        return true;
+      }
+
+      if (intent === "change_request") {
+        if (!requestId) {
+          json(res, 400, { error: "requestId is required for change_request intent" });
+          return true;
+        }
+        const requirement = await runStoreOrBadRequest(res, "change", {
+          requestId,
+          customerMessage: payload.customerMessage || payload.customer_message || payload.customer_summary || "",
+          changes: payload.changes || payload.requirement || {},
+        });
+        if (!requirement) return true;
+        json(res, 200, { ok: true, action: "change_request", requirement });
+        return true;
+      }
+
+      const requirement = await runRequirementStore("upsert", {
+        requestId,
+        customer: payload.customer || {},
+        requirement: payload.requirement || {},
+        message: payload.message || "",
+        source: payload.source || "dify",
+      });
+      json(res, 200, { ok: true, action: "upsert", requirement });
+      return true;
+    }
+
     if (req.method === "POST" && pathname === "/api/ai/requirements/upsert") {
       const payload = await readJson(req);
       const requirement = await runRequirementStore("upsert", {

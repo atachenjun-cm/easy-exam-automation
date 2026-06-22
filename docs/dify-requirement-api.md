@@ -137,6 +137,66 @@ Dify 应继续追问 `missingFields` 对应内容，然后再次调用 upsert：
 }
 ```
 
+## 对话式分流入口
+
+对话版 Chatflow 推荐调用统一分流入口，避免在 Dify 图里拆 JSON、拼动态 URL：
+
+```text
+POST /api/ai/requirements/dispatch
+Content-Type: application/json
+```
+
+`intent=collecting` 或 `intent=ready_for_confirmation` 时，后端按 upsert 处理：
+
+```json
+{
+  "intent": "ready_for_confirmation",
+  "requestId": "REQ-ID",
+  "customer": {},
+  "requirement": {
+    "exam_name": "校园招聘考试",
+    "formal_exam_time_range": "2026-08-08 09:00 - 2026-08-08 11:00",
+    "mock_exam_time_range": "2026-08-07 15:00 - 2026-08-07 16:00",
+    "early_login_minutes": "30分钟",
+    "late_limit_minutes": "15分钟",
+    "video_monitor_required": "是",
+    "video_record_required": "是",
+    "hawkeye_required": "否",
+    "exam_client_type": "网页考试",
+    "leave_limit_count": 6,
+    "subjects": "英语，数学"
+  },
+  "message": "Dify 对话抽取",
+  "source": "dify"
+}
+```
+
+`intent=customer_confirmed` 时，后端记录客户确认：
+
+```json
+{
+  "intent": "customer_confirmed",
+  "requestId": "REQ-ID",
+  "customerReply": "确认无误",
+  "conversationId": "dify-conversation-id"
+}
+```
+
+`intent=change_request` 时，后端记录变更请求，不直接覆盖已确认版本：
+
+```json
+{
+  "intent": "change_request",
+  "requestId": "REQ-ID",
+  "customerMessage": "请增加数学科目",
+  "changes": {
+    "subjects": "英语，化学，物理，数学"
+  }
+}
+```
+
+响应会包含 `action`，取值为 `upsert`、`customer_confirmed` 或 `change_request`。
+
 ## 查询需求
 
 ```text
