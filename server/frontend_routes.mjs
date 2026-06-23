@@ -1,5 +1,6 @@
 const FRONTEND_ROUTE_PATTERNS = [
   /^\/$/,
+  /^\/login\/?$/,
   /^\/projects\/?$/,
   /^\/projects\/[^/]+\/?$/,
   /^\/auto-config\/?$/,
