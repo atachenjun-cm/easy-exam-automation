@@ -1970,7 +1970,8 @@ await ensureRuntime();
 const auth = buildAuthContext({ localConfig: state.auth });
 
 const port = Number(process.env.PORT || 8765);
+const host = process.env.HOST || "127.0.0.1";
 const server = http.createServer(requestHandler);
-server.listen(port, "127.0.0.1", () => {
-  console.log(`Easy Exam server running at http://127.0.0.1:${port}`);
+server.listen(port, host, () => {
+  console.log(`Easy Exam server running at http://${host}:${port}`);
 });
