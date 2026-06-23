@@ -68,9 +68,16 @@ test("local login page and logout controls are present", () => {
   assert.ok(html.includes('id="loginView"'));
   assert.equal(html.includes('id="loginView" hidden'), false);
   assert.ok(html.includes('id="appShell" hidden'));
-  assert.ok(html.includes('id="loginEmailInput"'));
-  assert.ok(html.includes('id="loginPasswordInput"'));
+  assert.ok(html.includes('id="authLoginEmailInput"'));
+  assert.ok(html.includes('id="authLoginPasswordInput"'));
   assert.ok(html.includes('id="logoutBtn"'));
   assert.ok(html.includes("请通过服务网址打开"));
   assert.ok(html.includes("AuthController"));
+});
+
+test("login page script does not redeclare backend settings variables", () => {
+  assert.equal((html.match(/const loginPasswordInput/g) || []).length, 0);
+  assert.ok(html.includes("const authLoginPasswordInput"));
+  assert.ok(html.includes("const backendLoginPasswordInput"));
+  assert.equal((html.match(/id="loginPasswordInput"/g) || []).length, 1);
 });

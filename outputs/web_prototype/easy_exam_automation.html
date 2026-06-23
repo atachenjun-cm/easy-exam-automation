@@ -1951,11 +1951,11 @@
           <p class="subtitle">请通过服务网址打开：<strong>http://172.16.13.238:8765/login</strong>。不要直接打开本地 HTML 文件。</p>
           <label class="field">
             <span class="field-label">邮箱</span>
-            <input class="field-input" id="loginEmailInput" type="email" autocomplete="username" placeholder="name@example.com" required />
+            <input class="field-input" id="authLoginEmailInput" type="email" autocomplete="username" placeholder="name@example.com" required />
           </label>
           <label class="field">
             <span class="field-label">密码</span>
-            <input class="field-input" id="loginPasswordInput" type="password" autocomplete="current-password" placeholder="请输入密码" required />
+            <input class="field-input" id="authLoginPasswordInput" type="password" autocomplete="current-password" placeholder="请输入密码" required />
           </label>
           <div class="login-error" id="loginError" aria-live="polite"></div>
           <button class="btn primary" id="loginSubmitBtn" type="submit">登录控制台</button>
@@ -2546,8 +2546,8 @@
       const appShell = document.querySelector("#appShell");
       const loginView = document.querySelector("#loginView");
       const loginForm = document.querySelector("#loginForm");
-      const loginEmailInput = document.querySelector("#loginEmailInput");
-      const loginPasswordInput = document.querySelector("#loginPasswordInput");
+      const authLoginEmailInput = document.querySelector("#authLoginEmailInput");
+      const authLoginPasswordInput = document.querySelector("#authLoginPasswordInput");
       const loginError = document.querySelector("#loginError");
       const loginSubmitBtn = document.querySelector("#loginSubmitBtn");
       const authEmailText = document.querySelector("#authEmailText");
@@ -2560,7 +2560,7 @@
       const loginState = document.querySelector("#loginState");
       const loginUrlInput = document.querySelector("#loginUrlInput");
       const loginUsernameInput = document.querySelector("#loginUsernameInput");
-      const loginPasswordInput = document.querySelector("#loginPasswordInput");
+      const backendLoginPasswordInput = document.querySelector("#loginPasswordInput");
       const tenantApiKeyInput = document.querySelector("#tenantApiKeyInput");
       const secretToggleButtons = Array.from(document.querySelectorAll("[data-secret-toggle]"));
       const saveLoginBtn = document.querySelector("#saveLoginBtn");
@@ -2769,8 +2769,8 @@
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                email: loginEmailInput.value,
-                password: loginPasswordInput.value,
+                email: authLoginEmailInput.value,
+                password: authLoginPasswordInput.value,
               }),
             });
             const data = await response.json();
@@ -3687,7 +3687,7 @@
         };
         loginUrlInput.value = uiState.login.url;
         loginUsernameInput.value = uiState.login.username;
-        loginPasswordInput.value = uiState.login.password;
+        backendLoginPasswordInput.value = uiState.login.password;
         tenantApiKeyInput.value = uiState.login.tenantApiKey;
         const ready = uiState.login.url && uiState.login.username && uiState.login.password;
         const apiReady = Boolean(uiState.login.tenantApiKey);
@@ -3698,7 +3698,7 @@
         return {
           url: loginUrlInput.value.trim(),
           username: loginUsernameInput.value.trim(),
-          password: loginPasswordInput.value,
+          password: backendLoginPasswordInput.value,
           tenantApiKey: tenantApiKeyInput.value.trim(),
         };
       }
@@ -3709,7 +3709,7 @@
         const isHidden = input.type === "password";
         input.type = isHidden ? "text" : "password";
         button.textContent = isHidden ? "隐藏" : "显示";
-        button.setAttribute("aria-label", `${isHidden ? "隐藏" : "显示"}${input === loginPasswordInput ? "密码" : "租户 API Key"}`);
+        button.setAttribute("aria-label", `${isHidden ? "隐藏" : "显示"}${input === backendLoginPasswordInput ? "密码" : "租户 API Key"}`);
       }
 
       function setProgress(percent, caption, stageIndex) {
