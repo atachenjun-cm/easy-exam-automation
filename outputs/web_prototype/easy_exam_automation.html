@@ -1798,6 +1798,52 @@
       .retry-step { margin-top: 10px; border: 1px solid #f0a5a5; background: #fff; color: #c62828; border-radius: 9px; padding: 6px 10px; font-weight: 750; cursor: pointer; }
       .empty-state { padding: 48px 20px; text-align: center; color: var(--muted); border: 1px dashed #ccd6e3; border-radius: 14px; background: #fff; }
 
+      .login-view {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background:
+          radial-gradient(circle at 15% 20%, rgba(31, 117, 203, 0.12), transparent 32%),
+          var(--bg);
+      }
+
+      .login-card {
+        width: min(430px, 100%);
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        box-shadow: var(--shadow);
+        padding: 30px;
+      }
+
+      .login-brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 26px;
+      }
+
+      .login-form {
+        display: grid;
+        gap: 14px;
+      }
+
+      .login-error {
+        min-height: 20px;
+        color: var(--red);
+        font-size: 13px;
+      }
+
+      .logout-button {
+        border: 0;
+        background: transparent;
+        color: var(--blue);
+        padding: 0;
+        cursor: pointer;
+        font-weight: 700;
+      }
+
       @media (max-width: 1120px) {
         .app-shell {
           grid-template-columns: 1fr;
@@ -1892,7 +1938,31 @@
     </style>
   </head>
   <body>
-    <div class="app-shell">
+    <section class="login-view" id="loginView" hidden>
+      <div class="login-card">
+        <div class="login-brand">
+          <div class="brand-mark">易</div>
+          <div>
+            <div class="brand-title">考试配置台</div>
+            <div class="brand-subtitle">同事登录后使用自动化控制台</div>
+          </div>
+        </div>
+        <form class="login-form" id="loginForm">
+          <label class="field">
+            <span class="field-label">邮箱</span>
+            <input class="field-input" id="loginEmailInput" type="email" autocomplete="username" placeholder="name@example.com" required />
+          </label>
+          <label class="field">
+            <span class="field-label">密码</span>
+            <input class="field-input" id="loginPasswordInput" type="password" autocomplete="current-password" placeholder="请输入密码" required />
+          </label>
+          <div class="login-error" id="loginError" aria-live="polite"></div>
+          <button class="btn primary" id="loginSubmitBtn" type="submit">登录控制台</button>
+        </form>
+      </div>
+    </section>
+
+    <div class="app-shell" id="appShell">
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark">易</div>
@@ -1945,6 +2015,8 @@
         </nav>
 
         <div class="side-status">
+          <div class="status-line"><span>登录账号</span><span id="authEmailText">未登录</span></div>
+          <div class="status-line"><span>会话</span><button class="logout-button" id="logoutBtn" type="button">退出登录</button></div>
           <div class="status-line"><span>易考后台</span><span>待配置</span></div>
           <div class="status-line"><span>脚本引擎</span><span class="ok">可用</span></div>
           <div class="status-line"><span>最终创建</span><span>人工确认</span></div>
@@ -2460,6 +2532,7 @@
       import { ExamDetailPage } from "/web/pages/ExamDetailPage.mjs";
       import { ExamListPage } from "/web/pages/ExamListPage.mjs";
       import { aggregateExamSessions, matchesExamTask, resolveCandidateTaskContext } from "/web/exam_task_view_model.mjs";
+      import { LoginPage } from "/web/pages/LoginPage.mjs";
       import { ProjectDetailPage } from "/web/pages/ProjectDetailPage.mjs";
       import { ProjectListPage } from "/web/pages/ProjectListPage.mjs";
       import { RequirementDetailPage } from "/web/pages/RequirementDetailPage.mjs";
@@ -2469,6 +2542,15 @@
         apiBase: window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "",
         ...(window.EASY_EXAM_RUNTIME || {}),
       };
+      const appShell = document.querySelector("#appShell");
+      const loginView = document.querySelector("#loginView");
+      const loginForm = document.querySelector("#loginForm");
+      const loginEmailInput = document.querySelector("#loginEmailInput");
+      const loginPasswordInput = document.querySelector("#loginPasswordInput");
+      const loginError = document.querySelector("#loginError");
+      const loginSubmitBtn = document.querySelector("#loginSubmitBtn");
+      const authEmailText = document.querySelector("#authEmailText");
+      const logoutBtn = document.querySelector("#logoutBtn");
       const fileInput = document.querySelector("#fileInput");
       const dropZone = document.querySelector("#dropZone");
       const dropTitle = document.querySelector("#dropTitle");
@@ -2621,8 +2703,98 @@
       async function fetchJson(url, options) {
         const response = await fetch(`${runtime.apiBase}${url}`, { cache: "no-store", ...options });
         const data = await response.json();
+        if (response.status === 401 && !url.startsWith("/api/auth/")) {
+          const next = `${window.location.pathname}${window.location.search}`;
+          window.location.href = `/login?next=${encodeURIComponent(next)}`;
+        }
         if (!response.ok) throw new Error(data.error || `请求失败：${response.status}`);
         return data;
+      }
+
+      function AuthController({ router }) {
+        const state = { enabled: false, authenticated: true, user: null };
+
+        function nextPath() {
+          const params = new URLSearchParams(window.location.search);
+          const next = params.get("next") || "/projects";
+          return next.startsWith("/") && !next.startsWith("//") ? next : "/projects";
+        }
+
+        function render() {
+          const email = state.user?.email || (state.enabled ? "未登录" : "本机模式");
+          authEmailText.textContent = email;
+          logoutBtn.hidden = !state.enabled;
+        }
+
+        async function load() {
+          const response = await fetch(`${runtime.apiBase}/api/auth/me?_=${Date.now()}`, { cache: "no-store" });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "读取登录状态失败");
+          state.enabled = Boolean(data.enabled);
+          state.authenticated = Boolean(data.authenticated);
+          state.user = data.user || null;
+          render();
+          return state;
+        }
+
+        async function requireForRoute(route) {
+          if (!state.enabled) {
+            loginView.hidden = true;
+            appShell.hidden = false;
+            return true;
+          }
+          if (route.name === "login") {
+            loginView.hidden = false;
+            appShell.hidden = true;
+            if (state.authenticated) await router.navigate(nextPath(), { replace: true });
+            return false;
+          }
+          if (!state.authenticated) {
+            const next = `${window.location.pathname}${window.location.search}`;
+            await router.navigate(`/login?next=${encodeURIComponent(next)}`, { replace: true });
+            return false;
+          }
+          loginView.hidden = true;
+          appShell.hidden = false;
+          return true;
+        }
+
+        async function login(event) {
+          event.preventDefault();
+          loginError.textContent = "";
+          loginSubmitBtn.disabled = true;
+          try {
+            const response = await fetch(`${runtime.apiBase}/api/auth/login`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                email: loginEmailInput.value,
+                password: loginPasswordInput.value,
+              }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || "登录失败");
+            state.enabled = Boolean(data.enabled);
+            state.authenticated = Boolean(data.authenticated);
+            state.user = data.user || null;
+            render();
+            await router.navigate(nextPath(), { replace: true });
+          } catch (error) {
+            loginError.textContent = error.message || String(error);
+          } finally {
+            loginSubmitBtn.disabled = false;
+          }
+        }
+
+        async function logout() {
+          await fetch(`${runtime.apiBase}/api/auth/logout`, { method: "POST" });
+          state.authenticated = false;
+          state.user = null;
+          render();
+          await router.navigate("/login", { replace: true });
+        }
+
+        return { load, login, logout, requireForRoute };
       }
 
       function renderProjectList() {
@@ -4018,6 +4190,7 @@
       const staticPage = (name, root, enter = async () => {}) => ({ name, roots: [root], enter });
       let activeRoute = null;
       const pages = [
+        LoginPage({ root: loginView }),
         ProjectListPage({ root: projectManagementView, loadProjects }),
         ProjectDetailPage({ root: projectDetailView, loadProject: loadProjectDetail }),
         AutoConfigPage({ documentObject: document }),
@@ -4040,13 +4213,18 @@
         { key: "logs", element: logsNavBtn },
       ];
       const appLayout = AppLayout({ pages, menuElements });
+      let authController = null;
       const router = createRouter({
         onRoute: async (route) => {
           activeRoute = route;
+          if (authController && !(await authController.requireForRoute(route))) return;
           await appLayout.render(route);
         },
       });
+      authController = AuthController({ router });
 
+      loginForm.addEventListener("submit", (event) => authController.login(event));
+      logoutBtn.addEventListener("click", () => authController.logout());
       candidateNavBtn.addEventListener("click", () => router.navigate("/candidate-import"));
       autoNavItem.addEventListener("click", () => router.navigate("/auto-config"));
       projectNavBtn.addEventListener("click", () => router.navigate("/projects"));
@@ -4321,6 +4499,9 @@
       renderSessions();
       renderSelectedSession();
       renderRoomAssignResult();
+      await authController.load().catch((error) => {
+        loginError.textContent = error.message || String(error);
+      });
       loadSettings().catch((error) => addLog(error.message || String(error), "warn"));
       await router.start();
     </script>

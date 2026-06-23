@@ -63,3 +63,11 @@ test("candidate page loads and preselects task-scoped sessions", () => {
   assert.ok(html.includes("已带入目标考试场次"));
   assert.equal(html.includes("已带入正式考试和试考"), false);
 });
+
+test("local login page and logout controls are present", () => {
+  assert.ok(html.includes('id="loginView"'));
+  assert.ok(html.includes('id="loginEmailInput"'));
+  assert.ok(html.includes('id="loginPasswordInput"'));
+  assert.ok(html.includes('id="logoutBtn"'));
+  assert.ok(html.includes("AuthController"));
+});

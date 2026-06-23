@@ -10,6 +10,17 @@ import {
   createSessionsThenConfigureCourses,
 } from "./course_session_binding.mjs";
 import { isFrontendRoute, webContentType } from "./frontend_routes.mjs";
+import {
+  buildAuthContext,
+  buildLoginCookie,
+  buildLogoutCookie,
+  createSession,
+  deleteSession,
+  getSessionUser,
+  parseCookies,
+  shouldAllowWithoutAuth,
+  verifyLogin,
+} from "./local_auth.mjs";
 import { handleRequirementRequest } from "./requirement_request_api.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -20,6 +31,7 @@ const runtimeDir = path.join(rootDir, ".easy_exam_runtime");
 const uploadsDir = path.join(runtimeDir, "uploads");
 const generatedDir = path.join(runtimeDir, "generated");
 const settingsPath = path.join(runtimeDir, "settings.json");
+const authSettingsPath = path.join(runtimeDir, "auth.json");
 const parserScript = path.join(__dirname, "exam_request_parser.py");
 const candidateParserScript = path.join(__dirname, "candidate_list_parser.py");
 const monitorAccountExporterScript = path.join(__dirname, "monitor_account_exporter.py");
@@ -64,6 +76,7 @@ const state = {
       tenantApiKey: "",
     },
   },
+  auth: {},
 };
 
 function json(res, code, payload) {
@@ -90,6 +103,19 @@ function notFound(res) {
   json(res, 404, { error: "Not found" });
 }
 
+function redirect(res, location) {
+  res.writeHead(302, {
+    Location: location,
+    "Cache-Control": "no-store",
+  });
+  res.end();
+}
+
+function redirectToLogin(_req, res, url) {
+  const next = `${url.pathname}${url.search}`;
+  redirect(res, `/login?next=${encodeURIComponent(next)}`);
+}
+
 async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) {
@@ -112,6 +138,10 @@ async function ensureRuntime() {
         ...(parsed.login || {}),
       },
     };
+  } catch {}
+  try {
+    const raw = await fs.readFile(authSettingsPath, "utf8");
+    state.auth = JSON.parse(raw);
   } catch {}
 }
 
@@ -1648,6 +1678,54 @@ async function handleSaveSettings(req, res) {
   json(res, 200, { ok: true, settings: state.settings });
 }
 
+function getAuthUserFromRequest(auth, req) {
+  if (!auth.enabled) return { email: "" };
+  const cookies = parseCookies(req.headers.cookie || "");
+  return getSessionUser(auth, cookies[auth.cookieName]) || null;
+}
+
+async function handleAuthLogin(auth, req, res) {
+  if (!auth.enabled) {
+    return json(res, 200, { ok: true, enabled: false, authenticated: true, user: null });
+  }
+
+  const payload = parseJsonSafe(await readBody(req)) || {};
+  const email = String(payload.email || "");
+  const password = String(payload.password || "");
+  if (!(await verifyLogin(auth, email, password))) {
+    return json(res, 401, { error: "邮箱或密码错误" });
+  }
+
+  const session = createSession(auth);
+  res.writeHead(200, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Set-Cookie": buildLoginCookie(auth, session.token),
+  });
+  res.end(JSON.stringify({ ok: true, enabled: true, authenticated: true, user: session.user }));
+}
+
+function handleAuthMe(auth, req, res) {
+  if (!auth.enabled) {
+    return json(res, 200, { enabled: false, authenticated: true, user: null });
+  }
+  const user = getAuthUserFromRequest(auth, req);
+  json(res, 200, { enabled: true, authenticated: Boolean(user), user });
+}
+
+function handleAuthLogout(auth, req, res) {
+  if (auth.enabled) {
+    const cookies = parseCookies(req.headers.cookie || "");
+    deleteSession(auth, cookies[auth.cookieName]);
+  }
+  res.writeHead(200, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Set-Cookie": buildLogoutCookie(auth),
+  });
+  res.end(JSON.stringify({ ok: true }));
+}
+
 function handleJobState(job, res) {
   json(res, 200, {
     id: job.id,
@@ -1789,6 +1867,21 @@ async function handleWebModule(urlPath, res) {
 async function requestHandler(req, res) {
   const url = new URL(req.url, "http://127.0.0.1");
   try {
+    if (req.method === "POST" && url.pathname === "/api/auth/login") {
+      return await handleAuthLogin(auth, req, res);
+    }
+    if (req.method === "GET" && url.pathname === "/api/auth/me") {
+      return handleAuthMe(auth, req, res);
+    }
+    if (req.method === "POST" && url.pathname === "/api/auth/logout") {
+      return handleAuthLogout(auth, req, res);
+    }
+    if (auth.enabled && !shouldAllowWithoutAuth(req.method, url.pathname) && !getAuthUserFromRequest(auth, req)) {
+      if (req.method === "GET" && (isFrontendRoute(url.pathname) || url.pathname === "/easy_exam_automation.html")) {
+        return redirectToLogin(req, res, url);
+      }
+      return json(res, 401, { error: "请先登录" });
+    }
     if (req.method === "GET" && url.pathname.startsWith("/web/")) {
       return await handleWebModule(url.pathname, res);
     }
@@ -1874,6 +1967,7 @@ async function requestHandler(req, res) {
 
 await loadEnvFile();
 await ensureRuntime();
+const auth = buildAuthContext({ localConfig: state.auth });
 
 const port = Number(process.env.PORT || 8765);
 const server = http.createServer(requestHandler);
