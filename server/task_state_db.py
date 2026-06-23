@@ -59,6 +59,7 @@ class TaskStore:
                     task_id TEXT PRIMARY KEY,
                     project_name TEXT NOT NULL,
                     source_account TEXT NOT NULL DEFAULT '',
+                    owner_email TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'pending',
                     current_stage TEXT NOT NULL DEFAULT '需求单解析',
                     progress REAL NOT NULL DEFAULT 0,
@@ -99,16 +100,19 @@ class TaskStore:
                 );
                 """
             )
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(exam_tasks)").fetchall()}
+            if "owner_email" not in columns:
+                db.execute("ALTER TABLE exam_tasks ADD COLUMN owner_email TEXT NOT NULL DEFAULT ''")
 
-    def create_task(self, project_name, source_account="", config=None, task_id=None):
+    def create_task(self, project_name, source_account="", config=None, task_id=None, owner_email=""):
         task_id = task_id or str(uuid.uuid4())
         now = utc_now()
         with self.connect() as db:
             db.execute(
                 """INSERT OR IGNORE INTO exam_tasks
-                (task_id, project_name, source_account, created_at, updated_at, config_json)
-                VALUES (?, ?, ?, ?, ?, ?)""",
-                (task_id, project_name or "未命名项目", source_account or "", now, now, json.dumps(config or {}, ensure_ascii=False)),
+                (task_id, project_name, source_account, owner_email, created_at, updated_at, config_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (task_id, project_name or "未命名项目", source_account or "", owner_email or "", now, now, json.dumps(config or {}, ensure_ascii=False)),
             )
             for step_key, step_name in STEP_DEFS:
                 db.execute(
@@ -227,7 +231,7 @@ class TaskStore:
     def list_sessions(self):
         with self.connect() as db:
             rows = db.execute(
-                """SELECT s.*, t.project_name, t.source_account, t.progress AS task_progress
+                """SELECT s.*, t.project_name, t.source_account, t.owner_email, t.progress AS task_progress
                 FROM exam_sessions s JOIN exam_tasks t ON t.task_id=s.task_id
                 ORDER BY s.updated_at DESC"""
             ).fetchall()
@@ -250,6 +254,7 @@ class TaskStore:
         return {
             "taskId": row["task_id"], "projectName": row["project_name"],
             "sourceAccount": row["source_account"], "status": row["status"],
+            "ownerEmail": row["owner_email"],
             "currentStage": row["current_stage"], "progress": row["progress"],
             "createdAt": row["created_at"], "updatedAt": row["updated_at"],
         }
@@ -264,6 +269,7 @@ class TaskStore:
             "status": data["status"], "url": data["url"],
             "projectName": data.get("project_name", ""),
             "sourceAccount": data.get("source_account", ""),
+            "ownerEmail": data.get("owner_email", ""),
             "progress": data.get("task_progress", 0),
         }
 
@@ -284,7 +290,7 @@ def main():
     action = sys.argv[2]
     payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
     if action == "create":
-        result = store.create_task(payload.get("projectName"), payload.get("sourceAccount", ""), payload.get("config", {}), payload.get("taskId"))
+        result = store.create_task(payload.get("projectName"), payload.get("sourceAccount", ""), payload.get("config", {}), payload.get("taskId"), payload.get("ownerEmail", ""))
     elif action == "list":
         result = store.list_tasks()
     elif action == "list_sessions":

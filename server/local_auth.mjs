@@ -77,6 +77,13 @@ export function isAdminUser(user) {
   return user?.role === "admin";
 }
 
+export function canViewOwner(user, ownerEmail = "") {
+  if (!user?.role) return true;
+  if (isAdminUser(user)) return true;
+  const owner = normalizeEmail(ownerEmail);
+  return Boolean(owner) && normalizeEmail(user.email) === owner;
+}
+
 export function sanitizeUsers(users = []) {
   return users.map(({ passwordHash, passwordSalt, ...user }) => ({ ...user }));
 }

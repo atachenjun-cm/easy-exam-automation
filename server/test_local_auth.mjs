@@ -5,6 +5,7 @@ import {
   buildAuthContext,
   buildLoginCookie,
   buildLogoutCookie,
+  canViewOwner,
   createSession,
   deleteLocalUser,
   deleteSessionsForEmail,
@@ -100,6 +101,15 @@ test("local users can be deleted", () => {
 
   assert.equal(deleteLocalUser(auth, "coworker@example.com"), true);
   assert.deepEqual(sanitizeUsers(auth.users), []);
+});
+
+test("admins can view all task owners while users only view their own tasks", () => {
+  assert.equal(canViewOwner({ email: "admin@example.com", role: "admin" }, ""), true);
+  assert.equal(canViewOwner({ email: "admin@example.com", role: "admin" }, "mate@example.com"), true);
+  assert.equal(canViewOwner({ email: "mate@example.com", role: "user" }, "mate@example.com"), true);
+  assert.equal(canViewOwner({ email: "mate@example.com", role: "user" }, "other@example.com"), false);
+  assert.equal(canViewOwner({ email: "mate@example.com", role: "user" }, ""), false);
+  assert.equal(canViewOwner({ email: "", role: "" }, ""), true);
 });
 
 test("allows login health and frontend module routes without auth", () => {

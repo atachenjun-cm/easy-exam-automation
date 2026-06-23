@@ -14,6 +14,7 @@ import {
   buildAuthContext,
   buildLoginCookie,
   buildLogoutCookie,
+  canViewOwner,
   createSession,
   deleteLocalUser,
   deleteSession,
@@ -865,9 +866,11 @@ async function handleImport(req, res) {
   await fs.writeFile(uploadPath, body);
   const parsed = await parseWorkbook(uploadPath);
   const projectName = String(parsed?.config?.examName || filename.replace(/\.[^.]+$/, "") || "未命名项目").trim();
+  const authUser = getAuthUserFromRequest(auth, req);
   const task = await runTaskState("create", {
     projectName,
     sourceAccount: state.settings.login?.username || "",
+    ownerEmail: auth.enabled ? authUser?.email || "" : "",
     config: parsed?.config || {},
   });
   await updateTaskStep(task.taskId, "requirement_parse", "success", {
@@ -1817,23 +1820,31 @@ function handleJobState(job, res) {
   });
 }
 
-async function handleTaskList(_req, res) {
-  json(res, 200, { tasks: await runTaskState("list") });
+function visibleByOwner(auth, req, item) {
+  return canViewOwner(getAuthUserFromRequest(auth, req), item?.ownerEmail || "");
 }
 
-async function handleExamList(_req, res) {
-  json(res, 200, { sessions: await runTaskState("list_sessions") });
+async function handleTaskList(req, res) {
+  const tasks = await runTaskState("list");
+  json(res, 200, { tasks: tasks.filter((task) => visibleByOwner(auth, req, task)) });
 }
 
-async function handleTaskDetail(taskId, res) {
+async function handleExamList(req, res) {
+  const sessions = await runTaskState("list_sessions");
+  json(res, 200, { sessions: sessions.filter((session) => visibleByOwner(auth, req, session)) });
+}
+
+async function handleTaskDetail(taskId, req, res) {
   const task = await runTaskState("get", { taskId });
+  if (task && !visibleByOwner(auth, req, task)) return notFound(res);
   return task ? json(res, 200, task) : notFound(res);
 }
 
-async function handleTaskStepRetry(taskId, stepKey, res) {
+async function handleTaskStepRetry(taskId, stepKey, req, res) {
+  const visibleTask = await runTaskState("get", { taskId });
+  if (!visibleTask || !visibleByOwner(auth, req, visibleTask)) return notFound(res);
   if (stepKey === "paper_bind") {
-    const task = await runTaskState("get", { taskId });
-    if (!task) return notFound(res);
+    const task = visibleTask;
 
     const formalSession = (task.sessions || []).find((session) => session.sessionType === "formal");
     const courses = normalizeCourseRecords(task.config || {});
@@ -1995,11 +2006,11 @@ async function requestHandler(req, res) {
     }
     const taskRetryMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/steps\/([^/]+)\/retry$/);
     if (req.method === "POST" && taskRetryMatch) {
-      return await handleTaskStepRetry(decodeURIComponent(taskRetryMatch[1]), decodeURIComponent(taskRetryMatch[2]), res);
+      return await handleTaskStepRetry(decodeURIComponent(taskRetryMatch[1]), decodeURIComponent(taskRetryMatch[2]), req, res);
     }
     const taskDetailMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
     if (req.method === "GET" && taskDetailMatch) {
-      return await handleTaskDetail(decodeURIComponent(taskDetailMatch[1]), res);
+      return await handleTaskDetail(decodeURIComponent(taskDetailMatch[1]), req, res);
     }
     if (req.method === "POST" && url.pathname === "/api/candidates/parse") {
       return await handleCandidateParse(req, res);

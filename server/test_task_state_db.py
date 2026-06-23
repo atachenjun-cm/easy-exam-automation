@@ -30,6 +30,19 @@ class TaskStoreTest(unittest.TestCase):
         self.assertEqual({item["sourceAccount"] for item in projects}, {"account-a", "account-b"})
         self.assertEqual({item["session_id"] for item in sessions}, {"10001", "10002"})
 
+    def test_persists_task_owner_email_to_tasks_and_sessions(self):
+        task = self.store.create_task("同事项目", "account-a", {}, owner_email="mate@example.com")
+        self.store.upsert_session(task["taskId"], "formal", {
+            "session_id": "20001", "name": "同事项目正式考试"
+        })
+
+        detail = self.store.get_task(task["taskId"])
+        sessions = self.store.list_sessions()
+
+        self.assertEqual(task["ownerEmail"], "mate@example.com")
+        self.assertEqual(detail["ownerEmail"], "mate@example.com")
+        self.assertEqual(sessions[0]["ownerEmail"], "mate@example.com")
+
     def test_steps_are_independent_and_persist_timestamps(self):
         task = self.store.create_task("项目甲", "account-a", {})
         task_id = task["taskId"]
