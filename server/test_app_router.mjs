@@ -14,6 +14,7 @@ const routeCases = [
   ["/candidate-import", "candidate-import", {}],
   ["/requirements", "requirements", {}],
   ["/requirements/req-001", "requirement-detail", { requestId: "req-001" }],
+  ["/users", "users", {}],
   ["/templates", "templates", {}],
   ["/logs", "logs", {}],
 ];

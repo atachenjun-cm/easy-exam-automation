@@ -2001,6 +2001,12 @@
             </svg>
             需求单记录
           </button>
+          <button class="nav-item nav-button" id="usersNavBtn" data-route-menu="users" type="button" hidden>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2M9.5 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M19 8v6M16 11h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+            用户管理
+          </button>
           <button class="nav-item nav-button" id="templatesNavBtn" data-route-menu="templates" type="button">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 3v18M4 9h16M6 15h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
@@ -2501,6 +2507,11 @@
           <div class="panel"><div class="panel-head"><h2 class="panel-title">确认与变更记录</h2></div><div class="panel-body"><div class="log-list" id="requirementAuditTrail"></div></div></div>
           <div class="panel"><div class="panel-head"><h2 class="panel-title">人工审核动作</h2></div><div class="panel-body"><div class="settings-grid"><label class="field"><span class="field-label">执行任务编号</span><input class="field-input" id="requirementTaskIdInput" placeholder="粘贴已创建的任务编号" /></label><label class="field"><span class="field-label">审核人</span><input class="field-input" id="requirementReviewerInput" placeholder="admin-op" /></label></div><div class="view-actions" style="margin-top:12px;"><button class="btn primary" id="requirementMarkReadyBtn" type="button">标记可创建任务</button><button class="btn" id="requirementLinkTaskBtn" type="button">绑定任务</button></div><div class="task-meta" id="requirementActionState" style="margin-top:8px;"></div></div></div>
         </section>
+        <section class="task-view" id="userManagementView" hidden>
+          <div class="view-heading"><div><h1>用户管理</h1><p class="subtitle">添加同事邮箱并设置临时密码，开通控制台访问权限。</p></div><button class="btn" id="refreshUsersBtn" type="button">刷新用户</button></div>
+          <div class="panel"><div class="panel-head"><h2 class="panel-title">添加 / 更新用户</h2><span class="panel-meta" id="userActionState">仅管理员可用</span></div><div class="panel-body"><div class="settings-grid"><label class="field"><span class="field-label">同事邮箱</span><input class="field-input" id="userEmailInput" type="email" placeholder="coworker@example.com" /></label><label class="field"><span class="field-label">临时密码</span><input class="field-input" id="userPasswordInput" type="text" placeholder="首次登录密码" /></label><div class="field"><span class="field-label">&nbsp;</span><button class="btn primary" id="saveUserBtn" type="button">添加/更新用户</button></div></div></div></div>
+          <div class="panel"><div class="panel-head"><h2 class="panel-title">已开通用户</h2><span class="panel-meta" id="userCountText">0 个</span></div><div class="table-wrap"><table><thead><tr><th>邮箱</th><th>状态</th><th>创建时间</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="userRows"></tbody></table></div></div>
+        </section>
         <section class="task-view" id="templatesView" hidden><div class="view-heading"><div><h1>配置模板</h1><p class="subtitle">管理考试配置模板。</p></div></div><div class="panel"><div class="panel-body"><div class="empty-state">暂无已保存配置模板</div></div></div></section>
         <section class="task-view" id="logsView" hidden><div class="view-heading"><div><h1>执行日志</h1><p class="subtitle">汇总展示已持久化的项目步骤日志。</p></div></div><div class="log-list" id="allTaskLogs"></div></section>
       </main>
@@ -2538,6 +2549,7 @@
       import { ProjectListPage } from "/web/pages/ProjectListPage.mjs";
       import { RequirementDetailPage } from "/web/pages/RequirementDetailPage.mjs";
       import { RequirementListPage } from "/web/pages/RequirementListPage.mjs";
+      import { UserManagementPage } from "/web/pages/UserManagementPage.mjs";
 
       const runtime = {
         apiBase: window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "",
@@ -2591,6 +2603,7 @@
       const examNavBtn = document.querySelector("#examNavBtn");
       const candidateNavBtn = document.querySelector("#candidateNavBtn");
       const requirementsNavBtn = document.querySelector("#requirementsNavBtn");
+      const usersNavBtn = document.querySelector("#usersNavBtn");
       const templatesNavBtn = document.querySelector("#templatesNavBtn");
       const logsNavBtn = document.querySelector("#logsNavBtn");
       const autoTopbar = document.querySelector("#autoTopbar");
@@ -2602,6 +2615,7 @@
       const taskDetailView = document.querySelector("#taskDetailView");
       const requirementsView = document.querySelector("#requirementsView");
       const requirementDetailView = document.querySelector("#requirementDetailView");
+      const userManagementView = document.querySelector("#userManagementView");
       const templatesView = document.querySelector("#templatesView");
       const logsView = document.querySelector("#logsView");
       const projectGrid = document.querySelector("#projectGrid");
@@ -2641,6 +2655,13 @@
       const requirementLinkTaskBtn = document.querySelector("#requirementLinkTaskBtn");
       const requirementActionState = document.querySelector("#requirementActionState");
       const allTaskLogs = document.querySelector("#allTaskLogs");
+      const refreshUsersBtn = document.querySelector("#refreshUsersBtn");
+      const userEmailInput = document.querySelector("#userEmailInput");
+      const userPasswordInput = document.querySelector("#userPasswordInput");
+      const saveUserBtn = document.querySelector("#saveUserBtn");
+      const userRows = document.querySelector("#userRows");
+      const userActionState = document.querySelector("#userActionState");
+      const userCountText = document.querySelector("#userCountText");
       const examExecutionLogs = document.querySelector("#examExecutionLogs");
       const examContinueBtn = document.querySelector("#examContinueBtn");
       const examRefreshBtn = document.querySelector("#examRefreshBtn");
@@ -2699,7 +2720,7 @@
         return `<span class="status-chip ${safeText(status)}">${taskStatusLabels[status] || safeText(status)}</span>`;
       }
 
-      const taskViewState = { tasks: [], sessions: [], requirements: [], currentTaskId: "", currentProjectId: "", currentRequirementId: "" };
+      const taskViewState = { tasks: [], sessions: [], requirements: [], users: [], currentTaskId: "", currentProjectId: "", currentRequirementId: "" };
 
       async function fetchJson(url, options) {
         const response = await fetch(`${runtime.apiBase}${url}`, { cache: "no-store", ...options });
@@ -2725,6 +2746,7 @@
           const email = state.user?.email || (state.enabled ? "未登录" : "本机模式");
           authEmailText.textContent = email;
           logoutBtn.hidden = !state.enabled || !state.authenticated;
+          usersNavBtn.hidden = state.enabled ? state.user?.role !== "admin" : false;
         }
 
         async function load() {
@@ -2987,6 +3009,61 @@
       async function loadRequirementDetail(requestId) {
         const requirement = await fetchJson(`/api/requirements/${encodeURIComponent(requestId)}?_=${Date.now()}`);
         renderRequirementDetail(requirement);
+      }
+
+      function renderUsers() {
+        userCountText.textContent = `${taskViewState.users.length} 个`;
+        userRows.innerHTML = taskViewState.users.length
+          ? taskViewState.users.map((user) => `<tr data-user-email="${safeText(user.email)}">
+              <td>${safeText(user.email)}</td>
+              <td>${user.disabled ? statusChip("failed") : statusChip("success")}</td>
+              <td>${formatTaskTime(user.createdAt)}</td>
+              <td>${formatTaskTime(user.updatedAt)}</td>
+              <td><div class="view-actions"><button class="btn user-toggle-btn" data-disabled="${user.disabled ? "false" : "true"}" type="button">${user.disabled ? "启用" : "禁用"}</button><button class="btn user-delete-btn" type="button">删除</button></div></td>
+            </tr>`).join("")
+          : `<tr><td colspan="5">暂无同事账号</td></tr>`;
+      }
+
+      async function loadUsers() {
+        try {
+          const data = await fetchJson(`/api/auth/users?_=${Date.now()}`);
+          taskViewState.users = data.users || [];
+          userActionState.textContent = "管理员可添加同事账号";
+          renderUsers();
+        } catch (error) {
+          userActionState.textContent = error.message || String(error);
+          userRows.innerHTML = `<tr><td colspan="5">${safeText(error.message || String(error))}</td></tr>`;
+        }
+      }
+
+      async function saveUser() {
+        const email = userEmailInput.value.trim();
+        const password = userPasswordInput.value;
+        const data = await fetchJson("/api/auth/users", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        });
+        taskViewState.users = data.users || [];
+        userPasswordInput.value = "";
+        userActionState.textContent = `已开通：${email}`;
+        renderUsers();
+      }
+
+      async function updateUser(email, patch) {
+        const data = await fetchJson(`/api/auth/users/${encodeURIComponent(email)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        });
+        taskViewState.users = data.users || [];
+        renderUsers();
+      }
+
+      async function deleteUser(email) {
+        const data = await fetchJson(`/api/auth/users/${encodeURIComponent(email)}`, { method: "DELETE" });
+        taskViewState.users = data.users || [];
+        renderUsers();
       }
 
       async function loadAllTaskLogs() {
@@ -4200,6 +4277,7 @@
         CandidateImportPage({ root: candidateImportPanel, loadContext: loadCandidateTaskContext }),
         RequirementListPage({ root: requirementsView, loadRequirements }),
         RequirementDetailPage({ root: requirementDetailView, loadRequirement: loadRequirementDetail }),
+        UserManagementPage({ root: userManagementView, loadUsers }),
         staticPage("templates", templatesView),
         staticPage("logs", logsView, loadAllTaskLogs),
         staticPage("not-found", projectManagementView, loadProjects),
@@ -4210,6 +4288,7 @@
         { key: "auto-config", element: autoNavItem },
         { key: "candidate-import", element: candidateNavBtn },
         { key: "requirements", element: requirementsNavBtn },
+        { key: "users", element: usersNavBtn },
         { key: "templates", element: templatesNavBtn },
         { key: "logs", element: logsNavBtn },
       ];
@@ -4231,6 +4310,7 @@
       projectNavBtn.addEventListener("click", () => router.navigate("/projects"));
       examNavBtn.addEventListener("click", () => router.navigate("/exams"));
       requirementsNavBtn.addEventListener("click", () => router.navigate("/requirements"));
+      usersNavBtn.addEventListener("click", () => router.navigate("/users"));
       templatesNavBtn.addEventListener("click", () => router.navigate("/templates"));
       logsNavBtn.addEventListener("click", () => router.navigate("/logs"));
       refreshProjectsBtn.addEventListener("click", () => loadProjects().catch((error) => { projectGrid.innerHTML = `<div class="empty-state">${safeText(error.message)}</div>`; }));
@@ -4238,6 +4318,8 @@
       refreshTaskBtn.addEventListener("click", () => taskViewState.currentTaskId && openTaskDetail(taskViewState.currentTaskId));
       refreshRequirementsBtn.addEventListener("click", () => loadRequirements().catch((error) => { requirementsList.innerHTML = `<div class="empty-state">${safeText(error.message)}</div>`; }));
       refreshRequirementBtn.addEventListener("click", () => taskViewState.currentRequirementId && loadRequirementDetail(taskViewState.currentRequirementId));
+      refreshUsersBtn.addEventListener("click", () => loadUsers());
+      saveUserBtn.addEventListener("click", () => saveUser().catch((error) => { userActionState.textContent = error.message || String(error); }));
       backToExamsBtn.addEventListener("click", () => router.navigate("/exams"));
       backToProjectsBtn.addEventListener("click", () => router.navigate("/projects"));
       backToRequirementsBtn.addEventListener("click", () => router.navigate("/requirements"));
@@ -4287,6 +4369,23 @@
           requirementActionState.textContent = "已绑定任务";
         } catch (error) {
           requirementActionState.textContent = error.message || String(error);
+        }
+      });
+      userRows.addEventListener("click", async (event) => {
+        const row = event.target.closest("[data-user-email]");
+        if (!row) return;
+        const email = row.dataset.userEmail;
+        try {
+          if (event.target.closest(".user-toggle-btn")) {
+            await updateUser(email, { disabled: event.target.closest(".user-toggle-btn").dataset.disabled === "true" });
+            userActionState.textContent = "用户状态已更新";
+          }
+          if (event.target.closest(".user-delete-btn")) {
+            await deleteUser(email);
+            userActionState.textContent = "用户已删除";
+          }
+        } catch (error) {
+          userActionState.textContent = error.message || String(error);
         }
       });
       examListRows.addEventListener("click", (event) => {

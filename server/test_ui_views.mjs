@@ -81,3 +81,12 @@ test("login page script does not redeclare backend settings variables", () => {
   assert.ok(html.includes("const backendLoginPasswordInput"));
   assert.equal((html.match(/id="loginPasswordInput"/g) || []).length, 1);
 });
+
+test("user management page is present for admin account provisioning", () => {
+  assert.ok(html.includes('id="usersNavBtn"'));
+  assert.ok(html.includes('id="userManagementView"'));
+  assert.ok(html.includes('id="userEmailInput"'));
+  assert.ok(html.includes('id="userPasswordInput"'));
+  assert.ok(html.includes('id="userRows"'));
+  assert.ok(html.includes("UserManagementPage"));
+});

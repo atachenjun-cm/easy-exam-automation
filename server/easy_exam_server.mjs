@@ -15,10 +15,16 @@ import {
   buildLoginCookie,
   buildLogoutCookie,
   createSession,
+  deleteLocalUser,
   deleteSession,
+  deleteSessionsForEmail,
   getSessionUser,
+  isAdminUser,
   parseCookies,
+  sanitizeUsers,
   shouldAllowWithoutAuth,
+  updateLocalUser,
+  upsertLocalUser,
   verifyLogin,
 } from "./local_auth.mjs";
 import { handleRequirementRequest } from "./requirement_request_api.mjs";
@@ -32,6 +38,7 @@ const uploadsDir = path.join(runtimeDir, "uploads");
 const generatedDir = path.join(runtimeDir, "generated");
 const settingsPath = path.join(runtimeDir, "settings.json");
 const authSettingsPath = path.join(runtimeDir, "auth.json");
+const authUsersPath = path.join(runtimeDir, "auth_users.json");
 const parserScript = path.join(__dirname, "exam_request_parser.py");
 const candidateParserScript = path.join(__dirname, "candidate_list_parser.py");
 const monitorAccountExporterScript = path.join(__dirname, "monitor_account_exporter.py");
@@ -77,6 +84,7 @@ const state = {
     },
   },
   auth: {},
+  authUsers: [],
 };
 
 function json(res, code, payload) {
@@ -142,6 +150,10 @@ async function ensureRuntime() {
   try {
     const raw = await fs.readFile(authSettingsPath, "utf8");
     state.auth = JSON.parse(raw);
+  } catch {}
+  try {
+    const raw = await fs.readFile(authUsersPath, "utf8");
+    state.authUsers = JSON.parse(raw);
   } catch {}
 }
 
@@ -1684,6 +1696,23 @@ function getAuthUserFromRequest(auth, req) {
   return getSessionUser(auth, cookies[auth.cookieName]) || null;
 }
 
+function requireAdmin(auth, req, res) {
+  const user = getAuthUserFromRequest(auth, req);
+  if (!user) {
+    json(res, 401, { error: "请先登录" });
+    return null;
+  }
+  if (!isAdminUser(user)) {
+    json(res, 403, { error: "只有管理员可以管理用户" });
+    return null;
+  }
+  return user;
+}
+
+async function saveAuthUsers(auth) {
+  await fs.writeFile(authUsersPath, JSON.stringify(auth.users || [], null, 2), "utf8");
+}
+
 async function handleAuthLogin(auth, req, res) {
   if (!auth.enabled) {
     return json(res, 200, { ok: true, enabled: false, authenticated: true, user: null });
@@ -1692,11 +1721,12 @@ async function handleAuthLogin(auth, req, res) {
   const payload = parseJsonSafe(await readBody(req)) || {};
   const email = String(payload.email || "");
   const password = String(payload.password || "");
-  if (!(await verifyLogin(auth, email, password))) {
+  const user = await verifyLogin(auth, email, password);
+  if (!user) {
     return json(res, 401, { error: "邮箱或密码错误" });
   }
 
-  const session = createSession(auth);
+  const session = createSession(auth, user);
   res.writeHead(200, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
@@ -1711,6 +1741,54 @@ function handleAuthMe(auth, req, res) {
   }
   const user = getAuthUserFromRequest(auth, req);
   json(res, 200, { enabled: true, authenticated: Boolean(user), user });
+}
+
+async function handleAuthUsers(auth, req, res, url) {
+  if (!requireAdmin(auth, req, res)) return;
+
+  if (req.method === "GET" && url.pathname === "/api/auth/users") {
+    return json(res, 200, { users: sanitizeUsers(auth.users || []) });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/auth/users") {
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    try {
+      const user = upsertLocalUser(auth, {
+        email: payload.email,
+        password: payload.password,
+      });
+      await saveAuthUsers(auth);
+      return json(res, 200, { ok: true, user: sanitizeUsers([user])[0], users: sanitizeUsers(auth.users) });
+    } catch (error) {
+      return badRequest(res, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  const userMatch = url.pathname.match(/^\/api\/auth\/users\/([^/]+)$/);
+  if (!userMatch) return notFound(res);
+  const email = decodeURIComponent(userMatch[1]);
+
+  if (req.method === "PATCH") {
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    const user = updateLocalUser(auth, email, {
+      disabled: payload.disabled,
+      password: payload.password,
+    });
+    if (!user) return notFound(res);
+    if (payload.disabled === true) deleteSessionsForEmail(auth, email);
+    await saveAuthUsers(auth);
+    return json(res, 200, { ok: true, user: sanitizeUsers([user])[0], users: sanitizeUsers(auth.users) });
+  }
+
+  if (req.method === "DELETE") {
+    const deleted = deleteLocalUser(auth, email);
+    if (!deleted) return notFound(res);
+    deleteSessionsForEmail(auth, email);
+    await saveAuthUsers(auth);
+    return json(res, 200, { ok: true, users: sanitizeUsers(auth.users) });
+  }
+
+  return notFound(res);
 }
 
 function handleAuthLogout(auth, req, res) {
@@ -1876,6 +1954,9 @@ async function requestHandler(req, res) {
     if (req.method === "POST" && url.pathname === "/api/auth/logout") {
       return handleAuthLogout(auth, req, res);
     }
+    if (url.pathname === "/api/auth/users" || url.pathname.startsWith("/api/auth/users/")) {
+      return await handleAuthUsers(auth, req, res, url);
+    }
     if (auth.enabled && !shouldAllowWithoutAuth(req.method, url.pathname) && !getAuthUserFromRequest(auth, req)) {
       if (req.method === "GET" && (isFrontendRoute(url.pathname) || url.pathname === "/easy_exam_automation.html")) {
         return redirectToLogin(req, res, url);
@@ -1967,7 +2048,7 @@ async function requestHandler(req, res) {
 
 await loadEnvFile();
 await ensureRuntime();
-const auth = buildAuthContext({ localConfig: state.auth });
+const auth = buildAuthContext({ localConfig: { ...state.auth, users: state.authUsers } });
 
 const port = Number(process.env.PORT || 8765);
 const host = process.env.HOST || "127.0.0.1";

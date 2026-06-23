@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
 
 export const SESSION_COOKIE = "easy_exam_session";
 
@@ -9,9 +9,14 @@ export function buildAuthContext({ env = process.env, localConfig = {} } = {}) {
     enabled: Boolean(email && password),
     email,
     password,
+    users: Array.isArray(localConfig.users) ? localConfig.users : [],
     sessions: new Map(),
     cookieName: SESSION_COOKIE,
   };
+}
+
+export function normalizeEmail(email = "") {
+  return String(email || "").trim().toLowerCase();
 }
 
 function safeEqual(left, right) {
@@ -21,14 +26,32 @@ function safeEqual(left, right) {
   return timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-export async function verifyLogin(auth, email, password) {
-  if (!auth?.enabled) return false;
-  return safeEqual(String(email || "").trim(), auth.email) && safeEqual(String(password || ""), auth.password);
+export function hashPassword(password, salt = randomBytes(16).toString("base64url")) {
+  const hash = pbkdf2Sync(String(password || ""), salt, 120000, 32, "sha256").toString("base64url");
+  return { passwordSalt: salt, passwordHash: hash };
 }
 
-export function createSession(auth) {
+export async function verifyPasswordHash(password, salt, hash) {
+  if (!salt || !hash) return false;
+  const computed = hashPassword(password, salt).passwordHash;
+  return safeEqual(computed, hash);
+}
+
+export async function verifyLogin(auth, email, password) {
+  if (!auth?.enabled) return false;
+  const normalizedEmail = normalizeEmail(email);
+  if (safeEqual(normalizedEmail, normalizeEmail(auth.email)) && safeEqual(String(password || ""), auth.password)) {
+    return { email: auth.email, role: "admin" };
+  }
+
+  const user = (auth.users || []).find((item) => normalizeEmail(item.email) === normalizedEmail);
+  if (!user || user.disabled) return null;
+  if (!(await verifyPasswordHash(password, user.passwordSalt, user.passwordHash))) return null;
+  return { email: user.email, role: user.role || "user" };
+}
+
+export function createSession(auth, user = { email: auth.email, role: "admin" }) {
   const token = randomBytes(32).toString("base64url");
-  const user = { email: auth.email };
   auth.sessions.set(token, { user, createdAt: Date.now() });
   return { token, user };
 }
@@ -41,6 +64,61 @@ export function getSessionUser(auth, token) {
 export function deleteSession(auth, token) {
   if (!auth?.enabled || !token) return false;
   return auth.sessions.delete(token);
+}
+
+export function deleteSessionsForEmail(auth, email) {
+  const normalizedEmail = normalizeEmail(email);
+  for (const [token, session] of auth.sessions.entries()) {
+    if (normalizeEmail(session.user?.email) === normalizedEmail) auth.sessions.delete(token);
+  }
+}
+
+export function isAdminUser(user) {
+  return user?.role === "admin";
+}
+
+export function sanitizeUsers(users = []) {
+  return users.map(({ passwordHash, passwordSalt, ...user }) => ({ ...user }));
+}
+
+export function upsertLocalUser(auth, { email, password }) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) throw new Error("请输入同事邮箱。");
+  if (!String(password || "")) throw new Error("请输入临时密码。");
+  if (normalizedEmail === normalizeEmail(auth.email)) throw new Error("管理员账号不需要重复添加。");
+
+  const now = new Date().toISOString();
+  const existingIndex = (auth.users || []).findIndex((user) => normalizeEmail(user.email) === normalizedEmail);
+  const existing = existingIndex >= 0 ? auth.users[existingIndex] : {};
+  const next = {
+    ...existing,
+    email: normalizedEmail,
+    ...hashPassword(password),
+    role: "user",
+    disabled: false,
+    createdAt: existing.createdAt || now,
+    updatedAt: now,
+  };
+  if (existingIndex >= 0) auth.users[existingIndex] = next;
+  else auth.users.push(next);
+  return next;
+}
+
+export function updateLocalUser(auth, email, patch = {}) {
+  const normalizedEmail = normalizeEmail(email);
+  const user = (auth.users || []).find((item) => normalizeEmail(item.email) === normalizedEmail);
+  if (!user) return null;
+  if (patch.disabled !== undefined) user.disabled = Boolean(patch.disabled);
+  if (patch.password) Object.assign(user, hashPassword(patch.password));
+  user.updatedAt = new Date().toISOString();
+  return user;
+}
+
+export function deleteLocalUser(auth, email) {
+  const normalizedEmail = normalizeEmail(email);
+  const before = auth.users.length;
+  auth.users = auth.users.filter((user) => normalizeEmail(user.email) !== normalizedEmail);
+  return auth.users.length !== before;
 }
 
 export function parseCookies(header = "") {

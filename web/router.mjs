@@ -8,6 +8,7 @@ export const ROUTES = [
   { name: "candidate-import", pattern: /^\/candidate-import\/?$/, menuKey: "candidate-import" },
   { name: "requirements", pattern: /^\/requirements\/?$/, menuKey: "requirements" },
   { name: "requirement-detail", pattern: /^\/requirements\/([^/]+)\/?$/, param: "requestId", menuKey: "requirements" },
+  { name: "users", pattern: /^\/users\/?$/, menuKey: "users" },
   { name: "templates", pattern: /^\/templates\/?$/, menuKey: "templates" },
   { name: "logs", pattern: /^\/logs\/?$/, menuKey: "logs" },
 ];
