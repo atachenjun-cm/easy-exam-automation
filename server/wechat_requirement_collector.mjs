@@ -28,20 +28,34 @@ export function loadWechatGroupConfig(input) {
   };
 }
 
-export function buildWechatRequirementDraft({ config, groupName, text }) {
+export function buildWechatRequirementDraft({ config, groupName, text, checkpoint = null }) {
   const group = findGroup(config, groupName);
-  const parsed = parseWechatRequirementMessages(text);
+  const filtered = filterWechatMessagesByCheckpoint(text, checkpoint);
+  const parsed = parseWechatRequirementMessages(filtered.text);
   return {
     source: {
       type: "wechat_group",
       groupName: group.groupName,
       collectedAt: new Date().toISOString(),
+      skippedCount: filtered.skippedCount,
     },
     project: {
       projectName: group.projectName || group.groupName,
       customerName: group.customerName || "",
     },
     ...parsed,
+  };
+}
+
+export function filterWechatMessagesByCheckpoint(text, checkpoint = null) {
+  const lines = normalizeText(text).split("\n").map((line) => line.trim()).filter(Boolean);
+  if (!checkpoint?.lastMessageHash) return { text: lines.join("\n"), skippedCount: 0 };
+  const lastSeenIndex = lines.findIndex((line) => sha256(line) === checkpoint.lastMessageHash);
+  if (lastSeenIndex < 0) return { text: lines.join("\n"), skippedCount: 0 };
+  const nextLines = lines.slice(lastSeenIndex + 1);
+  return {
+    text: nextLines.join("\n"),
+    skippedCount: lastSeenIndex + 1,
   };
 }
 

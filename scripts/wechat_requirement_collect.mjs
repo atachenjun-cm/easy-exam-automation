@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 
 import { buildWechatRequirementDraft, loadWechatGroupConfig } from "../server/wechat_requirement_collector.mjs";
 
@@ -34,6 +35,24 @@ function readInput(args) {
   return readStdin();
 }
 
+function readState(statePath) {
+  if (!statePath || !existsSync(statePath)) return {};
+  return JSON.parse(readFileSync(statePath, "utf8"));
+}
+
+function writeState(statePath, groupName, checkpoint) {
+  if (!statePath) return;
+  const state = readState(statePath);
+  state.groups = state.groups || {};
+  state.groups[groupName] = {
+    ...state.groups[groupName],
+    checkpoint,
+    updatedAt: new Date().toISOString(),
+  };
+  mkdirSync(path.dirname(statePath), { recursive: true });
+  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+}
+
 function main() {
   const args = parseArgs(process.argv);
   if (!args.config || !args.group) {
@@ -45,12 +64,16 @@ function main() {
   const config = loadWechatGroupConfig(readFileSync(args.config, "utf8"));
   const text = readInput(args);
   if (!text.trim()) throw new Error("没有读取到微信群聊天文本。请提供 --input、--clipboard 或 stdin。");
+  const state = readState(args.state);
+  const checkpoint = state.groups?.[args.group]?.checkpoint || null;
 
   const draft = buildWechatRequirementDraft({
     config,
     groupName: args.group,
     text,
+    checkpoint,
   });
+  writeState(args.state, args.group, draft.checkpoint);
 
   process.stdout.write(`${JSON.stringify(draft, null, 2)}\n`);
 }

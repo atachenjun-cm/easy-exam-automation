@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildWechatRequirementDraft,
+  filterWechatMessagesByCheckpoint,
   loadWechatGroupConfig,
   parseWechatRequirementMessages,
 } from "./wechat_requirement_collector.mjs";
@@ -88,4 +89,18 @@ test("reports unresolved questions when required fields are missing", () => {
   assert.deepEqual(messages.requirement.subjects, ["语文"]);
   assert.ok(messages.unresolvedQuestions.some((question) => question.includes("正式考试时间")));
   assert.ok(messages.unresolvedQuestions.some((question) => question.includes("试考时间")));
+});
+
+test("filters copied WeChat text using the previous checkpoint hash", () => {
+  const first = parseWechatRequirementMessages("客户：考试叫产品认证考试。\n客户：科目是语文。");
+  const copiedAgain = [
+    "客户：考试叫产品认证考试。",
+    "客户：科目是语文。",
+    "客户：正式考试 9 月 1 日上午 9 点到 10 点。",
+  ].join("\n");
+
+  const filtered = filterWechatMessagesByCheckpoint(copiedAgain, first.checkpoint);
+
+  assert.equal(filtered.text, "客户：正式考试 9 月 1 日上午 9 点到 10 点。");
+  assert.equal(filtered.skippedCount, 2);
 });
