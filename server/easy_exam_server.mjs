@@ -1210,11 +1210,16 @@ async function postCandidatesToTenant(login, sessionId, candidates) {
     method: "POST",
     headers: tenantHeadersForLogin(login, { "Content-Type": "application/json" }),
     body: JSON.stringify(
-      candidates.map((candidate) => ({
-        permit: String(candidate.permit),
-        full_name: String(candidate.full_name),
-        identity_id: String(candidate.identity_id),
-      })),
+      candidates.map((candidate) => {
+        const entry = {
+          permit: String(candidate.permit),
+          full_name: String(candidate.full_name),
+          identity_id: String(candidate.identity_id),
+          course_code: String(candidate.course_code || ""),
+        };
+        if (!entry.course_code) delete entry.course_code;
+        return entry;
+      }),
     ),
   });
   const text = await response.text();

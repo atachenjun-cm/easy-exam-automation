@@ -64,6 +64,13 @@ test("candidate page loads and preselects task-scoped sessions", () => {
   assert.equal(html.includes("已带入正式考试和试考"), false);
 });
 
+test("candidate import supports optional course code mapping", () => {
+  assert.ok(html.includes('id="candidateMapCourseCode"'));
+  assert.ok(html.includes("<th>科目编号</th>"));
+  assert.ok(html.includes("course_code: data.mapping?.course_code || \"\""));
+  assert.ok(html.includes("candidateUiState.candidates.map(({ permit, full_name, identity_id, course_code })"));
+});
+
 test("local login page and logout controls are present", () => {
   assert.ok(html.includes('id="loginView"'));
   assert.equal(html.includes('id="loginView" hidden'), false);

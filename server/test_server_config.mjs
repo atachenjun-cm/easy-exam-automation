@@ -27,3 +27,8 @@ test("authenticated automation jobs use saved user settings instead of request o
   assert.ok(serverSource.includes("const storedLogin = getYikaoLoginForRequest(req);"));
   assert.ok(serverSource.includes("const login = auth.enabled ? storedLogin : { ...storedLogin, ...(payload.login || {}) };"));
 });
+
+test("candidate import forwards optional course_code to EasyExam tenant API", () => {
+  assert.ok(serverSource.includes("course_code: String(candidate.course_code || \"\")"));
+  assert.ok(serverSource.includes("if (!entry.course_code) delete entry.course_code;"));
+});

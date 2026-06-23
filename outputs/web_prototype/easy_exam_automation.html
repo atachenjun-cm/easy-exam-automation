@@ -2285,8 +2285,8 @@
                       <span>
                         <span class="candidate-upload-status">文件上传成功</span>
                         <span class="drop-title" id="candidateDropTitle">上传客户原始名单</span>
-                        <span class="drop-note">支持 .xlsx、.xls、.csv；整理后固定输出准考证号 / 姓名 / 身份证号。</span>
-                        <span class="candidate-help-box">支持 .xlsx、.xls、.csv 格式<br />整理后应含字段：准考证号 / 姓名 / 身份证号</span>
+                        <span class="drop-note">支持 .xlsx、.xls、.csv；整理后固定输出准考证号 / 姓名 / 身份证号，可选科目编号。</span>
+                        <span class="candidate-help-box">支持 .xlsx、.xls、.csv 格式<br />整理后应含字段：准考证号 / 姓名 / 身份证号；可选字段：科目编号</span>
                       </span>
                       <input class="hidden-input" id="candidateFileInput" type="file" accept=".xlsx,.xls,.csv" />
                     </label>
@@ -2311,6 +2311,10 @@
                       <label class="mapping-card">
                         <span class="field-label">准考证号</span>
                         <select id="candidateMapPermit"></select>
+                      </label>
+                      <label class="mapping-card">
+                        <span class="field-label">科目编号（选填）</span>
+                        <select id="candidateMapCourseCode"></select>
                       </label>
                     </div>
                     <div class="candidate-actions" style="margin-top: 12px;">
@@ -2444,10 +2448,11 @@
                         <th>准考证号</th>
                         <th>姓名</th>
                         <th>身份证号</th>
+                        <th>科目编号</th>
                       </tr>
                     </thead>
                     <tbody id="candidatePreviewRows">
-                      <tr><td colspan="3">等待上传客户名单</td></tr>
+                      <tr><td colspan="4">等待上传客户名单</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -2672,6 +2677,7 @@
       const candidateMapFullName = document.querySelector("#candidateMapFullName");
       const candidateMapIdentityId = document.querySelector("#candidateMapIdentityId");
       const candidateMapPermit = document.querySelector("#candidateMapPermit");
+      const candidateMapCourseCode = document.querySelector("#candidateMapCourseCode");
       const candidateDownloadBtn = document.querySelector("#candidateDownloadBtn");
       const loadSessionsBtn = document.querySelector("#loadSessionsBtn");
       const candidateIssues = document.querySelector("#candidateIssues");
@@ -3120,6 +3126,7 @@
           full_name: "",
           identity_id: "",
           permit: "",
+          course_code: "",
         },
         candidates: [],
         errors: [],
@@ -3198,6 +3205,7 @@
         fillMappingSelect(candidateMapFullName, candidateUiState.mapping.full_name);
         fillMappingSelect(candidateMapIdentityId, candidateUiState.mapping.identity_id);
         fillMappingSelect(candidateMapPermit, candidateUiState.mapping.permit);
+        fillMappingSelect(candidateMapCourseCode, candidateUiState.mapping.course_code);
       }
 
       function rebuildCandidatesFromMapping() {
@@ -3205,11 +3213,13 @@
           full_name: candidateMapFullName.value,
           identity_id: candidateMapIdentityId.value,
           permit: candidateMapPermit.value,
+          course_code: candidateMapCourseCode.value,
         };
         candidateUiState.candidates = candidateUiState.rawRows.map((row) => ({
           permit: String(row[candidateUiState.mapping.permit] ?? "").trim(),
           full_name: String(row[candidateUiState.mapping.full_name] ?? "").trim(),
           identity_id: String(row[candidateUiState.mapping.identity_id] ?? "").trim(),
+          course_code: String(row[candidateUiState.mapping.course_code] ?? "").trim(),
           __row: row.__row,
         }));
         const validation = validateCandidatesClient(candidateUiState.candidates, candidateUiState.mapping);
@@ -3297,10 +3307,10 @@
               .slice(0, 10)
               .map(
                 (row) =>
-                  `<tr><td>${escapeHtml(row.permit)}</td><td>${escapeHtml(row.full_name)}</td><td>${escapeHtml(row.identity_id)}</td></tr>`,
+                  `<tr><td>${escapeHtml(row.permit)}</td><td>${escapeHtml(row.full_name)}</td><td>${escapeHtml(row.identity_id)}</td><td>${escapeHtml(row.course_code || "")}</td></tr>`,
               )
               .join("")
-          : '<tr><td colspan="3">等待上传客户名单</td></tr>';
+          : '<tr><td colspan="4">等待上传客户名单</td></tr>';
 
         const issues = [
           ...candidateUiState.errors.map((message) => ({ message, level: "error" })),
@@ -3352,6 +3362,7 @@
           full_name: data.mapping?.full_name || "",
           identity_id: data.mapping?.identity_id || "",
           permit: data.mapping?.permit || "",
+          course_code: data.mapping?.course_code || "",
         };
         candidateUiState.candidates = (data.candidates || []).map((candidate, index) => ({
           ...candidate,
@@ -3377,10 +3388,11 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            candidates: candidateUiState.candidates.map(({ permit, full_name, identity_id }) => ({
+            candidates: candidateUiState.candidates.map(({ permit, full_name, identity_id, course_code }) => ({
               permit,
               full_name,
               identity_id,
+              course_code,
             })),
           }),
         });
@@ -3687,10 +3699,11 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             session_id: candidateUiState.selectedSession.session_id,
-            candidates: candidateUiState.candidates.map(({ permit, full_name, identity_id }) => ({
+            candidates: candidateUiState.candidates.map(({ permit, full_name, identity_id, course_code }) => ({
               permit,
               full_name,
               identity_id,
+              course_code,
             })),
           }),
         });
@@ -4192,7 +4205,7 @@
         );
       });
 
-      [candidateMapFullName, candidateMapIdentityId, candidateMapPermit].forEach((select) => {
+      [candidateMapFullName, candidateMapIdentityId, candidateMapPermit, candidateMapCourseCode].forEach((select) => {
         select.addEventListener("change", rebuildCandidatesFromMapping);
       });
 
@@ -4565,7 +4578,7 @@
         candidateUiState.filename = "";
         candidateUiState.columns = [];
         candidateUiState.rawRows = [];
-        candidateUiState.mapping = { full_name: "", identity_id: "", permit: "" };
+        candidateUiState.mapping = { full_name: "", identity_id: "", permit: "", course_code: "" };
         candidateUiState.candidates = [];
         candidateUiState.errors = [];
         candidateUiState.warnings = [];

@@ -9,8 +9,10 @@ from pathlib import Path
 FULL_NAME_ALIASES = {"姓名", "考生姓名", "full_name", "name"}
 IDENTITY_ID_ALIASES = {"证件号", "身份证号", "身份证", "证件号码", "identity_id", "ssn"}
 PERMIT_ALIASES = {"准考证号", "考号", "考生编号", "permit"}
-TARGET_FIELDS = ("permit", "full_name", "identity_id")
-TEMPLATE_HEADERS = ("准考证号", "姓名", "身份证号")
+COURSE_CODE_ALIASES = {"科目编号", "易考科目编号", "course_code"}
+REQUIRED_FIELDS = ("permit", "full_name", "identity_id")
+TARGET_FIELDS = ("permit", "full_name", "identity_id", "course_code")
+TEMPLATE_HEADERS = ("准考证号", "姓名", "身份证号", "科目编号")
 SCIENTIFIC_RE = re.compile(r"^\s*\d+(?:\.\d+)?[eE]\+?\d+\s*$")
 
 
@@ -46,6 +48,7 @@ def detect_mapping(columns):
         "full_name": pick(FULL_NAME_ALIASES),
         "identity_id": pick(IDENTITY_ID_ALIASES),
         "permit": pick(PERMIT_ALIASES),
+        "course_code": pick(COURSE_CODE_ALIASES),
     }
 
 
@@ -135,6 +138,7 @@ def build_candidates(raw_rows, mapping):
                 "permit": cell_to_text(row.get(mapping.get("permit", ""), "")),
                 "full_name": cell_to_text(row.get(mapping.get("full_name", ""), "")),
                 "identity_id": cell_to_text(row.get(mapping.get("identity_id", ""), "")),
+                "course_code": cell_to_text(row.get(mapping.get("course_code", ""), "")),
             }
         )
     return candidates
@@ -143,14 +147,14 @@ def build_candidates(raw_rows, mapping):
 def validate_candidates(candidates, mapping):
     errors = []
     warnings = []
-    for field in TARGET_FIELDS:
+    for field in REQUIRED_FIELDS:
         if not mapping.get(field):
             errors.append(f"缺少字段映射：{field}")
 
     duplicate_maps = {"permit": defaultdict(list), "identity_id": defaultdict(list)}
     for idx, row in enumerate(candidates, start=2):
         row_num = row.get("__row") or idx
-        for field in TARGET_FIELDS:
+        for field in REQUIRED_FIELDS:
             value = cell_to_text(row.get(field))
             if not value:
                 errors.append(f"第 {row_num} 行缺少 {field}")
