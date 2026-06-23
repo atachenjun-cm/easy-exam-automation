@@ -1962,7 +1962,7 @@
       </div>
     </section>
 
-    <div class="app-shell" id="appShell">
+    <div class="app-shell" id="appShell" hidden>
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark">易</div>
@@ -2723,7 +2723,7 @@
         function render() {
           const email = state.user?.email || (state.enabled ? "未登录" : "本机模式");
           authEmailText.textContent = email;
-          logoutBtn.hidden = !state.enabled;
+          logoutBtn.hidden = !state.enabled || !state.authenticated;
         }
 
         async function load() {
@@ -2791,7 +2791,7 @@
           state.authenticated = false;
           state.user = null;
           render();
-          await router.navigate("/login", { replace: true });
+          window.location.href = "/login";
         }
 
         return { load, login, logout, requireForRoute };
@@ -4500,6 +4500,8 @@
       renderSelectedSession();
       renderRoomAssignResult();
       await authController.load().catch((error) => {
+        appShell.hidden = true;
+        loginView.hidden = false;
         loginError.textContent = error.message || String(error);
       });
       loadSettings().catch((error) => addLog(error.message || String(error), "warn"));

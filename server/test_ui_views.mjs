@@ -66,6 +66,7 @@ test("candidate page loads and preselects task-scoped sessions", () => {
 
 test("local login page and logout controls are present", () => {
   assert.ok(html.includes('id="loginView"'));
+  assert.ok(html.includes('id="appShell" hidden'));
   assert.ok(html.includes('id="loginEmailInput"'));
   assert.ok(html.includes('id="loginPasswordInput"'));
   assert.ok(html.includes('id="logoutBtn"'));
