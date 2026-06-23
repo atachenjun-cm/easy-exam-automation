@@ -21,6 +21,7 @@ import {
   deleteSessionsForEmail,
   getSessionUser,
   isAdminUser,
+  normalizeEmail,
   parseCookies,
   sanitizeUsers,
   shouldAllowWithoutAuth,
@@ -29,6 +30,12 @@ import {
   verifyLogin,
 } from "./local_auth.mjs";
 import { handleRequirementRequest } from "./requirement_request_api.mjs";
+import {
+  currentUserLogin,
+  defaultUserSettings,
+  normalizeUserSettings,
+  saveUserLogin,
+} from "./user_settings.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -40,6 +47,7 @@ const generatedDir = path.join(runtimeDir, "generated");
 const settingsPath = path.join(runtimeDir, "settings.json");
 const authSettingsPath = path.join(runtimeDir, "auth.json");
 const authUsersPath = path.join(runtimeDir, "auth_users.json");
+const userSettingsPath = path.join(runtimeDir, "user_settings.json");
 const parserScript = path.join(__dirname, "exam_request_parser.py");
 const candidateParserScript = path.join(__dirname, "candidate_list_parser.py");
 const monitorAccountExporterScript = path.join(__dirname, "monitor_account_exporter.py");
@@ -86,6 +94,7 @@ const state = {
   },
   auth: {},
   authUsers: [],
+  userSettings: defaultUserSettings(),
 };
 
 function json(res, code, payload) {
@@ -156,6 +165,12 @@ async function ensureRuntime() {
     const raw = await fs.readFile(authUsersPath, "utf8");
     state.authUsers = JSON.parse(raw);
   } catch {}
+  try {
+    const raw = await fs.readFile(userSettingsPath, "utf8");
+    state.userSettings = normalizeUserSettings(JSON.parse(raw));
+  } catch {
+    state.userSettings = defaultUserSettings();
+  }
 }
 
 function parseJsonSafe(buffer) {
@@ -183,19 +198,8 @@ function normalizeApiBase(base) {
   return String(base || "https://eztest.cn").replace(/\/+$/, "");
 }
 
-function tenantHeaders(extra = {}) {
-  const apiKey = state.settings.login?.tenantApiKey || process.env.YIKAO_API_KEY;
-  if (!apiKey) {
-    throw new Error("未配置租户 API Key，请在后台连接中填写并保存。");
-  }
-  return {
-    Authorization: `Key ${apiKey}`,
-    ...extra,
-  };
-}
-
 function tenantHeadersForLogin(login = {}, extra = {}) {
-  const apiKey = login.tenantApiKey || state.settings.login?.tenantApiKey || process.env.YIKAO_API_KEY;
+  const apiKey = login.tenantApiKey || (login.allowEnvFallback ? process.env.YIKAO_API_KEY : "");
   if (!apiKey) {
     throw new Error("未配置租户 API Key，请在后台连接中填写并保存。");
   }
@@ -213,27 +217,6 @@ function tenantErrorMessage(status, action) {
       : status === 429
         ? "租户 API 返回 429，请稍后重试。"
         : `租户 API ${action}失败：${status}`;
-}
-
-async function readTenantJson(tenantUrl, options = {}, action = "请求") {
-  const response = await fetch(tenantUrl, {
-    ...options,
-    headers: tenantHeaders(options.headers || {}),
-  });
-  const text = await response.text();
-  let payload = null;
-  try {
-    payload = text ? JSON.parse(text) : null;
-  } catch {
-    payload = text;
-  }
-  if (!response.ok) {
-    const error = new Error(tenantErrorMessage(response.status, action));
-    error.status = response.status;
-    error.detail = payload;
-    throw error;
-  }
-  return payload;
 }
 
 async function readTenantJsonWithLogin(login, tenantUrl, options = {}, action = "请求") {
@@ -867,9 +850,10 @@ async function handleImport(req, res) {
   const parsed = await parseWorkbook(uploadPath);
   const projectName = String(parsed?.config?.examName || filename.replace(/\.[^.]+$/, "") || "未命名项目").trim();
   const authUser = getAuthUserFromRequest(auth, req);
+  const login = getYikaoLoginForRequest(req);
   const task = await runTaskState("create", {
     projectName,
-    sourceAccount: state.settings.login?.username || "",
+    sourceAccount: login.username || "",
     ownerEmail: auth.enabled ? authUser?.email || "" : "",
     config: parsed?.config || {},
   });
@@ -1182,32 +1166,32 @@ function normalizeRooms(payload) {
   return [];
 }
 
-async function getEntryCount(sessionId) {
+async function getEntryCount(login, sessionId) {
   const base = normalizeApiBase(process.env.YIKAO_API_BASE);
   const tenantUrl = new URL(`/tenant/api/session/${encodeURIComponent(sessionId)}/entry_count/`, base);
-  return await readTenantJson(tenantUrl, {}, "查询场次考生统计");
+  return await readTenantJsonWithLogin(login, tenantUrl, {}, "查询场次考生统计");
 }
 
-async function getEntryList(sessionId) {
+async function getEntryList(login, sessionId) {
   const base = normalizeApiBase(process.env.YIKAO_API_BASE);
   const tenantUrl = new URL(`/tenant/api/session/${encodeURIComponent(sessionId)}/entry/`, base);
-  const payload = await readTenantJson(tenantUrl, {}, "查询场次考生列表");
+  const payload = await readTenantJsonWithLogin(login, tenantUrl, {}, "查询场次考生列表");
   if (Array.isArray(payload?.entries)) return payload.entries;
   return normalizeTenantList(payload);
 }
 
-async function getRoomList(sessionId) {
+async function getRoomList(login, sessionId) {
   const base = normalizeApiBase(process.env.YIKAO_API_BASE);
   const tenantUrl = new URL(`/tenant/api/session/${encodeURIComponent(sessionId)}/rooms/`, base);
-  const payload = await readTenantJson(tenantUrl, {}, "查询场次班级列表");
+  const payload = await readTenantJsonWithLogin(login, tenantUrl, {}, "查询场次班级列表");
   return normalizeRooms(payload);
 }
 
-async function getSessionImportState(sessionId) {
+async function getSessionImportState(login, sessionId) {
   const [entryCount, entries, rooms] = await Promise.all([
-    getEntryCount(sessionId),
-    getEntryList(sessionId).catch(() => []),
-    getRoomList(sessionId).catch(() => []),
+    getEntryCount(login, sessionId),
+    getEntryList(login, sessionId).catch(() => []),
+    getRoomList(login, sessionId).catch(() => []),
   ]);
   return {
     entryCount,
@@ -1219,12 +1203,12 @@ async function getSessionImportState(sessionId) {
   };
 }
 
-async function postCandidatesToTenant(sessionId, candidates) {
+async function postCandidatesToTenant(login, sessionId, candidates) {
   const base = normalizeApiBase(process.env.YIKAO_API_BASE);
   const tenantUrl = new URL(`/tenant/api/session/${encodeURIComponent(sessionId)}/entry/`, base);
   const response = await fetch(tenantUrl, {
     method: "POST",
-    headers: tenantHeaders({ "Content-Type": "application/json" }),
+    headers: tenantHeadersForLogin(login, { "Content-Type": "application/json" }),
     body: JSON.stringify(
       candidates.map((candidate) => ({
         permit: String(candidate.permit),
@@ -1243,7 +1227,7 @@ async function postCandidatesToTenant(sessionId, candidates) {
   return { response, payloadResponse };
 }
 
-async function deleteCandidatePermit(sessionId, permit) {
+async function deleteCandidatePermit(login, sessionId, permit) {
   const base = normalizeApiBase(process.env.YIKAO_API_BASE);
   const tenantUrl = new URL(
     `/tenant/api/session/${encodeURIComponent(sessionId)}/entry/${encodeURIComponent(permit)}/`,
@@ -1251,7 +1235,7 @@ async function deleteCandidatePermit(sessionId, permit) {
   );
   const response = await fetch(tenantUrl, {
     method: "DELETE",
-    headers: tenantHeaders(),
+    headers: tenantHeadersForLogin(login),
   });
   const text = await response.text();
   let detail = null;
@@ -1268,7 +1252,7 @@ async function deleteCandidatePermit(sessionId, permit) {
   };
 }
 
-async function cleanupDuplicateCandidatePermits(sessionId, errors) {
+async function cleanupDuplicateCandidatePermits(login, sessionId, errors) {
   const permits = [
     ...new Set(
       normalizeImportErrors(errors)
@@ -1281,7 +1265,7 @@ async function cleanupDuplicateCandidatePermits(sessionId, errors) {
   const concurrency = 12;
   for (let index = 0; index < permits.length; index += concurrency) {
     const batch = permits.slice(index, index + concurrency);
-    const batchResults = await Promise.all(batch.map((permit) => deleteCandidatePermit(sessionId, permit)));
+    const batchResults = await Promise.all(batch.map((permit) => deleteCandidatePermit(login, sessionId, permit)));
     results.push(...batchResults);
   }
   const failedItems = results.filter((item) => !(item.ok || item.status === 404));
@@ -1296,13 +1280,13 @@ async function cleanupDuplicateCandidatePermits(sessionId, errors) {
   };
 }
 
-async function pollProgressbar(progressbarId, timeoutMs = 90000) {
+async function pollProgressbar(login, progressbarId, timeoutMs = 90000) {
   const base = normalizeApiBase(process.env.YIKAO_API_BASE);
   const startedAt = Date.now();
   let lastPayload = null;
   while (Date.now() - startedAt < timeoutMs) {
     const tenantUrl = new URL(`/tenant/api/progressbar/${encodeURIComponent(progressbarId)}/`, base);
-    lastPayload = await readTenantJson(tenantUrl, {}, "查询分班进度");
+    lastPayload = await readTenantJsonWithLogin(login, tenantUrl, {}, "查询分班进度");
     const status = String(lastPayload?.status || "");
     const percent = Number(lastPayload?.percent || 0);
     if (status === "finished" || percent >= 100) {
@@ -1317,15 +1301,16 @@ async function pollProgressbar(progressbarId, timeoutMs = 90000) {
 
 async function handleSessions(req, res) {
   const url = new URL(req.url, "http://localhost");
+  const login = getYikaoLoginForRequest(req);
   const base = normalizeApiBase(process.env.YIKAO_API_BASE);
   const tenantUrl = new URL("/tenant/api/session/", base);
   const sessionIds = url.searchParams.get("session_ids");
   if (sessionIds) tenantUrl.searchParams.set("session_ids", sessionIds);
 
-  const activeKey = state.settings.login?.tenantApiKey || process.env.YIKAO_API_KEY || "";
+  const activeKey = login.tenantApiKey || (login.allowEnvFallback ? process.env.YIKAO_API_KEY || "" : "");
   const keyHint = activeKey ? `末尾 ${activeKey.slice(-4)}` : "未配置";
   const response = await fetch(tenantUrl, {
-    headers: tenantHeaders(),
+    headers: tenantHeadersForLogin(login),
   });
   const text = await response.text();
   let payload = null;
@@ -1404,6 +1389,7 @@ async function handleSessions(req, res) {
 
 async function handleCandidateImport(req, res) {
   const payload = parseJsonSafe(await readBody(req));
+  const login = getYikaoLoginForRequest(req);
   const sessionId = String(payload?.session_id || "").trim();
   const candidates = payload?.candidates || [];
   if (!sessionId) {
@@ -1416,7 +1402,7 @@ async function handleCandidateImport(req, res) {
 
   let beforeState = null;
   try {
-    beforeState = await getSessionImportState(sessionId);
+    beforeState = await getSessionImportState(login, sessionId);
   } catch (error) {
     beforeState = { error: error.message || String(error), detail: error.detail || null };
   }
@@ -1429,7 +1415,7 @@ async function handleCandidateImport(req, res) {
   const retryDelays = [1500, 3000, 5000];
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const { response, payloadResponse: currentPayload } = await postCandidatesToTenant(sessionId, candidates);
+    const { response, payloadResponse: currentPayload } = await postCandidatesToTenant(login, sessionId, candidates);
     payloadResponse = currentPayload;
     finalResponseStatus = response.status;
 
@@ -1449,7 +1435,7 @@ async function handleCandidateImport(req, res) {
     importErrors = normalizeImportErrors(payloadResponse?.errors || []);
     let currentState = null;
     try {
-      currentState = await getSessionImportState(sessionId);
+      currentState = await getSessionImportState(login, sessionId);
     } catch (error) {
       currentState = { error: error.message || String(error), detail: error.detail || null, entriesNum: 0 };
     }
@@ -1469,7 +1455,7 @@ async function handleCandidateImport(req, res) {
       break;
     }
 
-    const cleanup = await cleanupDuplicateCandidatePermits(sessionId, importErrors);
+    const cleanup = await cleanupDuplicateCandidatePermits(login, sessionId, importErrors);
     attempts[attempts.length - 1].duplicate_cleanup = cleanup;
     if (Number(currentState?.entriesNum || 0) === 0 && isSoftDeletedPermitConflict(cleanup)) {
       attempts[attempts.length - 1].blocked_by_soft_deleted_permit_conflict = true;
@@ -1482,7 +1468,7 @@ async function handleCandidateImport(req, res) {
   const fail = Number(payloadResponse?.fail ?? 0);
   let importState = null;
   try {
-    importState = await getSessionImportState(sessionId);
+    importState = await getSessionImportState(login, sessionId);
   } catch (error) {
     importState = { error: error.message || String(error), detail: error.detail || null, entriesNum: 0 };
   }
@@ -1514,6 +1500,7 @@ async function handleCandidateImport(req, res) {
 
 async function handleRoomsPreview(sessionId, req, res) {
   const payload = parseJsonSafe(await readBody(req));
+  const login = getYikaoLoginForRequest(req);
   const targetSize = Number(payload?.targetSize || 30);
   if (!sessionId) {
     return badRequest(res, "session_id 为空");
@@ -1522,7 +1509,7 @@ async function handleRoomsPreview(sessionId, req, res) {
     return badRequest(res, "每个班级人数必须是正整数");
   }
 
-  const latestState = await getSessionImportState(sessionId);
+  const latestState = await getSessionImportState(login, sessionId);
   const entryCount = latestState.entryCount;
   const entriesNum = latestState.entriesNum;
   if (!entriesNum) {
@@ -1543,6 +1530,7 @@ async function handleRoomsPreview(sessionId, req, res) {
 
 async function handleRoomsAuto(sessionId, req, res) {
   const payload = parseJsonSafe(await readBody(req));
+  const login = getYikaoLoginForRequest(req);
   const requestedRooms = Array.isArray(payload?.rooms) ? payload.rooms : [];
   const overwrite = Boolean(payload?.overwrite);
   const targetSize = Number(payload?.targetSize || 30);
@@ -1555,7 +1543,7 @@ async function handleRoomsAuto(sessionId, req, res) {
 
   const base = normalizeApiBase(process.env.YIKAO_API_BASE);
   const roomsUrl = new URL(`/tenant/api/session/${encodeURIComponent(sessionId)}/rooms/`, base);
-  const latestState = await getSessionImportState(sessionId);
+  const latestState = await getSessionImportState(login, sessionId);
   const entriesNum = Number(latestState.entriesNum || 0);
   if (!entriesNum) {
     return badRequest(res, "entries_num = 0，当前场次没有可分班考生");
@@ -1575,7 +1563,8 @@ async function handleRoomsAuto(sessionId, req, res) {
   }
 
   if (existingRooms.length && overwrite) {
-    await readTenantJson(
+    await readTenantJsonWithLogin(
+      login,
       roomsUrl,
       {
         method: "PUT",
@@ -1603,7 +1592,8 @@ async function handleRoomsAuto(sessionId, req, res) {
   }
   rooms = roomValidation.rooms;
 
-  const result = await readTenantJson(
+  const result = await readTenantJsonWithLogin(
+    login,
     roomsUrl,
     {
       method: "POST",
@@ -1618,7 +1608,7 @@ async function handleRoomsAuto(sessionId, req, res) {
   if (!progressbarId) {
     return json(res, 500, { error: "自动分班接口未返回 progressbar id", detail: result });
   }
-  const progressbar = await pollProgressbar(progressbarId);
+  const progressbar = await pollProgressbar(login, progressbarId);
   json(res, 200, {
     session_id: sessionId,
     progressbar_id: progressbarId,
@@ -1646,10 +1636,8 @@ async function handleCreateJob(req, res) {
     return badRequest(res, "需求单缺少考试名称或考试时间，请重新导入并检查表格。");
   }
 
-  const login = {
-    ...state.settings.login,
-    ...(payload.login || {}),
-  };
+  const storedLogin = getYikaoLoginForRequest(req);
+  const login = auth.enabled ? storedLogin : { ...storedLogin, ...(payload.login || {}) };
   if (!login.url || !login.username || !login.password) {
     return badRequest(res, "请先填写并保存后台登录配置。");
   }
@@ -1657,7 +1645,7 @@ async function handleCreateJob(req, res) {
   const job = createJob(importRecord, login);
   pushEvent(job, { type: "status", status: "queued", message: "任务已创建", ts: new Date().toISOString() });
 
-  const hasTenantApiKey = Boolean(login.tenantApiKey || state.settings.login?.tenantApiKey || process.env.YIKAO_API_KEY);
+  const hasTenantApiKey = Boolean(login.tenantApiKey || (login.allowEnvFallback ? process.env.YIKAO_API_KEY : ""));
   if (!hasTenantApiKey) {
     pushEvent(job, {
       type: "error",
@@ -1675,28 +1663,58 @@ async function handleCreateJob(req, res) {
   json(res, 200, { jobId: job.id, taskId: job.taskId });
 }
 
-async function handleGetSettings(_req, res) {
-  json(res, 200, state.settings);
-}
-
-async function handleSaveSettings(req, res) {
-  const payload = parseJsonSafe(await readBody(req));
-  const nextSettings = {
-    ...state.settings,
-    login: {
-      ...state.settings.login,
-      ...(payload?.login || {}),
-    },
-  };
-  state.settings = nextSettings;
-  await fs.writeFile(settingsPath, JSON.stringify(nextSettings, null, 2), "utf8");
-  json(res, 200, { ok: true, settings: state.settings });
-}
-
 function getAuthUserFromRequest(auth, req) {
   if (!auth.enabled) return { email: "" };
   const cookies = parseCookies(req.headers.cookie || "");
   return getSessionUser(auth, cookies[auth.cookieName]) || null;
+}
+
+function getYikaoLoginForRequest(req) {
+  const user = getAuthUserFromRequest(auth, req);
+  const login = currentUserLogin({
+    user,
+    userSettings: state.userSettings,
+    legacySettings: state.settings,
+  });
+  return {
+    ...login,
+    allowEnvFallback: !auth.enabled,
+  };
+}
+
+function publicYikaoLogin(login) {
+  return {
+    url: login?.url || "",
+    username: login?.username || "",
+    password: login?.password || "",
+    tenantApiKey: login?.tenantApiKey || "",
+  };
+}
+
+async function handleGetSettings(req, res) {
+  json(res, 200, { ...state.settings, login: publicYikaoLogin(getYikaoLoginForRequest(req)) });
+}
+
+async function handleSaveSettings(req, res) {
+  const payload = parseJsonSafe(await readBody(req));
+  if (!auth.enabled) {
+    const nextSettings = {
+      ...state.settings,
+      login: {
+        ...state.settings.login,
+        ...(payload?.login || {}),
+      },
+    };
+    state.settings = nextSettings;
+    await fs.writeFile(settingsPath, JSON.stringify(nextSettings, null, 2), "utf8");
+    return json(res, 200, { ok: true, settings: state.settings });
+  }
+
+  const user = getAuthUserFromRequest(auth, req);
+  if (!user) return json(res, 401, { error: "请先登录" });
+  saveUserLogin(state.userSettings, user, payload?.login || {});
+  await fs.writeFile(userSettingsPath, JSON.stringify(state.userSettings, null, 2), "utf8");
+  json(res, 200, { ok: true, settings: { ...state.settings, login: publicYikaoLogin(getYikaoLoginForRequest(req)) } });
 }
 
 function requireAdmin(auth, req, res) {
@@ -1787,7 +1805,9 @@ async function handleAuthUsers(auth, req, res, url) {
     const deleted = deleteLocalUser(auth, email);
     if (!deleted) return notFound(res);
     deleteSessionsForEmail(auth, email);
+    delete state.userSettings.users[normalizeEmail(email)];
     await saveAuthUsers(auth);
+    await fs.writeFile(userSettingsPath, JSON.stringify(state.userSettings, null, 2), "utf8");
     return json(res, 200, { ok: true, users: sanitizeUsers(auth.users) });
   }
 
@@ -1848,7 +1868,7 @@ async function handleTaskStepRetry(taskId, stepKey, req, res) {
 
     const formalSession = (task.sessions || []).find((session) => session.sessionType === "formal");
     const courses = normalizeCourseRecords(task.config || {});
-    const login = state.settings.login || {};
+    const login = getYikaoLoginForRequest(req);
     const apiBase = normalizeApiBase(process.env.YIKAO_API_BASE || login.apiBase || "https://eztest.cn");
     const retryLogs = [];
     const emitLog = (message) => retryLogs.push(message);
