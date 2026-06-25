@@ -12,6 +12,9 @@ import {
   hashPassword,
   isAdminUser,
   parseCookies,
+  restoreSessions,
+  serializeSessions,
+  SESSION_MAX_AGE_SECONDS,
   shouldAllowWithoutAuth,
   sanitizeUsers,
   updateLocalUser,
@@ -45,8 +48,37 @@ test("creates parses and clears session cookies", () => {
 
   const cookie = buildLoginCookie(auth, "token-1");
   assert.match(cookie, /easy_exam_session=token-1/);
+  assert.match(cookie, new RegExp(`Max-Age=${SESSION_MAX_AGE_SECONDS}`));
   assert.equal(parseCookies("easy_exam_session=token-1").easy_exam_session, "token-1");
   assert.match(buildLogoutCookie(auth), /Max-Age=0/);
+});
+
+test("persists sessions across auth context recreation", () => {
+  const now = Date.now();
+  const auth = buildAuthContext({
+    env: { APP_LOGIN_EMAIL: "admin@example.com", APP_LOGIN_PASSWORD: "secret123" },
+  });
+  const session = createSession(auth, { email: "admin@example.com", role: "admin" }, now);
+  const saved = serializeSessions(auth, now);
+
+  const restored = buildAuthContext({
+    env: { APP_LOGIN_EMAIL: "admin@example.com", APP_LOGIN_PASSWORD: "secret123" },
+  });
+  restoreSessions(restored, saved, now + 1000);
+
+  assert.deepEqual(restored.sessions.get(session.token).user, { email: "admin@example.com", role: "admin" });
+});
+
+test("expired persisted sessions are not restored", () => {
+  const now = Date.now();
+  const auth = buildAuthContext({
+    env: { APP_LOGIN_EMAIL: "admin@example.com", APP_LOGIN_PASSWORD: "secret123" },
+  });
+  restoreSessions(auth, [
+    { token: "old-token", user: { email: "admin@example.com", role: "admin" }, createdAt: now - 10, expiresAt: now - 1 },
+  ], now);
+
+  assert.equal(auth.sessions.has("old-token"), false);
 });
 
 test("stores coworker users with salted password hashes", async () => {

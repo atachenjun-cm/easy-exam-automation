@@ -1,6 +1,8 @@
 import { pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
 
 export const SESSION_COOKIE = "easy_exam_session";
+export const SESSION_MAX_AGE_SECONDS = 31536000;
+const SESSION_MAX_AGE_MS = SESSION_MAX_AGE_SECONDS * 1000;
 
 export function buildAuthContext({ env = process.env, localConfig = {} } = {}) {
   const email = String(localConfig.email || env.APP_LOGIN_EMAIL || "").trim();
@@ -50,15 +52,21 @@ export async function verifyLogin(auth, email, password) {
   return { email: user.email, role: user.role || "user" };
 }
 
-export function createSession(auth, user = { email: auth.email, role: "admin" }) {
+export function createSession(auth, user = { email: auth.email, role: "admin" }, now = Date.now()) {
   const token = randomBytes(32).toString("base64url");
-  auth.sessions.set(token, { user, createdAt: Date.now() });
+  auth.sessions.set(token, { user, createdAt: now, expiresAt: now + SESSION_MAX_AGE_MS });
   return { token, user };
 }
 
-export function getSessionUser(auth, token) {
+export function getSessionUser(auth, token, now = Date.now()) {
   if (!auth?.enabled || !token) return null;
-  return auth.sessions.get(token)?.user || null;
+  const session = auth.sessions.get(token);
+  if (!session) return null;
+  if (session.expiresAt && session.expiresAt <= now) {
+    auth.sessions.delete(token);
+    return null;
+  }
+  return session.user || null;
 }
 
 export function deleteSession(auth, token) {
@@ -71,6 +79,35 @@ export function deleteSessionsForEmail(auth, email) {
   for (const [token, session] of auth.sessions.entries()) {
     if (normalizeEmail(session.user?.email) === normalizedEmail) auth.sessions.delete(token);
   }
+}
+
+export function serializeSessions(auth, now = Date.now()) {
+  if (!auth?.enabled) return [];
+  return [...auth.sessions.entries()]
+    .filter(([, session]) => !session.expiresAt || session.expiresAt > now)
+    .map(([token, session]) => ({
+      token,
+      user: session.user,
+      createdAt: session.createdAt || now,
+      expiresAt: session.expiresAt || now + SESSION_MAX_AGE_MS,
+    }));
+}
+
+export function restoreSessions(auth, sessions = [], now = Date.now()) {
+  if (!auth?.enabled) return auth;
+  auth.sessions = new Map();
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    const token = String(session?.token || "").trim();
+    if (!token || !session?.user) continue;
+    const expiresAt = Number(session.expiresAt || 0);
+    if (expiresAt && expiresAt <= now) continue;
+    auth.sessions.set(token, {
+      user: session.user,
+      createdAt: Number(session.createdAt || now),
+      expiresAt: expiresAt || now + SESSION_MAX_AGE_MS,
+    });
+  }
+  return auth;
 }
 
 export function isAdminUser(user) {
@@ -146,7 +183,7 @@ function cookieBase(auth, value, options = "") {
 }
 
 export function buildLoginCookie(auth, token) {
-  return cookieBase(auth, token, "; Max-Age=604800");
+  return cookieBase(auth, token, `; Max-Age=${SESSION_MAX_AGE_SECONDS}`);
 }
 
 export function buildLogoutCookie(auth) {

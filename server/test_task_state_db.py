@@ -57,6 +57,12 @@ class TaskStoreTest(unittest.TestCase):
         self.assertEqual(formal["status"], "pending")
         self.assertGreater(detail["progress"], 0)
 
+    def test_paper_bind_step_is_formal_course_session_binding(self):
+        task = self.store.create_task("项目甲", "account-a", {})
+        detail = self.store.get_task(task["taskId"])
+        step = next(item for item in detail["steps"] if item["stepKey"] == "paper_bind")
+        self.assertEqual(step["stepName"], "正式场次绑定科目")
+
     def test_combined_step_requires_both_children(self):
         task = self.store.create_task("项目甲", "account-a", {})
         task_id = task["taskId"]
@@ -73,6 +79,95 @@ class TaskStoreTest(unittest.TestCase):
         finished = self.store.get_task(task_id)
         combined = next(step for step in finished["steps"] if step["stepKey"] == "sessions_auto_rooms")
         self.assertEqual(combined["status"], "success")
+
+    def test_updates_task_config_with_final_course_codes(self):
+        task = self.store.create_task("项目甲", "account-a", {
+            "courses": [{"name": "体育", "code": "20260629-01-01"}]
+        })
+
+        updated = self.store.update_config(task["taskId"], {
+            "courses": [{"name": "体育", "code": "20260629-03-01"}]
+        })
+
+        self.assertEqual(updated["config"]["courses"][0]["code"], "20260629-03-01")
+
+    def test_deletes_task_with_sessions_and_steps(self):
+        task = self.store.create_task("待删除项目", "account-a", {})
+        task_id = task["taskId"]
+        self.store.upsert_session(task_id, "formal", {
+            "session_id": "30001", "name": "待删除项目正式考试"
+        })
+        self.store.update_step(task_id, "formal_session_create", "success", {"message": "已创建"})
+
+        deleted = self.store.delete_task(task_id)
+
+        self.assertTrue(deleted)
+        self.assertEqual(self.store.list_tasks(), [])
+        self.assertEqual(self.store.list_tasks(include_hidden=True), [])
+        self.assertIsNone(self.store.get_task(task_id))
+        self.assertEqual(self.store.list_sessions(), [])
+
+    def test_upserts_candidates_with_custom_fields(self):
+        task = self.store.create_task("候选人扩展字段项目", "account-a", {})
+        self.store.upsert_session(task["taskId"], "formal", {
+            "session_id": "40001", "name": "候选人扩展字段项目正式考试"
+        })
+
+        saved = self.store.upsert_candidates(task["taskId"], "40001", [
+            {
+                "permit": "P001",
+                "full_name": "张三",
+                "identity_id": "",
+                "course_code": "20260629-01-01",
+                "mobile": "13800000000",
+                "email": "a@example.com",
+                "custom_fields": {"报考岗位": "综合岗", "学校": "四川大学"},
+            }
+        ])
+
+        rows = self.store.list_candidates(task["taskId"], "40001")
+        self.assertEqual(saved["savedCount"], 1)
+        self.assertEqual(rows[0]["permit"], "P001")
+        self.assertEqual(rows[0]["custom_fields"], {"报考岗位": "综合岗", "学校": "四川大学"})
+
+    def test_upserts_exam_custom_field_mappings(self):
+        task = self.store.create_task("字段映射项目", "account-a", {})
+        self.store.upsert_session(task["taskId"], "formal", {
+            "session_id": "50001", "name": "字段映射项目正式考试"
+        })
+
+        saved = self.store.upsert_custom_fields(task["taskId"], "50001", [
+            {
+                "field_name": "专业",
+                "field_code": "cf_major",
+                "yikao_field_id": "123",
+                "source_column": "专业",
+                "field_type": "text",
+                "required": False,
+                "order_index": 0,
+            }
+        ])
+        updated = self.store.upsert_custom_fields(task["taskId"], "50001", [
+            {
+                "field_name": "专业",
+                "field_code": "cf_major",
+                "yikao_field_id": "456",
+                "source_column": "专业",
+                "field_type": "text",
+                "required": False,
+                "order_index": 0,
+            }
+        ])
+
+        fields = self.store.list_custom_fields(task["taskId"], "50001")
+        detail = self.store.get_task(task["taskId"])
+        self.assertEqual(saved["savedCount"], 1)
+        self.assertEqual(updated["savedCount"], 1)
+        self.assertEqual(len(fields), 1)
+        self.assertEqual(fields[0]["field_name"], "专业")
+        self.assertEqual(fields[0]["field_code"], "cf_major")
+        self.assertEqual(fields[0]["yikao_field_id"], "456")
+        self.assertEqual(detail["customFields"][0]["field_code"], "cf_major")
 
 
 if __name__ == "__main__":

@@ -204,7 +204,7 @@ def build_generated_courses(subjects, start_dt):
     prefix = start_dt.strftime("%Y%m%d")
     courses = []
     for index, subject in enumerate(subjects, start=1):
-        course_code = f"{prefix}-{index:02d}"
+        course_code = f"{prefix}-01-{index:02d}"
         courses.append(
             {
                 "name": subject,

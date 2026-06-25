@@ -28,7 +28,50 @@ test("authenticated automation jobs use saved user settings instead of request o
   assert.ok(serverSource.includes("const login = auth.enabled ? storedLogin : { ...storedLogin, ...(payload.login || {}) };"));
 });
 
+test("session creation does not enable bluetooth blocking by default", () => {
+  const buildPayloads = serverSource.slice(
+    serverSource.indexOf("function buildSessionPayloads"),
+    serverSource.indexOf("async function runYikaoApiCreationJob"),
+  );
+  assert.equal(buildPayloads.includes("check_bluetooth: true"), false);
+});
+
 test("candidate import forwards optional course_code to EasyExam tenant API", () => {
-  assert.ok(serverSource.includes("course_code: String(candidate.course_code || \"\")"));
-  assert.ok(serverSource.includes("if (!entry.course_code) delete entry.course_code;"));
+  assert.ok(serverSource.includes("buildTenantCandidateEntries(candidates, customFieldMappings)"));
+  assert.ok(serverSource.includes("candidate_tenant_payload.mjs"));
+});
+
+test("candidate import configures selected import fields as visible personal fields before importing", () => {
+  assert.ok(serverSource.includes("const {"));
+  assert.ok(serverSource.includes("selectedImportFields"));
+  assert.ok(serverSource.includes("buildSelectedImportFields(payload?.field_mapping || {}, payload?.custom_fields || [])"));
+  assert.ok(serverSource.includes("excludedPersonalSyncBaseKeys"));
+  assert.ok(serverSource.includes("ensureSessionCustomPersonalFields(login, sessionId, selectedImportFields)"));
+  assert.ok(serverSource.includes("syncImportPersonalFields"));
+  const importHandler = serverSource.slice(serverSource.indexOf("async function handleCandidateImport"));
+  assert.ok(importHandler.indexOf("ensureSessionCustomPersonalFields(login, sessionId, selectedImportFields)") < importHandler.indexOf("postCandidatesToTenant("));
+  assert.ok(importHandler.indexOf("customFieldMappings") < importHandler.indexOf("postCandidatesToTenant("));
+});
+
+test("candidate personal field setup reads original session config and updates by PUT", () => {
+  const setupFn = serverSource.slice(
+    serverSource.indexOf("async function getTenantSessionDetail"),
+    serverSource.indexOf("async function handleCandidateTemplate"),
+  );
+  assert.ok(setupFn.includes("getTenantSessionDetail(login, sessionId)"));
+  assert.ok(setupFn.includes("获取原场次配置"));
+  assert.ok(setupFn.includes("buildSessionPersonalPutPayload"));
+  assert.ok(setupFn.includes('method: "PUT"'));
+  assert.ok(setupFn.includes("场次信息项同步失败"));
+});
+
+test("candidate personal field setup builds PUT payload after merging personal fields", () => {
+  const setupFn = serverSource.slice(
+    serverSource.indexOf("async function ensureSessionCustomPersonalFields"),
+    serverSource.indexOf("async function getSessionImportState"),
+  );
+  assert.ok(setupFn.indexOf("syncImportPersonalFields") < setupFn.indexOf("buildSessionPersonalPutPayload"));
+  assert.ok(setupFn.indexOf("buildSessionPersonalPutPayload") < setupFn.indexOf('method: "PUT"'));
+  assert.ok(setupFn.includes('method: "PUT"'));
+  assert.ok(setupFn.includes("场次信息项同步失败"));
 });

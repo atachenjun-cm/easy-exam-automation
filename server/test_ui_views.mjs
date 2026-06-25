@@ -66,9 +66,62 @@ test("candidate page loads and preselects task-scoped sessions", () => {
 
 test("candidate import supports optional course code mapping", () => {
   assert.ok(html.includes('id="candidateMapCourseCode"'));
+  assert.ok(html.includes('id="candidateMapMobile"'));
+  assert.ok(html.includes('id="candidateMapEmail"'));
+  assert.ok(html.includes("手机号码（选填）"));
   assert.ok(html.includes("<th>科目编号</th>"));
   assert.ok(html.includes("course_code: data.mapping?.course_code || \"\""));
-  assert.ok(html.includes("candidateUiState.candidates.map(({ permit, full_name, identity_id, course_code })"));
+  assert.ok(html.includes("candidateUiState.candidates.map(({ permit, full_name, identity_id, course_code, mobile, email, custom_fields })"));
+});
+
+test("candidate preview and import payload include mapped phone and email", () => {
+  const renderResultBody = html.slice(
+    html.indexOf("function renderCandidateResult()"),
+    html.indexOf("async function parseCandidateFile"),
+  );
+  assert.ok(renderResultBody.includes("fixedPreviewFields"));
+  assert.ok(renderResultBody.includes('key: "mobile"'));
+  assert.ok(renderResultBody.includes('key: "email"'));
+
+  const importBody = html.slice(
+    html.indexOf("async function importCandidatesToSession()"),
+    html.indexOf("async function splitRoomsAutomatically"),
+  );
+  assert.ok(importBody.includes("candidateUiState.candidates.map(({ permit, full_name, identity_id, course_code, mobile, email, custom_fields })"));
+  assert.ok(importBody.includes("mobile,"));
+  assert.ok(importBody.includes("email,"));
+});
+
+test("candidate import supports custom field selection and local save payload", () => {
+  assert.ok(html.includes("客户名单自定义字段"));
+  assert.ok(html.includes('id="selectAllCustomFieldsBtn"'));
+  assert.ok(html.includes('id="clearCustomFieldsBtn"'));
+  assert.ok(html.includes('id="addCustomFieldBtn"'));
+  assert.ok(html.includes("custom_field_candidates"));
+  assert.ok(html.includes("selectedCustomFields()"));
+  assert.ok(html.includes("custom_fields: buildCustomFieldValues(row)"));
+  assert.ok(html.includes("自定义字段已随考生导入请求发送到易考"));
+});
+
+test("candidate mapping allows permit from identity or phone while catching missing course code for formal multi-course tasks", () => {
+  assert.equal(html.includes("字段映射重复"), false);
+  assert.ok(html.includes("当前考试任务包含"));
+  assert.ok(html.includes("必须映射“科目编号”"));
+  assert.ok(html.includes("candidateUiState.taskCourses"));
+});
+
+test("candidate custom fields keep source columns already used by base mappings", () => {
+  assert.equal(html.includes(".filter((field) => field.manual || !fixed.has(field.source_column))"), false);
+  assert.equal(html.includes("if (!column || fixed.has(column) || existingSources.has(column)) return;"), false);
+  assert.ok(html.includes("同一个 Excel 字段可同时用于准考证号和考生信息项"));
+});
+
+test("candidate mapping canonicalizes phone and email aliases in fixed fields", () => {
+  assert.ok(html.includes("function canonicalImportFieldName"));
+  assert.ok(html.includes('return "手机号码"'));
+  assert.ok(html.includes('return "邮箱"'));
+  assert.ok(html.includes("candidateMapMobile.value"));
+  assert.ok(html.includes("candidateMapEmail.value"));
 });
 
 test("local login page and logout controls are present", () => {
@@ -96,4 +149,25 @@ test("user management page is present for admin account provisioning", () => {
   assert.ok(html.includes('id="userPasswordInput"'));
   assert.ok(html.includes('id="userRows"'));
   assert.ok(html.includes("UserManagementPage"));
+});
+
+test("project management supports deleting projects", () => {
+  assert.ok(html.includes('data-action="delete"'));
+  assert.ok(html.includes("同步删除易考中的正式考试/试考场次"));
+  assert.ok(html.includes('method: "DELETE"'));
+  assert.ok(html.includes("/api/tasks/"));
+});
+
+test("exam detail progress cards include paper binding and grouped candidate flows", () => {
+  assert.ok(html.includes("buildTaskDisplaySteps(task)"));
+  assert.ok(html.includes("试卷绑定"));
+  assert.ok(html.includes("试考考生导入 & 自动分班"));
+  assert.ok(html.includes("正式考试考生导入 & 自动分班"));
+  assert.ok(html.includes("data-monitor-download"));
+  assert.ok(html.includes("下载监考账号"));
+  assert.ok(html.includes("触发试卷绑定"));
+  assert.ok(html.includes('data-trigger-step="paper_form_bind"'));
+  assert.ok(html.includes("paperFormBind"));
+  assert.ok(html.includes('stepName: "试卷绑定"'));
+  assert.ok(html.includes("/steps/paper_form_bind/retry"));
 });

@@ -1450,6 +1450,7 @@
       }
 
       .mapping-card select,
+      .custom-field-name,
       .session-select {
         width: 100%;
         min-height: 44px;
@@ -1462,6 +1463,7 @@
       }
 
       .mapping-card select:focus,
+      .custom-field-name:focus,
       .session-select:focus,
       .room-size-card .field-input:focus {
         outline: 0;
@@ -1486,6 +1488,77 @@
         background: #0071e3;
         border-color: #0071e3;
         color: #ffffff;
+      }
+
+      .custom-field-panel {
+        margin-top: 14px;
+        border: 1px solid #edf1f6;
+        border-radius: 16px;
+        padding: 14px;
+        background: #fbfdff;
+      }
+
+      .custom-field-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+
+      .custom-field-title {
+        color: #253044;
+        font-size: 14px;
+        font-weight: 850;
+      }
+
+      .custom-field-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      .custom-field-actions .btn {
+        min-height: 34px;
+        border-radius: 10px;
+        padding: 6px 10px;
+        font-size: 12px;
+      }
+
+      .custom-field-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .custom-field-row {
+        display: grid;
+        grid-template-columns: 28px minmax(100px, 1fr) minmax(120px, 1fr) minmax(80px, 1fr);
+        gap: 10px;
+        align-items: center;
+        padding: 10px;
+        border: 1px solid #e5eaf2;
+        border-radius: 12px;
+        background: #ffffff;
+      }
+
+      .custom-field-source,
+      .custom-field-sample {
+        color: #4b5563;
+        font-size: 13px;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .custom-field-empty {
+        color: var(--muted);
+        font-size: 13px;
+        padding: 12px;
+        border: 1px dashed #d8dee8;
+        border-radius: 12px;
+        background: #ffffff;
       }
 
       .candidate-actions .btn.primary:hover {
@@ -1793,6 +1866,9 @@
       .task-step-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
       .task-step-name { font-weight: 800; line-height: 1.45; }
       .task-step-times { margin-top: 12px; color: var(--muted); font-size: 12px; line-height: 1.75; }
+      .task-step-actions { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+      .task-step-action { border: 1px solid var(--line); background: #fff; color: var(--blue); border-radius: 9px; padding: 7px 10px; font-weight: 800; cursor: pointer; }
+      .task-step-action:disabled { color: var(--muted); background: #f4f7fb; cursor: not-allowed; }
       .task-step-detail { display: none; margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; font-size: 12px; color: #475569; white-space: pre-wrap; }
       .task-step-card.open .task-step-detail { display: block; }
       .retry-step { margin-top: 10px; border: 1px solid #f0a5a5; background: #fff; color: #c62828; border-radius: 9px; padding: 6px 10px; font-weight: 750; cursor: pointer; }
@@ -2207,7 +2283,7 @@
                 <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M12 9v4M12 17h.01M10.3 4.6 2.7 18a2 2 0 0 0 1.7 3h15.2a2 2 0 0 0 1.7-3L13.7 4.6a2 2 0 0 0-3.4 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
                 </svg>
-                <span>最终创建前会停在易考确认页，重点核对考试时间、试卷绑定、监控项和考生信息字段。</span>
+                <span>最终创建前会停在易考确认页，重点核对考试时间、正式场次科目绑定、监控项和考生信息字段。</span>
               </div>
 
               <div class="capture-panel">
@@ -2285,8 +2361,8 @@
                       <span>
                         <span class="candidate-upload-status">文件上传成功</span>
                         <span class="drop-title" id="candidateDropTitle">上传客户原始名单</span>
-                        <span class="drop-note">支持 .xlsx、.xls、.csv；整理后固定输出准考证号 / 姓名 / 身份证号，可选科目编号。</span>
-                        <span class="candidate-help-box">支持 .xlsx、.xls、.csv 格式<br />整理后应含字段：准考证号 / 姓名 / 身份证号；可选字段：科目编号</span>
+                        <span class="drop-note">支持 .xlsx、.xls、.csv；固定字段映射后，可选择客户自定义字段一起保存。</span>
+                        <span class="candidate-help-box">支持 .xlsx、.xls、.csv 格式<br />必填字段：准考证号 / 姓名；选填字段：身份证号 / 科目编号 / 手机号 / 邮箱</span>
                       </span>
                       <input class="hidden-input" id="candidateFileInput" type="file" accept=".xlsx,.xls,.csv" />
                     </label>
@@ -2305,7 +2381,7 @@
                         <select id="candidateMapFullName"></select>
                       </label>
                       <label class="mapping-card">
-                        <span class="field-label">身份证号</span>
+                        <span class="field-label">身份证号（选填）</span>
                         <select id="candidateMapIdentityId"></select>
                       </label>
                       <label class="mapping-card">
@@ -2316,6 +2392,30 @@
                         <span class="field-label">科目编号（选填）</span>
                         <select id="candidateMapCourseCode"></select>
                       </label>
+                      <label class="mapping-card">
+                        <span class="field-label">手机号码（选填）</span>
+                        <select id="candidateMapMobile"></select>
+                      </label>
+                      <label class="mapping-card">
+                        <span class="field-label">邮箱（选填）</span>
+                        <select id="candidateMapEmail"></select>
+                      </label>
+                    </div>
+                    <div class="custom-field-panel" id="candidateCustomFieldPanel">
+                      <div class="custom-field-head">
+                        <div>
+                          <div class="custom-field-title">客户名单自定义字段</div>
+                          <div class="panel-meta">固定字段不会重复展示；最多选择 30 个字段。</div>
+                        </div>
+                        <div class="custom-field-actions">
+                          <button class="btn" id="selectAllCustomFieldsBtn" type="button">全选字段</button>
+                          <button class="btn" id="clearCustomFieldsBtn" type="button">清空选择</button>
+                          <button class="btn" id="addCustomFieldBtn" type="button">添加自定义字段</button>
+                        </div>
+                      </div>
+                      <div class="custom-field-list" id="candidateCustomFieldList">
+                        <div class="custom-field-empty">上传名单后自动读取客户表头字段。</div>
+                      </div>
                     </div>
                     <div class="candidate-actions" style="margin-top: 12px;">
                       <button class="btn" id="candidateDownloadBtn" type="button" disabled>下载导入模板</button>
@@ -2678,6 +2778,12 @@
       const candidateMapIdentityId = document.querySelector("#candidateMapIdentityId");
       const candidateMapPermit = document.querySelector("#candidateMapPermit");
       const candidateMapCourseCode = document.querySelector("#candidateMapCourseCode");
+      const candidateMapMobile = document.querySelector("#candidateMapMobile");
+      const candidateMapEmail = document.querySelector("#candidateMapEmail");
+      const candidateCustomFieldList = document.querySelector("#candidateCustomFieldList");
+      const selectAllCustomFieldsBtn = document.querySelector("#selectAllCustomFieldsBtn");
+      const clearCustomFieldsBtn = document.querySelector("#clearCustomFieldsBtn");
+      const addCustomFieldBtn = document.querySelector("#addCustomFieldBtn");
       const candidateDownloadBtn = document.querySelector("#candidateDownloadBtn");
       const loadSessionsBtn = document.querySelector("#loadSessionsBtn");
       const candidateIssues = document.querySelector("#candidateIssues");
@@ -2845,7 +2951,7 @@
                 <div class="project-card-head"><div><div class="project-title">${safeText(task.projectName)}</div><div class="task-meta">客户名称：${safeText(task.customerName || "未记录")}<br>来源账号：${safeText(task.sourceAccount || "未记录")}<br>考试任务：1 · 正式场次：${formalCount} · 试考场次：${trialCount}<br>更新时间：${formatTaskTime(task.updatedAt)}</div></div>${statusChip(task.status)}</div>
                 <div class="mini-progress"><span style="width:${Math.max(0, Math.min(100, Number(task.progress || 0)))}%"></span></div>
                 <div class="task-meta" style="margin-top:7px;">当前进度 ${Number(task.progress || 0).toFixed(1)}%</div>
-                <div class="view-actions" style="margin-top:12px;"><button class="btn project-action" data-action="view" type="button">查看</button><button class="btn project-action" data-action="edit" type="button">编辑</button><button class="btn project-action" data-action="auto" type="button">进入自动配置</button><button class="btn project-action" data-action="archive" type="button">归档</button></div>
+                <div class="view-actions" style="margin-top:12px;"><button class="btn project-action" data-action="view" type="button">查看</button><button class="btn project-action" data-action="edit" type="button">编辑</button><button class="btn project-action" data-action="auto" type="button">进入自动配置</button><button class="btn project-action" data-action="delete" type="button">删除</button></div>
               </article>`;
             }).join("")
           : `<div class="empty-state">暂无匹配项目</div>`;
@@ -2858,6 +2964,15 @@
           try { return await fetchJson(`/api/tasks/${encodeURIComponent(task.taskId)}?_=${Date.now()}`); }
           catch { return task; }
         }));
+        renderProjectList();
+      }
+
+      async function deleteProjectCard(taskId) {
+        const task = taskViewState.tasks.find((item) => item.taskId === taskId);
+        const name = task?.projectName || taskId;
+        if (!window.confirm(`确认删除「${name}」吗？系统会同步删除易考中的正式考试/试考场次，并从项目管理和考试列表中移除。`)) return;
+        await fetchJson(`/api/tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" });
+        taskViewState.tasks = taskViewState.tasks.filter((item) => item.taskId !== taskId);
         renderProjectList();
       }
 
@@ -2899,6 +3014,125 @@
         renderExamList();
       }
 
+      function cloneTaskStep(step, overrides = {}) {
+        return {
+          stepKey: "",
+          stepName: "",
+          status: "pending",
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+          logs: [],
+          subStatus: {},
+          ...(step || {}),
+          ...overrides,
+        };
+      }
+
+      function statusRank(status) {
+        return {
+          failed: 6,
+          running: 5,
+          waiting_manual: 4,
+          pending: 3,
+          skipped: 2,
+          success: 1,
+        }[status] || 3;
+      }
+
+      function combineStepStatus(statuses) {
+        const normalized = statuses.filter(Boolean);
+        if (!normalized.length) return "pending";
+        return normalized.slice().sort((a, b) => statusRank(b) - statusRank(a))[0];
+      }
+
+      function earliestTime(values) {
+        const times = values.filter(Boolean).map((value) => Date.parse(value)).filter(Number.isFinite);
+        if (!times.length) return null;
+        return new Date(Math.min(...times)).toISOString();
+      }
+
+      function latestTime(values) {
+        const times = values.filter(Boolean).map((value) => Date.parse(value)).filter(Number.isFinite);
+        if (!times.length) return null;
+        return new Date(Math.max(...times)).toISOString();
+      }
+
+      function sumDurations(values) {
+        const durations = values.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0);
+        return durations.length ? durations.reduce((sum, value) => sum + value, 0) : null;
+      }
+
+      function getTaskSessionByType(task, sessionType) {
+        return (task.sessions || []).find((session) => session.sessionType === sessionType) || null;
+      }
+
+      function buildMonitorDownloadAction(task, sessionType) {
+        const session = getTaskSessionByType(task, sessionType);
+        const sessionId = String(session?.session_id || "");
+        const disabled = !sessionId || Number(session?.roomCount || 0) <= 0;
+        const title = disabled ? "场次完成自动分班后可下载监考账号" : "下载监考账号";
+        return `<div class="task-step-actions"><button class="task-step-action" data-monitor-download="${safeText(sessionType)}" data-session-id="${safeText(sessionId)}" data-session-name="${safeText(session?.name || "")}" type="button" ${disabled ? "disabled" : ""} title="${safeText(title)}">下载监考账号</button></div>`;
+      }
+
+      function buildGroupedCandidateStep(task, stepMap, sessionType) {
+        const importKey = sessionType === "formal" ? "formal_candidate_import" : "trial_candidate_import";
+        const subKey = sessionType === "formal" ? "formalExamStatus" : "trialExamStatus";
+        const title = sessionType === "formal" ? "正式考试考生导入 & 自动分班" : "试考考生导入 & 自动分班";
+        const importStep = stepMap.get(importKey);
+        const roomStep = stepMap.get("sessions_auto_rooms");
+        const monitorStep = stepMap.get("sessions_invigilator_export");
+        const roomStatus = roomStep?.subStatus?.[subKey] || roomStep?.status;
+        const monitorStatus = monitorStep?.subStatus?.[subKey] || monitorStep?.status;
+        const groupedLogs = [importStep, roomStep, monitorStep].flatMap((step) => step?.logs || []);
+        const detailLines = [
+          `考生导入：${taskStatusLabels[importStep?.status] || "未开始"}`,
+          `自动分班：${taskStatusLabels[roomStatus] || "未开始"}`,
+          `监考账号：${taskStatusLabels[monitorStatus] || "未开始"}`,
+        ].join("\n");
+        return cloneTaskStep(importStep, {
+          stepKey: `${sessionType}_candidate_import_and_rooms`,
+          stepName: title,
+          status: combineStepStatus([importStep?.status, roomStatus]),
+          startedAt: earliestTime([importStep?.startedAt, roomStep?.startedAt, monitorStep?.startedAt]),
+          completedAt: latestTime([importStep?.completedAt, roomStep?.completedAt, monitorStep?.completedAt]),
+          durationMs: sumDurations([importStep?.durationMs, roomStep?.durationMs, monitorStep?.durationMs]),
+          logs: groupedLogs,
+          subStatus: {},
+          extraDetail: detailLines,
+          monitorActionHtml: buildMonitorDownloadAction(task, sessionType),
+        });
+      }
+
+      function buildTaskDisplaySteps(task) {
+        const sourceSteps = task.steps || [];
+        const stepMap = new Map(sourceSteps.map((step) => [step.stepKey, step]));
+        const display = [];
+        ["requirement_parse", "formal_session_create", "trial_session_create", "course_create"].forEach((key) => {
+          if (stepMap.has(key)) display.push(cloneTaskStep(stepMap.get(key)));
+        });
+        if (stepMap.has("paper_bind")) {
+          display.push(cloneTaskStep(stepMap.get("paper_bind"), { stepName: "正式场次绑定科目" }));
+        }
+        const paperState = task.config?.paperFormBind || {};
+        display.push(cloneTaskStep(null, {
+          stepKey: "paper_bind_display",
+          stepName: "试卷绑定",
+          status: paperState.status || "pending",
+          startedAt: paperState.startedAt || null,
+          completedAt: paperState.completedAt || null,
+          durationMs: paperState.durationMs || null,
+          errorMessage: paperState.errorMessage || "",
+          triggerActionHtml: `<div class="task-step-actions"><button class="task-step-action" data-trigger-step="paper_form_bind" type="button">${paperState.status === "failed" ? "重试试卷绑定" : "触发试卷绑定"}</button></div>`,
+          logs: Array.isArray(paperState.logs) && paperState.logs.length
+            ? paperState.logs
+            : [{ time: null, message: "等待正式场次绑定科目完成后处理试卷绑定。" }],
+        }));
+        display.push(buildGroupedCandidateStep(task, stepMap, "trial"));
+        display.push(buildGroupedCandidateStep(task, stepMap, "formal"));
+        return display;
+      }
+
       function renderTaskDetail(task) {
         taskViewState.currentTaskId = task.taskId;
         taskDetailSubtitle.textContent = task.projectName || "";
@@ -2929,22 +3163,51 @@
             <div class="task-session-actions"><button class="btn primary" data-candidate-task-id="${safeText(task.taskId)}" data-session-id="${safeText(session.session_id || "")}" type="button" ${session.session_id ? "" : "disabled"}>管理考生</button></div>
           </article>`;
         }).join("");
-        taskStepGrid.innerHTML = (task.steps || []).map((step) => {
+        taskStepGrid.innerHTML = buildTaskDisplaySteps(task).map((step) => {
           const sub = step.subStatus || {};
           const subHtml = Object.keys(sub).length
             ? `<div>正式考试：${taskStatusLabels[sub.formalExamStatus] || "未开始"}<br>试考：${taskStatusLabels[sub.trialExamStatus] || "未开始"}</div>` : "";
           const logs = (step.logs || []).map((log) => `${formatTaskTime(log.time)} ${log.message}`).join("\n") || "暂无执行日志";
-          const stepStatus = step.stepKey === "paper_bind" && step.status === "waiting_manual"
-            ? `<span class="status-chip waiting_manual">科目已创建，待试卷绑定</span>`
-            : statusChip(step.status);
+          const stepStatus = statusChip(step.status);
           return `<article class="task-step-card ${safeText(step.status)}" data-step-key="${safeText(step.stepKey)}">
             <div class="task-step-head"><div class="task-step-name">${safeText(step.stepName)}</div>${stepStatus}</div>
             <div class="task-step-times">开始：${formatTaskTime(step.startedAt)}<br>完成：${formatTaskTime(step.completedAt)}<br>耗时：${formatDuration(step.durationMs)}</div>
-            <div class="task-step-detail">${subHtml}${step.errorMessage ? `<div style="color:#c62828;margin-top:8px;">${safeText(step.errorMessage)}</div>` : ""}<div style="margin-top:8px;">${safeText(logs)}</div>${step.status === "failed" || (step.stepKey === "paper_bind" && step.status === "waiting_manual") ? `<button class="retry-step" data-retry-step="${safeText(step.stepKey)}" type="button">${step.stepKey === "paper_bind" && step.status === "waiting_manual" ? "继续绑定" : "重试此步骤"}</button>` : ""}</div>
+            ${step.monitorActionHtml || ""}
+            ${step.triggerActionHtml || ""}
+            <div class="task-step-detail">${subHtml}${step.extraDetail ? `<div>${safeText(step.extraDetail)}</div>` : ""}${step.errorMessage ? `<div style="color:#c62828;margin-top:8px;">${safeText(step.errorMessage)}</div>` : ""}<div style="margin-top:8px;">${safeText(logs)}</div>${step.status === "failed" || (step.stepKey === "paper_bind" && step.status === "waiting_manual") ? `<button class="retry-step" data-retry-step="${safeText(step.stepKey)}" type="button">${step.stepKey === "paper_bind" && step.status === "waiting_manual" ? "继续绑定正式场次科目" : "重试此步骤"}</button>` : ""}</div>
           </article>`;
         }).join("");
-        const stepLogs = (task.steps || []).flatMap((step) => (step.logs || []).map((log) => ({ ...log, stepName: step.stepName })));
+        const syntheticLogs = task.config?.paperFormBind?.logs?.length
+          ? task.config.paperFormBind.logs.map((log) => ({ ...log, stepName: "试卷绑定" }))
+          : [];
+        const stepLogs = [
+          ...(task.steps || []).flatMap((step) => (step.logs || []).map((log) => ({ ...log, stepName: step.stepName }))),
+          ...syntheticLogs,
+        ];
         examExecutionLogs.innerHTML = stepLogs.length ? stepLogs.map((log) => `<div class="log"><div>[${safeText(log.stepName)}] ${safeText(log.message)}</div><div class="log-time">${formatTaskTime(log.time)}</div></div>`).join("") : `<div class="empty-state">暂无执行日志</div>`;
+      }
+
+      async function downloadTaskMonitorAccounts(button) {
+        const sessionId = String(button.dataset.sessionId || "");
+        if (!sessionId) throw new Error("缺少场次 session_id");
+        const sessionName = String(button.dataset.sessionName || "");
+        const payload = await fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}/monitor-accounts?name=${encodeURIComponent(sessionName)}`);
+        const response = await fetch(`${runtime.apiBase}/api/rooms/monitor-accounts/excel`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || "监考账号 Excel 生成失败");
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = monitorAccountFileName(payload.session);
+        link.click();
+        URL.revokeObjectURL(url);
       }
 
       async function openTaskDetail(taskId) {
@@ -3127,12 +3390,16 @@
           identity_id: "",
           permit: "",
           course_code: "",
+          mobile: "",
+          email: "",
         },
+        customFields: [],
         candidates: [],
         errors: [],
         warnings: [],
         sessions: [],
         selectedSession: null,
+        taskCourses: [],
         rooms: [],
         roomProgressbar: null,
         monitorAccounts: [],
@@ -3206,6 +3473,103 @@
         fillMappingSelect(candidateMapIdentityId, candidateUiState.mapping.identity_id);
         fillMappingSelect(candidateMapPermit, candidateUiState.mapping.permit);
         fillMappingSelect(candidateMapCourseCode, candidateUiState.mapping.course_code);
+        fillMappingSelect(candidateMapMobile, candidateUiState.mapping.mobile);
+        fillMappingSelect(candidateMapEmail, candidateUiState.mapping.email);
+        renderCustomFieldControls();
+      }
+
+      const candidateDisallowedCustomFieldNames = new Set(["姓名", "身份证号", "证件号", "准考证号", "科目编号", "科目名称"]);
+      const candidateMobileFieldAliases = new Set(["手机号码", "手机号", "手机", "联系电话", "电话", "mobile", "phone"]);
+      const candidateEmailFieldAliases = new Set(["邮箱", "邮箱地址", "电子邮箱", "电子邮件", "邮件", "email", "mail"]);
+
+      function normalizeCandidateHeader(value) {
+        return String(value || "").trim().replace(/\s+/g, "").toLowerCase();
+      }
+
+      function canonicalImportFieldName(value) {
+        const raw = String(value || "").trim();
+        const normalized = normalizeCandidateHeader(raw);
+        if ([...candidateMobileFieldAliases].some((alias) => normalizeCandidateHeader(alias) === normalized)) return "手机号码";
+        if ([...candidateEmailFieldAliases].some((alias) => normalizeCandidateHeader(alias) === normalized)) return "邮箱";
+        return raw;
+      }
+
+      function firstRowSample(sourceColumn) {
+        if (!sourceColumn) return "";
+        const row = candidateUiState.rawRows.find((item) => String(item[sourceColumn] ?? "").trim());
+        return String(row?.[sourceColumn] ?? "").trim();
+      }
+
+      function isCustomFieldSourceAllowed(column) {
+        const canonical = canonicalImportFieldName(column);
+        return !candidateDisallowedCustomFieldNames.has(canonical) && canonical !== "手机号码" && canonical !== "邮箱";
+      }
+
+      function normalizeCustomFields() {
+        candidateUiState.customFields = candidateUiState.customFields
+          .filter((field) => field.manual || isCustomFieldSourceAllowed(field.source_column))
+          .slice(0, 60);
+        const existingSources = new Set(candidateUiState.customFields.map((field) => field.source_column).filter(Boolean));
+        candidateUiState.columns.forEach((column) => {
+          if (!column || !isCustomFieldSourceAllowed(column) || existingSources.has(column)) return;
+          candidateUiState.customFields.push({ source_column: column, target_name: column, enabled: false, manual: false });
+          existingSources.add(column);
+        });
+      }
+
+      function selectedCustomFields() {
+        return candidateUiState.customFields
+          .filter((field) => field.enabled)
+          .map((field) => ({
+          source_column: String(field.source_column || "").trim(),
+            target_name: canonicalImportFieldName(field.target_name),
+            enabled: true,
+            manual: Boolean(field.manual),
+          }));
+      }
+
+      function buildCustomFieldValues(row) {
+        return selectedCustomFields().reduce((result, field) => {
+          result[field.target_name] = field.source_column ? String(row[field.source_column] ?? "").trim() : "";
+          return result;
+        }, {});
+      }
+
+      function validateCustomFieldsClient() {
+        const errors = [];
+        const seen = new Set();
+        const fields = selectedCustomFields();
+        if (fields.length > 30) errors.push("自定义字段最多支持 30 个");
+        fields.forEach((field, index) => {
+          if (!field.target_name) errors.push(`第 ${index + 1} 个自定义字段名称不能为空`);
+          if (candidateDisallowedCustomFieldNames.has(field.target_name)) errors.push(`自定义字段不能作为导入信息项：${field.target_name}`);
+          if (seen.has(field.target_name)) errors.push(`自定义字段名称重复：${field.target_name}`);
+          seen.add(field.target_name);
+        });
+        return errors;
+      }
+
+      function renderCustomFieldControls() {
+        normalizeCustomFields();
+        if (!candidateUiState.columns.length) {
+          candidateCustomFieldList.innerHTML = '<div class="custom-field-empty">上传名单后自动读取客户表头字段。</div>';
+          return;
+        }
+        if (!candidateUiState.customFields.length) {
+          candidateCustomFieldList.innerHTML = '<div class="custom-field-empty">没有可选自定义字段；同一个 Excel 字段可同时用于准考证号和考生信息项。</div>';
+          return;
+        }
+        candidateCustomFieldList.innerHTML = candidateUiState.customFields
+          .map(
+            (field, index) => `
+              <div class="custom-field-row" data-custom-field-index="${index}">
+                <input type="checkbox" data-custom-field-toggle="${index}" ${field.enabled ? "checked" : ""} aria-label="是否导入 ${escapeHtml(field.target_name || field.source_column)}" />
+                <div class="custom-field-source" title="${escapeHtml(field.source_column || field.target_name)}">${escapeHtml(field.source_column || "手动添加")}</div>
+                <input class="custom-field-name" data-custom-field-name="${index}" value="${escapeHtml(field.target_name || "")}" placeholder="导入字段名" />
+                <div class="custom-field-sample" title="${escapeHtml(firstRowSample(field.source_column))}">${escapeHtml(firstRowSample(field.source_column) || "空")}</div>
+              </div>`,
+          )
+          .join("");
       }
 
       function rebuildCandidatesFromMapping() {
@@ -3214,12 +3578,18 @@
           identity_id: candidateMapIdentityId.value,
           permit: candidateMapPermit.value,
           course_code: candidateMapCourseCode.value,
+          mobile: candidateMapMobile.value,
+          email: candidateMapEmail.value,
         };
+        normalizeCustomFields();
         candidateUiState.candidates = candidateUiState.rawRows.map((row) => ({
           permit: String(row[candidateUiState.mapping.permit] ?? "").trim(),
           full_name: String(row[candidateUiState.mapping.full_name] ?? "").trim(),
           identity_id: String(row[candidateUiState.mapping.identity_id] ?? "").trim(),
           course_code: String(row[candidateUiState.mapping.course_code] ?? "").trim(),
+          mobile: String(row[candidateUiState.mapping.mobile] ?? "").trim(),
+          email: String(row[candidateUiState.mapping.email] ?? "").trim(),
+          custom_fields: buildCustomFieldValues(row),
           __row: row.__row,
         }));
         const validation = validateCandidatesClient(candidateUiState.candidates, candidateUiState.mapping);
@@ -3231,14 +3601,19 @@
       function validateCandidatesClient(candidates, mapping) {
         const errors = [];
         const warnings = [];
-        ["permit", "full_name", "identity_id"].forEach((field) => {
+        ["permit", "full_name"].forEach((field) => {
           if (!mapping[field]) errors.push(`缺少字段映射：${field}`);
         });
+        const taskCourses = Array.isArray(candidateUiState.taskCourses) ? candidateUiState.taskCourses : [];
+        const isTrialSession = candidateUiState.selectedSession?.sessionType === "trial";
+        if (!isTrialSession && taskCourses.length > 1 && !mapping.course_code) {
+          errors.push(`当前考试任务包含 ${taskCourses.length} 个科目，必须映射“科目编号”。`);
+        }
         const permitRows = new Map();
         const identityRows = new Map();
         candidates.forEach((candidate, index) => {
           const rowNum = candidate.__row || index + 2;
-          ["permit", "full_name", "identity_id"].forEach((field) => {
+          ["permit", "full_name"].forEach((field) => {
             if (!String(candidate[field] || "").trim()) {
               errors.push(`第 ${rowNum} 行缺少 ${field}`);
             }
@@ -3248,6 +3623,9 @@
           }
           if (/^\s*\d+(?:\.\d+)?[eE]\+?\d+\s*$/.test(candidate.permit || "")) {
             errors.push(`第 ${rowNum} 行 permit 为科学计数法格式，请修正原始文件后再导入`);
+          }
+          if (!isTrialSession && taskCourses.length > 1 && !String(candidate.course_code || "").trim()) {
+            errors.push(`第 ${rowNum} 行缺少科目编号；多科目考试需要填写对应 course_code。`);
           }
           if (candidate.permit) permitRows.set(candidate.permit, [...(permitRows.get(candidate.permit) || []), rowNum]);
           if (candidate.identity_id) {
@@ -3260,6 +3638,7 @@
         for (const [identityId, rows] of identityRows.entries()) {
           if (rows.length > 1) errors.push(`证件号重复：${identityId}，行号：${rows.join("、")}`);
         }
+        errors.push(...validateCustomFieldsClient());
         return { errors, warnings };
       }
 
@@ -3267,7 +3646,7 @@
         const emptyCount = candidateUiState.candidates.reduce(
           (sum, row) =>
             sum +
-            ["permit", "full_name", "identity_id"].filter((field) => !String(row[field] || "").trim()).length,
+            ["permit", "full_name"].filter((field) => !String(row[field] || "").trim()).length,
           0,
         );
         const duplicateCount = (field) => {
@@ -3302,15 +3681,30 @@
         candidateDuplicatePermit.textContent = String(stats.duplicatePermit);
         candidateDuplicateIdentity.textContent = String(stats.duplicateIdentity);
         candidateErrorRows.textContent = String(stats.errorRows);
+        const fixedPreviewFields = [
+          { key: "permit", label: "准考证号", selected: true },
+          { key: "full_name", label: "姓名", selected: true },
+          { key: "identity_id", label: "身份证号", selected: true },
+          { key: "course_code", label: "科目编号", selected: true },
+          { key: "mobile", label: "手机号码", selected: Boolean(candidateUiState.mapping.mobile) },
+          { key: "email", label: "邮箱", selected: Boolean(candidateUiState.mapping.email) },
+        ].filter((field) => field.selected);
+        const customPreviewFields = selectedCustomFields();
+        const previewTable = candidatePreviewRows.closest("table");
+        previewTable.querySelector("thead tr").innerHTML = fixedPreviewFields.map((field) => field.label)
+          .concat(customPreviewFields.map((field) => field.target_name))
+          .map((header) => `<th>${escapeHtml(header)}</th>`)
+          .join("");
         candidatePreviewRows.innerHTML = candidateUiState.candidates.length
           ? candidateUiState.candidates
               .slice(0, 10)
-              .map(
-                (row) =>
-                  `<tr><td>${escapeHtml(row.permit)}</td><td>${escapeHtml(row.full_name)}</td><td>${escapeHtml(row.identity_id)}</td><td>${escapeHtml(row.course_code || "")}</td></tr>`,
-              )
+              .map((row) => {
+                const cells = fixedPreviewFields.map((field) => row[field.key] || "")
+                  .concat(customPreviewFields.map((field) => row.custom_fields?.[field.target_name] || ""));
+                return `<tr>${cells.map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`;
+              })
               .join("")
-          : '<tr><td colspan="4">等待上传客户名单</td></tr>';
+          : `<tr><td colspan="${fixedPreviewFields.length + customPreviewFields.length}">等待上传客户名单</td></tr>`;
 
         const issues = [
           ...candidateUiState.errors.map((message) => ({ message, level: "error" })),
@@ -3324,7 +3718,7 @@
                 .join("")
             : '<div class="candidate-issue success">名单校验通过<br><span class="panel-meta">未发现错误或重复数据，数据可正常导入。</span></div>';
 
-        const mappingComplete = ["full_name", "identity_id", "permit"].every((field) =>
+        const mappingComplete = ["full_name", "permit"].every((field) =>
           String(candidateUiState.mapping[field] || "").trim(),
         );
         const isValid = candidateUiState.candidates.length > 0 && mappingComplete && candidateUiState.errors.length === 0;
@@ -3363,9 +3757,15 @@
           identity_id: data.mapping?.identity_id || "",
           permit: data.mapping?.permit || "",
           course_code: data.mapping?.course_code || "",
+          mobile: data.mapping?.mobile || "",
+          email: data.mapping?.email || "",
         };
+        candidateUiState.customFields = (data.custom_field_candidates || [])
+          .filter((column) => String(column || "").trim())
+          .map((column) => ({ source_column: column, target_name: column, enabled: false, manual: false }));
         candidateUiState.candidates = (data.candidates || []).map((candidate, index) => ({
           ...candidate,
+          custom_fields: candidate.custom_fields || {},
           __row: candidateUiState.rawRows[index]?.__row || index + 2,
         }));
         candidateUiState.errors = data.errors || [];
@@ -3374,11 +3774,14 @@
         candidateDropZone.classList.add("has-upload");
         candidateDropTitle.textContent = candidateUiState.filename;
         renderMappingControls();
+        rebuildCandidatesFromMapping();
         renderCandidateResult();
         const mappedFields = Object.entries(candidateUiState.mapping)
           .filter(([, value]) => value)
           .map(([key]) => key);
-        candidateLog(`[名单解析] 字段识别成功：${mappedFields.join("、") || "未完全识别"}`, mappedFields.length === 3 ? "success" : "warn");
+        candidateLog(`[名单解析] 读取到 ${candidateUiState.columns.length} 个客户名单字段`, "success");
+        candidateLog(`[字段映射] 自动识别固定字段：${mappedFields.join("、") || "未完全识别"}`, mappedFields.length >= 2 ? "success" : "warn");
+        candidateLog(`[自定义字段] 可选字段：${candidateUiState.customFields.map((field) => field.target_name).join("、") || "无"}`, "success");
         candidateLog(`[名单校验] 共识别 ${candidateUiState.candidates.length} 名考生`, "success");
         candidateLog(candidateUiState.errors.length ? `[名单校验] 存在 ${candidateUiState.errors.length} 个错误` : "[名单校验] 校验通过", candidateUiState.errors.length ? "warn" : "success");
       }
@@ -3388,11 +3791,14 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            candidates: candidateUiState.candidates.map(({ permit, full_name, identity_id, course_code }) => ({
+            candidates: candidateUiState.candidates.map(({ permit, full_name, identity_id, course_code, mobile, email, custom_fields }) => ({
               permit,
               full_name,
               identity_id,
               course_code,
+              mobile,
+              email,
+              custom_fields,
             })),
           }),
         });
@@ -3485,8 +3891,10 @@
           const context = resolveCandidateTaskContext(task, sessionId);
           candidateUiState.sessions = context.sessions;
           candidateUiState.selectedSession = context.selectedSession;
+          candidateUiState.taskCourses = Array.isArray(task?.config?.courses) ? task.config.courses : [];
           renderSessions("该任务尚无可用场次");
           renderSelectedSession();
+          rebuildCandidatesFromMapping();
           const selectionMessage = context.selectedSession
             ? `，已选择 session_id=${context.selectedSession.session_id}`
             : sessionId
@@ -3496,6 +3904,7 @@
         } catch (error) {
           candidateUiState.sessions = [];
           candidateUiState.selectedSession = null;
+          candidateUiState.taskCourses = [];
           renderSessions("任务场次加载失败，可手动加载");
           renderSelectedSession();
           candidateLog(`[场次选择] ${error.message || String(error)}`, "warn");
@@ -3699,11 +4108,17 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             session_id: candidateUiState.selectedSession.session_id,
-            candidates: candidateUiState.candidates.map(({ permit, full_name, identity_id, course_code }) => ({
+            field_mapping: candidateUiState.mapping,
+            source_columns: candidateUiState.columns,
+            custom_fields: selectedCustomFields(),
+            candidates: candidateUiState.candidates.map(({ permit, full_name, identity_id, course_code, mobile, email, custom_fields }) => ({
               permit,
               full_name,
               identity_id,
               course_code,
+              mobile,
+              email,
+              custom_fields,
             })),
           }),
         });
@@ -3753,6 +4168,43 @@
         }
         if (data.diagnosis?.messages?.length) {
           data.diagnosis.messages.forEach((message) => candidateLog(`[考生导入] ${message}`, data.fail ? "warn" : "success"));
+        }
+        if (data.custom_fields) {
+          const names = data.custom_fields.names || [];
+          const baseNames = data.custom_fields.base_names || [];
+          const customNames = data.custom_fields.custom_names || [];
+          const skippedColumns = data.custom_fields.skipped_source_columns || [];
+          candidateLog(`[信息项同步] 用户选择基础字段：${baseNames.join("、") || "无"}`, baseNames.length ? "success" : "warn");
+          candidateLog(`[信息项同步] 用户勾选自定义字段：${customNames.join("、") || "无"}`, customNames.length ? "success" : "warn");
+          candidateLog(`[信息项同步] 最终同步字段：${names.join("、") || "无"}`, names.length ? "success" : "warn");
+          if (skippedColumns.length) {
+            candidateLog(`[信息项同步] 未选择字段不会同步到场次：${skippedColumns.join("、")}`, "warn");
+          }
+          if (names.length) {
+            candidateLog("[信息项同步] 获取原场次配置成功", "success");
+            if (data.custom_fields.personal_fields?.updated) {
+              const reused = data.custom_fields.personal_fields.reused || [];
+              const created = data.custom_fields.personal_fields.created || [];
+              const existingNames = data.custom_fields.personal_fields.existing_names || [];
+              candidateLog(`[信息项同步] 原有信息项：${existingNames.join("、") || "无"}`, "success");
+              reused.forEach((name) => {
+                const field = (data.custom_fields.field_mappings || []).find((item) => item.field_name === name) || {};
+                candidateLog(`[信息项同步] 字段已存在，复用：${name}${field.field_code ? `，field_code=${field.field_code}` : ""}`, "success");
+              });
+              candidateLog(`[信息项同步] 新增信息项：${created.join("、") || "无"}`, created.length ? "success" : "warn");
+              created.forEach((name) => {
+                const field = (data.custom_fields.field_mappings || []).find((item) => item.field_name === name) || {};
+                candidateLog(`[信息项同步] 字段不存在，新增：${name}，允许编辑=false，考生可见=true，必填=false${field.field_code ? `，field_code=${field.field_code}` : ""}`, "success");
+              });
+              candidateLog("[信息项同步] 场次 PUT 更新成功", "success");
+            } else if (data.custom_fields.personal_fields?.error) {
+              candidateLog(`[信息项同步] 场次信息项同步失败：${data.custom_fields.personal_fields.error}`, "warn");
+            }
+            candidateLog(`[自定义字段] 已保存到本地 custom_fields`, data.custom_fields.saved_locally ? "success" : "warn");
+            candidateLog(`[自定义字段] 字段映射已保存到本地 exam_custom_fields`, data.custom_fields.fields_saved_locally ? "success" : "warn");
+            candidateLog(`[考生导入] 开始导入考生并携带自定义字段值`, data.custom_fields.sent_to_yikao ? "success" : "warn");
+            candidateLog(`[易考导入] ${data.custom_fields.message || "自定义字段已随考生导入请求发送到易考"}`, "success");
+          }
         }
         if (data.errors?.length) {
           data.errors.forEach((error) => candidateLog(`[考生导入] ${JSON.stringify(error)}`, "warn"));
@@ -4205,8 +4657,57 @@
         );
       });
 
-      [candidateMapFullName, candidateMapIdentityId, candidateMapPermit, candidateMapCourseCode].forEach((select) => {
-        select.addEventListener("change", rebuildCandidatesFromMapping);
+      [candidateMapFullName, candidateMapIdentityId, candidateMapPermit, candidateMapCourseCode, candidateMapMobile, candidateMapEmail].forEach((select) => {
+        select.addEventListener("change", () => {
+          rebuildCandidatesFromMapping();
+          renderCustomFieldControls();
+        });
+      });
+
+      candidateCustomFieldList.addEventListener("change", (event) => {
+        const toggleIndex = event.target?.dataset?.customFieldToggle;
+        if (toggleIndex !== undefined) {
+          const field = candidateUiState.customFields[Number(toggleIndex)];
+          if (field) field.enabled = event.target.checked;
+          rebuildCandidatesFromMapping();
+        }
+      });
+
+      candidateCustomFieldList.addEventListener("input", (event) => {
+        const nameIndex = event.target?.dataset?.customFieldName;
+        if (nameIndex !== undefined) {
+          const field = candidateUiState.customFields[Number(nameIndex)];
+          if (field) field.target_name = event.target.value.trim();
+          rebuildCandidatesFromMapping();
+        }
+      });
+
+      selectAllCustomFieldsBtn.addEventListener("click", () => {
+        candidateUiState.customFields.forEach((field) => {
+          field.enabled = true;
+        });
+        renderCustomFieldControls();
+        rebuildCandidatesFromMapping();
+        candidateLog(`[自定义字段] 已全选 ${selectedCustomFields().length} 个字段`, "success");
+      });
+
+      clearCustomFieldsBtn.addEventListener("click", () => {
+        candidateUiState.customFields.forEach((field) => {
+          field.enabled = false;
+        });
+        renderCustomFieldControls();
+        rebuildCandidatesFromMapping();
+        candidateLog("[自定义字段] 已清空选择", "success");
+      });
+
+      addCustomFieldBtn.addEventListener("click", () => {
+        const targetName = window.prompt("请输入自定义字段导入名称");
+        const trimmed = String(targetName || "").trim();
+        if (!trimmed) return;
+        candidateUiState.customFields.push({ source_column: "", target_name: trimmed, enabled: true, manual: true });
+        renderCustomFieldControls();
+        rebuildCandidatesFromMapping();
+        candidateLog(`[自定义字段] 已添加手动字段：${trimmed}`, "success");
       });
 
       candidateDownloadBtn.addEventListener("click", async () => {
@@ -4347,7 +4848,7 @@
         const action = event.target.closest("[data-action]")?.dataset.action || "view";
         if (action === "auto") return router.navigate(`/auto-config?projectId=${encodeURIComponent(card.dataset.taskId)}`);
         if (action === "edit") return alert("项目编辑将在独立表单中接入，不会打开自动配置组件。");
-        if (action === "archive") return alert("归档操作尚未接入持久化 API。");
+        if (action === "delete") return deleteProjectCard(card.dataset.taskId).catch((error) => alert(error.message || String(error)));
         return router.navigate(`/projects/${encodeURIComponent(card.dataset.taskId)}`);
       });
       requirementsList.addEventListener("click", (event) => {
@@ -4417,11 +4918,49 @@
       examContinueBtn.addEventListener("click", async () => {
         if (!taskViewState.currentTaskId) return;
         try {
-          const task = await fetchJson(`/api/tasks/${encodeURIComponent(taskViewState.currentTaskId)}/steps/paper_bind/retry`, { method: "POST" });
+          const task = await fetchJson(`/api/tasks/${encodeURIComponent(taskViewState.currentTaskId)}/steps/paper_form_bind/retry`, { method: "POST" });
           renderTaskDetail(task);
-        } catch (error) { alert(error.message); }
+        } catch (error) {
+          alert(error.message);
+          await openTaskDetail(taskViewState.currentTaskId);
+        }
       });
       taskStepGrid.addEventListener("click", async (event) => {
+        const monitorDownload = event.target.closest("[data-monitor-download]");
+        if (monitorDownload) {
+          event.stopPropagation();
+          if (monitorDownload.disabled) return;
+          monitorDownload.disabled = true;
+          const originalText = monitorDownload.textContent;
+          monitorDownload.textContent = "正在生成...";
+          try {
+            await downloadTaskMonitorAccounts(monitorDownload);
+          } catch (error) {
+            alert(error.message || String(error));
+            await openTaskDetail(taskViewState.currentTaskId);
+          } finally {
+            monitorDownload.textContent = originalText;
+            monitorDownload.disabled = false;
+          }
+          return;
+        }
+        const trigger = event.target.closest("[data-trigger-step]");
+        if (trigger) {
+          event.stopPropagation();
+          trigger.disabled = true;
+          const originalText = trigger.textContent;
+          trigger.textContent = "正在触发...";
+          try {
+            const task = await fetchJson(`/api/tasks/${encodeURIComponent(taskViewState.currentTaskId)}/steps/${encodeURIComponent(trigger.dataset.triggerStep)}/retry`, { method: "POST" });
+            renderTaskDetail(task);
+          } catch (error) {
+            alert(error.message || String(error));
+          } finally {
+            trigger.textContent = originalText;
+            trigger.disabled = false;
+          }
+          return;
+        }
         const retry = event.target.closest("[data-retry-step]");
         if (retry) {
           event.stopPropagation();
@@ -4578,12 +5117,14 @@
         candidateUiState.filename = "";
         candidateUiState.columns = [];
         candidateUiState.rawRows = [];
-        candidateUiState.mapping = { full_name: "", identity_id: "", permit: "", course_code: "" };
+        candidateUiState.mapping = { full_name: "", identity_id: "", permit: "", course_code: "", mobile: "", email: "" };
+        candidateUiState.customFields = [];
         candidateUiState.candidates = [];
         candidateUiState.errors = [];
         candidateUiState.warnings = [];
         candidateUiState.sessions = [];
         candidateUiState.selectedSession = null;
+        candidateUiState.taskCourses = [];
         candidateUiState.rooms = [];
         candidateUiState.roomProgressbar = null;
         candidateUiState.monitorAccounts = [];

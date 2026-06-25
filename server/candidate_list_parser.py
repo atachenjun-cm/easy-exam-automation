@@ -10,9 +10,13 @@ FULL_NAME_ALIASES = {"姓名", "考生姓名", "full_name", "name"}
 IDENTITY_ID_ALIASES = {"证件号", "身份证号", "身份证", "证件号码", "identity_id", "ssn"}
 PERMIT_ALIASES = {"准考证号", "考号", "考生编号", "permit"}
 COURSE_CODE_ALIASES = {"科目编号", "易考科目编号", "course_code"}
-REQUIRED_FIELDS = ("permit", "full_name", "identity_id")
-TARGET_FIELDS = ("permit", "full_name", "identity_id", "course_code")
-TEMPLATE_HEADERS = ("准考证号", "姓名", "身份证号", "科目编号")
+MOBILE_ALIASES = {"手机号码", "手机号", "手机", "联系电话", "电话", "mobile", "phone"}
+EMAIL_ALIASES = {"邮箱", "邮箱地址", "电子邮箱", "电子邮件", "邮件", "email", "mail"}
+REQUIRED_FIELDS = ("permit", "full_name")
+TARGET_FIELDS = ("permit", "full_name", "identity_id", "course_code", "mobile", "email")
+TEMPLATE_HEADERS = ("准考证号", "姓名", "身份证号", "科目编号", "手机号码", "邮箱")
+DISALLOWED_CUSTOM_FIELD_NAMES = {"姓名", "身份证号", "证件号", "准考证号", "科目编号", "科目名称"}
+MAX_CUSTOM_FIELDS = 30
 SCIENTIFIC_RE = re.compile(r"^\s*\d+(?:\.\d+)?[eE]\+?\d+\s*$")
 
 
@@ -49,7 +53,53 @@ def detect_mapping(columns):
         "identity_id": pick(IDENTITY_ID_ALIASES),
         "permit": pick(PERMIT_ALIASES),
         "course_code": pick(COURSE_CODE_ALIASES),
+        "mobile": pick(MOBILE_ALIASES),
+        "email": pick(EMAIL_ALIASES),
     }
+
+
+def canonical_import_field_name(value):
+    name = str(value or "").strip()
+    normalized = normalize_header(name).lower()
+    if normalized in {normalize_header(alias).lower() for alias in MOBILE_ALIASES}:
+        return "手机号码"
+    if normalized in {normalize_header(alias).lower() for alias in EMAIL_ALIASES}:
+        return "邮箱"
+    return name
+
+
+def custom_field_candidates(columns, mapping):
+    return [
+        column
+        for column in columns
+        if str(column or "").strip()
+        and str(column or "").strip() not in DISALLOWED_CUSTOM_FIELD_NAMES
+        and canonical_import_field_name(column) not in {"手机号码", "邮箱"}
+    ]
+
+
+def validate_custom_fields(custom_fields):
+    errors = []
+    normalized = []
+    seen = set()
+    enabled_fields = [field for field in custom_fields or [] if field.get("enabled")]
+    if len(enabled_fields) > MAX_CUSTOM_FIELDS:
+        errors.append(f"自定义字段最多支持 {MAX_CUSTOM_FIELDS} 个")
+    for index, field in enumerate(enabled_fields, start=1):
+        source_column = str(field.get("source_column") or "").strip()
+        target_name = canonical_import_field_name(field.get("target_name") or "")
+        if not target_name:
+            errors.append(f"第 {index} 个自定义字段名称不能为空")
+            continue
+        if target_name in DISALLOWED_CUSTOM_FIELD_NAMES:
+            errors.append(f"自定义字段不能作为导入信息项：{target_name}")
+            continue
+        if target_name in seen:
+            errors.append(f"自定义字段名称重复：{target_name}")
+            continue
+        seen.add(target_name)
+        normalized.append({"source_column": source_column, "target_name": target_name, "enabled": True})
+    return errors, normalized
 
 
 def read_csv(path):
@@ -129,9 +179,17 @@ def normalize_rows(rows):
     return headers, data
 
 
-def build_candidates(raw_rows, mapping):
+def build_candidates(raw_rows, mapping, custom_fields=None):
+    custom_errors, normalized_custom_fields = validate_custom_fields(custom_fields or [])
+    if custom_errors:
+        raise ValueError("；".join(custom_errors))
     candidates = []
     for row in raw_rows:
+        custom_values = {}
+        for field in normalized_custom_fields:
+            target_name = field["target_name"]
+            source_column = field["source_column"]
+            custom_values[target_name] = cell_to_text(row.get(source_column, "")) if source_column else ""
         candidates.append(
             {
                 "__row": row.get("__row"),
@@ -139,6 +197,9 @@ def build_candidates(raw_rows, mapping):
                 "full_name": cell_to_text(row.get(mapping.get("full_name", ""), "")),
                 "identity_id": cell_to_text(row.get(mapping.get("identity_id", ""), "")),
                 "course_code": cell_to_text(row.get(mapping.get("course_code", ""), "")),
+                "mobile": cell_to_text(row.get(mapping.get("mobile", ""), "")),
+                "email": cell_to_text(row.get(mapping.get("email", ""), "")),
+                "custom_fields": custom_values,
             }
         )
     return candidates
@@ -158,7 +219,9 @@ def validate_candidates(candidates, mapping):
             value = cell_to_text(row.get(field))
             if not value:
                 errors.append(f"第 {row_num} 行缺少 {field}")
-            if field in ("permit", "identity_id") and SCIENTIFIC_RE.match(value):
+        for field in ("permit", "identity_id", "mobile"):
+            value = cell_to_text(row.get(field))
+            if value and SCIENTIFIC_RE.match(value):
                 errors.append(f"第 {row_num} 行 {field} 为科学计数法格式，请修正原始文件后再导入")
         for field, bucket in duplicate_maps.items():
             value = cell_to_text(row.get(field))
@@ -181,12 +244,17 @@ def parse(path):
     mapping = detect_mapping(columns)
     candidates = build_candidates(raw_rows, mapping)
     errors, warnings = validate_candidates(candidates, mapping)
+    custom_candidates = custom_field_candidates(columns, mapping)
     return {
         "columns": columns,
+        "headers": columns,
         "mapping": mapping,
+        "auto_mapping": mapping,
+        "custom_field_candidates": custom_candidates,
         "rawRows": raw_rows,
-        "candidates": [{k: v for k, v in row.items() if k in TARGET_FIELDS} for row in candidates],
+        "candidates": [{k: v for k, v in row.items() if k in (*TARGET_FIELDS, "custom_fields")} for row in candidates],
         "preview": [{k: row.get(k, "") for k in TARGET_FIELDS} for row in candidates[:20]],
+        "preview_rows": raw_rows[:20],
         "totalCount": len(candidates),
         "errors": errors,
         "warnings": warnings,
@@ -212,7 +280,7 @@ def write_template(payload_path, output_path):
     for row in candidates:
         sheet.append([cell_to_text(row.get(field)) for field in TARGET_FIELDS])
 
-    for col in ("A", "B", "C"):
+    for col in ("A", "B", "C", "D", "E", "F"):
         for cell in sheet[col]:
             cell.number_format = "@"
 

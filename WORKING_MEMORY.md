@@ -1,5 +1,12 @@
 # 易考自动配置工作记忆
 
+## 需求中心保护范围（2026-06-22）
+
+- GitHub 合并提交 `6532369` 引入的需求中心由同事维护，后续改动不得修改该功能的页面、路由、API、数据库及测试。
+- 保护文件包括 `server/requirement_request_api.mjs`、`server/requirement_request_db.py`、`server/test_requirement_request_*.{mjs,py}`、`web/pages/RequirementListPage.mjs`、`web/pages/RequirementDetailPage.mjs`。
+- 对共享文件 `server/easy_exam_server.mjs`、`server/frontend_routes.mjs`、`web/router.mjs` 和 `outputs/web_prototype/easy_exam_automation.html` 做后续修改时，必须保留需求中心相关导入、路由、页面、事件和 API 分发逻辑。
+- 后续功能修改仅限原有考试配置、考试列表、考试详情及其既有配套流程，不扩展或重构需求中心。
+
 ## 当前基准脚本
 
 - 需求单生成/更新脚本：`/Users/chen/Desktop/ai 易考/update_exam_request_config_xlsx.mjs`
