@@ -34,6 +34,12 @@ function decodeSegment(value) {
   return decodeURIComponent(value || "");
 }
 
+function normalizeSource(value, fallback = "dify") {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
+}
+
 export function createRequirementRequestHandler(options = {}) {
   const dbPath = options.dbPath || process.env.REQUIREMENT_DB_PATH || defaultDbPath;
   const pythonBin = options.pythonBin || process.env.CODEX_PYTHON || process.env.PYTHON || "python3";
@@ -120,7 +126,7 @@ export function createRequirementRequestHandler(options = {}) {
         customer: payload.customer || {},
         requirement: payload.requirement || {},
         message: payload.message || "",
-        source: payload.source || "dify",
+        source: normalizeSource(payload.source),
       });
       json(res, 200, { ok: true, action: "upsert", requirement });
       return true;
@@ -133,7 +139,7 @@ export function createRequirementRequestHandler(options = {}) {
         customer: payload.customer || {},
         requirement: payload.requirement || {},
         message: payload.message || "",
-        source: payload.source || "dify",
+        source: normalizeSource(payload.source),
       });
       json(res, 200, { ok: true, requirement });
       return true;
@@ -233,6 +239,34 @@ export function createRequirementRequestHandler(options = {}) {
       const requirement = await runStoreOrBadRequest(res, "link_task", {
         requestId: decodeSegment(linkTaskMatch[1]),
         taskId: payload.taskId || payload.task_id || "",
+      });
+      if (!requirement) return true;
+      json(res, 200, { ok: true, requirement });
+      return true;
+    }
+
+    const acceptChangeMatch = pathname.match(/^\/api\/requirements\/([^/]+)\/change-requests\/([^/]+)\/accept$/);
+    if (req.method === "POST" && acceptChangeMatch) {
+      const payload = await readJson(req);
+      const requirement = await runStoreOrBadRequest(res, "accept_change", {
+        requestId: decodeSegment(acceptChangeMatch[1]),
+        changeId: decodeSegment(acceptChangeMatch[2]),
+        reviewer: payload.reviewer || "",
+        message: payload.message || "",
+      });
+      if (!requirement) return true;
+      json(res, 200, { ok: true, requirement });
+      return true;
+    }
+
+    const rejectChangeMatch = pathname.match(/^\/api\/requirements\/([^/]+)\/change-requests\/([^/]+)\/reject$/);
+    if (req.method === "POST" && rejectChangeMatch) {
+      const payload = await readJson(req);
+      const requirement = await runStoreOrBadRequest(res, "reject_change", {
+        requestId: decodeSegment(rejectChangeMatch[1]),
+        changeId: decodeSegment(rejectChangeMatch[2]),
+        reviewer: payload.reviewer || "",
+        reason: payload.reason || payload.message || "",
       });
       if (!requirement) return true;
       json(res, 200, { ok: true, requirement });

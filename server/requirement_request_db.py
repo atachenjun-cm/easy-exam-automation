@@ -344,26 +344,131 @@ class RequirementStore:
 
     def create_change_request(self, request_id, customer_message="", changes=None):
         now = utc_now()
+        normalized_message = str(customer_message or "").strip()
+        normalized_changes = normalize_requirement(changes or {})
         with self.connect() as db:
             self._require_request(db, request_id)
+            pending_matches = db.execute(
+                """SELECT changes_json FROM requirement_change_requests
+                WHERE request_id=? AND status='pending_internal_review' AND customer_message=?""",
+                (request_id, normalized_message),
+            ).fetchall()
+            duplicate = any(
+                normalize_requirement(loads(row["changes_json"], {})) == normalized_changes
+                for row in pending_matches
+            )
+            if not duplicate:
+                db.execute(
+                    """INSERT INTO requirement_change_requests
+                    (change_id, request_id, status, customer_message, changes_json, created_at)
+                    VALUES (?, ?, 'pending_internal_review', ?, ?, ?)""",
+                    (
+                        str(uuid.uuid4()),
+                        request_id,
+                        normalized_message,
+                        json.dumps(normalized_changes, ensure_ascii=False),
+                        now,
+                    ),
+                )
+                db.execute(
+                    "UPDATE requirement_requests SET status='change_requested', updated_at=? WHERE request_id=?",
+                    (now, request_id),
+                )
+                self._record_event(db, request_id, "change_requested", "customer", {
+                    "message": normalized_message,
+                })
+        return self.get_requirement(request_id)
+
+    def accept_change_request(self, request_id, change_id, reviewer="", message=""):
+        now = utc_now()
+        with self.connect() as db:
+            request = self._require_request(db, request_id)
+            change = self._require_change_request(db, request_id, change_id)
+            if change["status"] != "pending_internal_review":
+                raise ValueError("Change request is not pending internal review")
+            changes = loads(change["changes_json"], {})
+            latest = db.execute(
+                "SELECT * FROM requirement_versions WHERE request_id=? ORDER BY version DESC LIMIT 1",
+                (request_id,),
+            ).fetchone()
+            base_requirement = loads(latest["requirement_json"], {}) if latest else {}
+            next_requirement = self._requirement_from_change(base_requirement, changes)
+            normalized = normalize_requirement(next_requirement)
+            missing, errors = validate_requirement(normalized)
+            next_version_row = db.execute(
+                "SELECT MAX(version) AS version FROM requirement_versions WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            next_version = int(next_version_row["version"] or 0) + 1
+            status = "collecting" if missing or errors else "pending_internal_review"
+            title = str(normalized.get("exam_name") or request["title"] or "未命名考试需求")
             db.execute(
-                """INSERT INTO requirement_change_requests
-                (change_id, request_id, status, customer_message, changes_json, created_at)
-                VALUES (?, ?, 'pending_internal_review', ?, ?, ?)""",
+                """INSERT INTO requirement_versions
+                (request_id, version, source, message, requirement_json, missing_fields_json,
+                 validation_errors_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    str(uuid.uuid4()),
                     request_id,
-                    customer_message or "",
-                    json.dumps(normalize_requirement(changes or {}), ensure_ascii=False),
+                    next_version,
+                    "staff_change_acceptance",
+                    message or change["customer_message"] or "",
+                    json.dumps(normalized, ensure_ascii=False),
+                    json.dumps(missing, ensure_ascii=False),
+                    json.dumps(errors, ensure_ascii=False),
                     now,
                 ),
             )
             db.execute(
-                "UPDATE requirement_requests SET status='change_requested', updated_at=? WHERE request_id=?",
-                (now, request_id),
+                "UPDATE requirement_change_requests SET status='accepted' WHERE request_id=? AND change_id=?",
+                (request_id, change_id),
             )
-            self._record_event(db, request_id, "change_requested", "customer", {
-                "message": customer_message or "",
+            pending = db.execute(
+                """SELECT COUNT(*) AS count FROM requirement_change_requests
+                WHERE request_id=? AND status='pending_internal_review'""",
+                (request_id,),
+            ).fetchone()
+            if int(pending["count"] or 0) > 0:
+                status = "change_requested"
+            db.execute(
+                "UPDATE requirement_requests SET title=?, status=?, updated_at=? WHERE request_id=?",
+                (title, status, now, request_id),
+            )
+            self._record_event(db, request_id, "change_request_accepted", reviewer or "staff", {
+                "changeId": change_id,
+                "version": next_version,
+                "message": message or "",
+            })
+        return self.get_requirement(request_id)
+
+    def reject_change_request(self, request_id, change_id, reviewer="", reason=""):
+        now = utc_now()
+        with self.connect() as db:
+            self._require_request(db, request_id)
+            change = self._require_change_request(db, request_id, change_id)
+            if change["status"] != "pending_internal_review":
+                raise ValueError("Change request is not pending internal review")
+            db.execute(
+                "UPDATE requirement_change_requests SET status='rejected' WHERE request_id=? AND change_id=?",
+                (request_id, change_id),
+            )
+            pending = db.execute(
+                """SELECT COUNT(*) AS count FROM requirement_change_requests
+                WHERE request_id=? AND status='pending_internal_review'""",
+                (request_id,),
+            ).fetchone()
+            if int(pending["count"] or 0) == 0:
+                db.execute(
+                    "UPDATE requirement_requests SET status='pending_internal_review', updated_at=? WHERE request_id=?",
+                    (now, request_id),
+                )
+            else:
+                db.execute(
+                    "UPDATE requirement_requests SET updated_at=? WHERE request_id=?",
+                    (now, request_id),
+                )
+            self._record_event(db, request_id, "change_request_rejected", reviewer or "staff", {
+                "changeId": change_id,
+                "reason": reason or "",
             })
         return self.get_requirement(request_id)
 
@@ -418,6 +523,26 @@ class RequirementStore:
         if not row:
             raise ValueError("Requirement request not found")
         return row
+
+    def _require_change_request(self, db, request_id, change_id):
+        row = db.execute(
+            "SELECT * FROM requirement_change_requests WHERE request_id=? AND change_id=?",
+            (request_id, change_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Change request not found")
+        return row
+
+    def _requirement_from_change(self, base_requirement, changes):
+        if isinstance(changes, dict) and isinstance(changes.get("latestRequirement"), dict):
+            return changes["latestRequirement"]
+        merged = dict(base_requirement or {})
+        if isinstance(changes, dict):
+            for key, value in changes.items():
+                if key in {"changeRecords", "attachments"}:
+                    continue
+                merged[key] = value
+        return merged
 
     def _record_event(self, db, request_id, event_type, actor, payload):
         db.execute(
@@ -512,6 +637,20 @@ def main():
             payload.get("requestId") or payload.get("request_id"),
             payload.get("customerMessage") or payload.get("customer_message") or "",
             payload.get("changes") or {},
+        )
+    elif action == "accept_change":
+        result = store.accept_change_request(
+            payload.get("requestId") or payload.get("request_id"),
+            payload.get("changeId") or payload.get("change_id"),
+            payload.get("reviewer") or "",
+            payload.get("message") or "",
+        )
+    elif action == "reject_change":
+        result = store.reject_change_request(
+            payload.get("requestId") or payload.get("request_id"),
+            payload.get("changeId") or payload.get("change_id"),
+            payload.get("reviewer") or "",
+            payload.get("reason") or payload.get("message") or "",
         )
     elif action == "mark_ready":
         result = store.mark_ready_to_create_task(

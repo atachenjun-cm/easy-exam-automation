@@ -8,6 +8,7 @@ const FRONTEND_ROUTE_PATTERNS = [
   /^\/candidate-import\/?$/,
   /^\/requirements\/?$/,
   /^\/requirements\/[^/]+\/?$/,
+  /^\/wechat-collector\/?$/,
   /^\/templates\/?$/,
   /^\/logs\/?$/,
 ];

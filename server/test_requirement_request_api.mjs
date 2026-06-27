@@ -5,6 +5,11 @@ import path from "node:path";
 import test from "node:test";
 
 import { createRequirementRequestHandler } from "./requirement_request_api.mjs";
+import {
+  buildWechatRequirementDraft,
+  loadWechatGroupConfig,
+  pushWechatDraftToRequirementCenter,
+} from "./wechat_requirement_collector.mjs";
 
 function makeReq(method, pathname, body = null) {
   const req = Readable.from(body ? [JSON.stringify(body)] : []);
@@ -38,6 +43,26 @@ async function callRequirementHandler(method, pathname, body) {
   return { handled, statusCode: res.statusCode, body: res.body };
 }
 
+async function callHandler(handler, method, pathname, body) {
+  const req = makeReq(method, pathname, body);
+  const res = makeRes();
+  const handled = await handler(req, res, new URL(pathname, "http://127.0.0.1"));
+  return { handled, statusCode: res.statusCode, body: res.body };
+}
+
+function fetchFromRequirementHandler(handler) {
+  return async (url, options = {}) => {
+    const parsed = new URL(url);
+    const body = options.body ? JSON.parse(options.body) : null;
+    const result = await callHandler(handler, options.method || "GET", parsed.pathname, body);
+    return {
+      ok: result.statusCode >= 200 && result.statusCode < 300,
+      status: result.statusCode,
+      text: async () => JSON.stringify(result.body || {}),
+    };
+  };
+}
+
 function completeRequirementPayload() {
   return {
     exam_name: "2026招聘考试",
@@ -66,6 +91,29 @@ test("Dify upsert route stores a requirement and returns missing fields", async 
   assert.equal(result.body.requirement.status, "collecting");
   assert.ok(result.body.requirement.latest.missingFields.includes("formal_exam_time_range"));
   assert.ok(result.body.requirement.latest.missingFields.includes("leave_limit_count"));
+});
+
+test("dispatch route stores object source metadata as text", async () => {
+  const result = await callRequirementHandler("POST", "/api/ai/requirements/dispatch", {
+    intent: "collecting",
+    customer: { name: "内部测试客户" },
+    requirement: completeRequirementPayload(),
+    message: "微信群可见消息",
+    source: {
+      type: "wechat_group",
+      groupName: "AI赋能运营自动化小组",
+      projectName: "易考自动化需求",
+    },
+  });
+
+  assert.equal(result.handled, true);
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.ok, true);
+  assert.equal(result.body.requirement.latest.source, JSON.stringify({
+    type: "wechat_group",
+    groupName: "AI赋能运营自动化小组",
+    projectName: "易考自动化需求",
+  }));
 });
 
 test("staff routes can mark a confirmed requirement ready and link a task", async () => {
@@ -246,4 +294,192 @@ test("Dify dispatch route records change request intent", async () => {
   assert.equal(changed.body.action, "change_request");
   assert.equal(changed.body.requirement.status, "change_requested");
   assert.equal(changed.body.requirement.changeRequests[0].changes.subjects.join("，"), "英语，化学，物理，数学");
+});
+
+test("requirement center deduplicates identical pending change requests", async () => {
+  const dbPath = path.join(os.tmpdir(), `requirements-${Date.now()}-${Math.random()}.sqlite3`);
+  const handler = createRequirementRequestHandler({ dbPath, pythonBin: "python3" });
+
+  async function call(method, pathname, body) {
+    const req = makeReq(method, pathname, body);
+    const res = makeRes();
+    const handled = await handler(req, res, new URL(pathname, "http://127.0.0.1"));
+    return { handled, statusCode: res.statusCode, body: res.body };
+  }
+
+  const created = await call("POST", "/api/ai/requirements/upsert", {
+    requirement: completeRequirementPayload(),
+  });
+  const requestId = created.body.requirement.requestId;
+  const changePayload = {
+    intent: "change_request",
+    requestId,
+    customerMessage: "考试时间改到 7 月 1 日 10 点到 12 点",
+    changes: { formal_exam_time_range: "7 月 1 日 10 点到 12 点" },
+  };
+
+  const first = await call("POST", "/api/ai/requirements/dispatch", changePayload);
+  const duplicate = await call("POST", "/api/ai/requirements/dispatch", changePayload);
+
+  assert.equal(first.statusCode, 200);
+  assert.equal(duplicate.statusCode, 200);
+  assert.equal(duplicate.body.requirement.changeRequests.length, 1);
+  assert.equal(duplicate.body.requirement.changeRequests[0].changeId, first.body.requirement.changeRequests[0].changeId);
+  assert.equal(duplicate.body.requirement.events.filter((event) => event.eventType === "change_requested").length, 1);
+
+  await call(
+    "POST",
+    `/api/requirements/${requestId}/change-requests/${first.body.requirement.changeRequests[0].changeId}/accept`,
+    { reviewer: "admin-op" },
+  );
+  const repeatedAfterDecision = await call("POST", "/api/ai/requirements/dispatch", changePayload);
+
+  assert.equal(repeatedAfterDecision.body.requirement.changeRequests.length, 2);
+  assert.deepEqual(
+    repeatedAfterDecision.body.requirement.changeRequests.map((item) => item.status).sort(),
+    ["accepted", "pending_internal_review"],
+  );
+});
+
+test("WeChat draft push stores a requirement and later change request in the real requirement center", async () => {
+  const dbPath = path.join(os.tmpdir(), `requirements-${Date.now()}-${Math.random()}.sqlite3`);
+  const handler = createRequirementRequestHandler({ dbPath, pythonBin: "python3" });
+  const fetchImpl = fetchFromRequirementHandler(handler);
+  const config = loadWechatGroupConfig({
+    groups: [
+      {
+        group_name: "AI赋能运营自动化小组",
+        project_name: "易考自动化需求",
+        customer_name: "内部测试客户",
+        requirement_request_id: "wechat-ai-ops",
+        enabled: true,
+      },
+    ],
+  });
+  const initialDraft = buildWechatRequirementDraft({
+    config,
+    groupName: "AI赋能运营自动化小组",
+    text: [
+      "客户：考试名称是 2026 校招笔试。",
+      "客户：正式考试 8 月 20 日上午 9 点到 11 点。",
+      "客户：试考 8 月 19 日下午 3 点到 4 点。",
+      "客户：科目是行测和英语，需要视频监控和录制，不需要鹰眼，网页考试，允许离开 3 次。",
+      "客户：登录规则提前 30 分钟，迟到 15 分钟不能进。",
+    ].join("\n"),
+  });
+
+  const created = await pushWechatDraftToRequirementCenter(initialDraft, {
+    apiBase: "http://127.0.0.1:8765",
+    requestId: "wechat-ai-ops",
+    fetchImpl,
+  });
+  const changeDraft = buildWechatRequirementDraft({
+    config,
+    groupName: "AI赋能运营自动化小组",
+    text: [
+      "客户：考试时间改到 7-1 时间 10点-12点。",
+      "客户：提前登录、迟到时间都是 30分钟。",
+      "客户：本次不考英语，改成数学。",
+    ].join("\n"),
+  });
+  const changed = await pushWechatDraftToRequirementCenter(changeDraft, {
+    apiBase: "http://127.0.0.1:8765",
+    requestId: created.requestId,
+    fetchImpl,
+  });
+  const stored = await callHandler(handler, "GET", "/api/requirements/wechat-ai-ops");
+
+  assert.equal(created.requestId, "wechat-ai-ops");
+  assert.equal(created.push.action, "upsert");
+  assert.equal(changed.push, null);
+  assert.equal(changed.changePushes.length, 1);
+  assert.equal(stored.statusCode, 200);
+  assert.equal(stored.body.requestId, "wechat-ai-ops");
+  assert.equal(stored.body.status, "change_requested");
+  assert.equal(stored.body.customer.name, "内部测试客户");
+  assert.equal(stored.body.latest.requirement.exam_name, "2026 校招笔试");
+  assert.deepEqual(stored.body.latest.requirement.subjects, ["行测", "英语"]);
+  assert.equal(stored.body.versions.length, 1);
+  assert.equal(stored.body.changeRequests.length, 1);
+  assert.match(stored.body.changeRequests[0].customerMessage, /考试时间改到/);
+  assert.equal(stored.body.changeRequests[0].changes.changeRecords.length, 3);
+  assert.equal(stored.body.changeRequests[0].changes.changeRecords[0].type, "formal_exam_time_change");
+  assert.deepEqual(stored.body.changeRequests[0].changes.latestRequirement.subjects, ["数学"]);
+  assert.equal(JSON.parse(stored.body.latest.source).type, "wechat_group");
+  assert.equal(JSON.parse(stored.body.latest.source).groupName, "AI赋能运营自动化小组");
+});
+
+test("staff can accept a pending change request into a new reviewed requirement version", async () => {
+  const dbPath = path.join(os.tmpdir(), `requirements-${Date.now()}-${Math.random()}.sqlite3`);
+  const handler = createRequirementRequestHandler({ dbPath, pythonBin: "python3" });
+
+  const created = await callHandler(handler, "POST", "/api/ai/requirements/upsert", {
+    requestId: "req-change-accept",
+    customer: { name: "ATA客户" },
+    requirement: completeRequirementPayload(),
+    source: { type: "manual" },
+    message: "初始需求",
+  });
+  const changed = await callHandler(handler, "POST", "/api/ai/requirements/dispatch", {
+    intent: "change_request",
+    requestId: created.body.requirement.requestId,
+    customerMessage: "客户要求增加数学并改为 30 分钟迟到限制",
+    changes: {
+      latestRequirement: {
+        ...completeRequirementPayload(),
+        late_limit_minutes: "30分钟",
+        subjects: ["英语", "化学", "物理", "数学"],
+      },
+    },
+  });
+  const changeId = changed.body.requirement.changeRequests[0].changeId;
+
+  const accepted = await callHandler(
+    handler,
+    "POST",
+    `/api/requirements/req-change-accept/change-requests/${changeId}/accept`,
+    { reviewer: "ops-a", message: "变更内容已核对" },
+  );
+
+  assert.equal(accepted.statusCode, 200);
+  assert.equal(accepted.body.requirement.status, "pending_internal_review");
+  assert.equal(accepted.body.requirement.versions.length, 2);
+  assert.equal(accepted.body.requirement.latest.version, 2);
+  assert.equal(accepted.body.requirement.latest.requirement.late_limit_minutes, 30);
+  assert.deepEqual(accepted.body.requirement.latest.requirement.subjects, ["英语", "化学", "物理", "数学"]);
+  assert.equal(accepted.body.requirement.changeRequests[0].status, "accepted");
+  assert.ok(accepted.body.requirement.events.some((event) => event.eventType === "change_request_accepted"));
+});
+
+test("staff can reject a pending change request without creating a new version", async () => {
+  const dbPath = path.join(os.tmpdir(), `requirements-${Date.now()}-${Math.random()}.sqlite3`);
+  const handler = createRequirementRequestHandler({ dbPath, pythonBin: "python3" });
+
+  const created = await callHandler(handler, "POST", "/api/ai/requirements/upsert", {
+    requestId: "req-change-reject",
+    customer: { name: "ATA客户" },
+    requirement: completeRequirementPayload(),
+    source: { type: "manual" },
+    message: "初始需求",
+  });
+  const changed = await callHandler(handler, "POST", "/api/ai/requirements/dispatch", {
+    intent: "change_request",
+    requestId: created.body.requirement.requestId,
+    customerMessage: "客户误发的变更",
+    changes: { subjects: ["数学"] },
+  });
+  const changeId = changed.body.requirement.changeRequests[0].changeId;
+
+  const rejected = await callHandler(
+    handler,
+    "POST",
+    `/api/requirements/req-change-reject/change-requests/${changeId}/reject`,
+    { reviewer: "ops-b", reason: "客户确认误发" },
+  );
+
+  assert.equal(rejected.statusCode, 200);
+  assert.equal(rejected.body.requirement.status, "pending_internal_review");
+  assert.equal(rejected.body.requirement.versions.length, 1);
+  assert.equal(rejected.body.requirement.changeRequests[0].status, "rejected");
+  assert.ok(rejected.body.requirement.events.some((event) => event.eventType === "change_request_rejected"));
 });

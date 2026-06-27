@@ -200,6 +200,35 @@ class RequirementStoreTest(unittest.TestCase):
             any(event["eventType"] == "customer_clarification_requested" for event in reviewed_change["events"])
         )
 
+    def test_accepting_one_change_keeps_request_in_change_requested_until_all_are_reviewed(self):
+        created = self.store.create_or_update_requirement(requirement=complete_requirement())
+        request_id = created["requestId"]
+        self.store.create_change_request(
+            request_id,
+            customer_message="考试时间改到 7 月 2 日",
+            changes={"formal_exam_time_range": "2026-07-02 09:00 - 2026-07-02 11:00"},
+        )
+        changed = self.store.create_change_request(
+            request_id,
+            customer_message="科目改为数学",
+            changes={"subjects": ["数学"]},
+        )
+        changes_by_message = {
+            item["customerMessage"]: item for item in changed["changeRequests"]
+        }
+
+        partially_reviewed = self.store.accept_change_request(
+            request_id,
+            changes_by_message["考试时间改到 7 月 2 日"]["changeId"],
+            reviewer="ops-a",
+        )
+
+        self.assertEqual(partially_reviewed["status"], "change_requested")
+        self.assertEqual(
+            sum(item["status"] == "pending_internal_review" for item in partially_reviewed["changeRequests"]),
+            1,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ import {
 } from "./course_session_binding.mjs";
 import { isFrontendRoute, webContentType } from "./frontend_routes.mjs";
 import { handleRequirementRequest } from "./requirement_request_api.mjs";
+import { handleWechatCollector } from "./wechat_collector_api.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -1811,6 +1812,9 @@ async function requestHandler(req, res) {
       return await handleCreateJob(req, res);
     }
     if (await handleRequirementRequest(req, res, url)) {
+      return;
+    }
+    if (await handleWechatCollector(req, res, url)) {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/tasks") {

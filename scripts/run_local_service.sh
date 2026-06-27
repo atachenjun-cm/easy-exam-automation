@@ -15,13 +15,13 @@ if [ -f "$ROOT_DIR/.env" ]; then
 fi
 
 : "${PORT:=8765}"
-: "${CODEX_PYTHON:=/Users/chen/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3}"
+: "${CODEX_PYTHON:=/Users/ata/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3}"
 
 export PORT
 export CODEX_PYTHON
 export NODE_ENV=production
 
-: "${CODEX_NODE:=/Users/chen/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node}"
+: "${CODEX_NODE:=/Users/ata/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node}"
 
 export CODEX_NODE
 
