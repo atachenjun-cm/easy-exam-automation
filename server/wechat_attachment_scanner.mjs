@@ -2,6 +2,9 @@ import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const SUPPORTED_EXTENSIONS = new Map([
   [".xlsx", "spreadsheet"],
@@ -36,6 +39,7 @@ export function scanWechatDownloadedFiles({
   maxFiles = 200,
   previewChars = 1200,
   modifiedSince = "",
+  imageOcrCommand = path.join(rootDir, "scripts", "ocr_image.swift"),
 } = {}) {
   const scannedAt = new Date().toISOString();
   const resolvedRoots = expandRoots(roots);
@@ -47,6 +51,7 @@ export function scanWechatDownloadedFiles({
     collectFiles(root.path, files, {
       maxFiles,
       previewChars,
+      imageOcrCommand,
       seenPaths,
       modifiedSinceMs: Number.isFinite(modifiedSinceMs) ? modifiedSinceMs : 0,
     });
@@ -104,25 +109,31 @@ function collectFiles(currentPath, files, options) {
       kind,
       sizeBytes: stat.size,
       modifiedAt: stat.mtime.toISOString(),
-      preview: readPreviewSafely(fullPath, ext, options.previewChars),
+      preview: readPreviewSafely(fullPath, ext, {
+        previewChars: options.previewChars,
+        imageOcrCommand: options.imageOcrCommand,
+      }),
     });
   }
 }
 
-function readPreviewSafely(filePath, ext, previewChars) {
+function readPreviewSafely(filePath, ext, options = {}) {
   try {
-    return readPreview(filePath, ext, previewChars);
+    return readPreview(filePath, ext, options);
   } catch {
     return "";
   }
 }
 
-function readPreview(filePath, ext, previewChars) {
+function readPreview(filePath, ext, { previewChars, imageOcrCommand } = {}) {
   if (ext === ".txt" || ext === ".csv") {
     return readTextPreview(filePath, previewChars);
   }
   if (ext === ".xlsx") {
     return readXlsxPreview(filePath, previewChars);
+  }
+  if (ext === ".png" || ext === ".jpg" || ext === ".jpeg") {
+    return readImagePreview(filePath, imageOcrCommand, previewChars);
   }
   return "";
 }
@@ -176,6 +187,23 @@ function readXlsxPreview(filePath, previewChars) {
   } catch {
     return "";
   }
+}
+
+function readImagePreview(filePath, imageOcrCommand, previewChars) {
+  const command = buildImageOcrCommand(imageOcrCommand, filePath);
+  const text = execFileSync(command[0], command.slice(1), {
+    encoding: "utf8",
+    maxBuffer: 10 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  return limitPreview(text, previewChars);
+}
+
+function buildImageOcrCommand(imageOcrCommand, filePath) {
+  const tool = String(imageOcrCommand || "").trim() || path.join(rootDir, "scripts", "ocr_image.swift");
+  return tool.endsWith(".swift")
+    ? ["swift", tool, filePath]
+    : [tool, filePath];
 }
 
 function readSharedStrings(filePath) {

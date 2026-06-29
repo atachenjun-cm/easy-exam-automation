@@ -108,7 +108,7 @@ test("resolves existing WeChat downloaded file roots without requiring the direc
   assert.ok(roots.every((root) => root.includes("msg/file")));
 });
 
-test("extracts previews only for text, CSV, and XLSX attachments", () => {
+test("extracts previews for text, CSV, XLSX, and image attachments", () => {
   const root = makeTempDir();
   const monthDir = path.join(root, "zhanglexiang_0a18", "msg", "file", "2026-06");
   mkdirSync(monthDir, { recursive: true });
@@ -130,16 +130,22 @@ test("extracts previews only for text, CSV, and XLSX attachments", () => {
     ["考试名称", "AI 运营考试"],
     ["提前登录时间", "30分钟"],
   ]);
+  writeFileSync(path.join(monthDir, "客户截图.png"), "not a real image; test OCR command ignores content");
+  const fakeOcr = path.join(root, "fake-ocr.sh");
+  writeFileSync(fakeOcr, "#!/bin/sh\nprintf '截图需求：考试时间 7 月 3 日 10 点到 12 点\\n科目：数学\\n'\n");
+  chmodSync(fakeOcr, 0o700);
 
-  const result = scanWechatDownloadedFiles({ roots: [root], maxFiles: 10 });
+  const result = scanWechatDownloadedFiles({ roots: [root], maxFiles: 10, imageOcrCommand: fakeOcr });
 
   assert.match(result.scannedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(result.roots[0].exists, true);
-  assert.deepEqual(result.files.map((file) => file.name).sort(), ["名单.csv", "客户说明.txt", "客户需求.docx", "考试方案.pdf", "需求单.xlsx"]);
+  assert.deepEqual(result.files.map((file) => file.name).sort(), ["名单.csv", "客户截图.png", "客户说明.txt", "客户需求.docx", "考试方案.pdf", "需求单.xlsx"]);
   assert.equal(result.files.find((file) => file.name === "客户说明.txt").kind, "text");
   assert.equal(result.files.find((file) => file.name === "客户需求.docx").kind, "document");
+  assert.equal(result.files.find((file) => file.name === "客户截图.png").kind, "image");
   assert.match(result.files.find((file) => file.name === "客户说明.txt").preview, /正式考试 7 月 1 日/);
   assert.match(result.files.find((file) => file.name === "名单.csv").preview, /姓名,手机号/);
+  assert.match(result.files.find((file) => file.name === "客户截图.png").preview, /截图需求：考试时间 7 月 3 日/);
   assert.equal(result.files.find((file) => file.name === "客户需求.docx").preview, "");
   assert.equal(result.files.find((file) => file.name === "考试方案.pdf").preview, "");
   assert.match(result.files.find((file) => file.name === "需求单.xlsx").preview, /业务需求单/);
