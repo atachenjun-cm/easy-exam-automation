@@ -64,6 +64,19 @@ class CandidateListParserTest(unittest.TestCase):
         self.assertEqual(mapping["email"], "邮箱地址")
         self.assertEqual(custom, ["报考岗位", "学校"])
 
+    def test_detects_required_suffix_phone_and_email_headers(self):
+        columns = ["姓名（必填）", "手机号（必填）", "邮箱（必填）", "性别"]
+
+        mapping = parser.detect_mapping(columns)
+        custom = parser.custom_field_candidates(columns, mapping)
+
+        self.assertEqual(mapping["full_name"], "姓名（必填）")
+        self.assertEqual(mapping["mobile"], "手机号（必填）")
+        self.assertEqual(mapping["email"], "邮箱（必填）")
+        self.assertNotIn("手机号（必填）", custom)
+        self.assertNotIn("邮箱（必填）", custom)
+        self.assertIn("性别", custom)
+
     def test_phone_aliases_are_fixed_mapping_fields_not_custom_candidates(self):
         columns = ["姓名", "联系电话", "身份证号", "专业", "岗位名称"]
         mapping = {

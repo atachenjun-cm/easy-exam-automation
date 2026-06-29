@@ -21,7 +21,8 @@ SCIENTIFIC_RE = re.compile(r"^\s*\d+(?:\.\d+)?[eE]\+?\d+\s*$")
 
 
 def normalize_header(value):
-    return str(value or "").strip().replace(" ", "").replace("\u3000", "")
+    normalized = str(value or "").strip().replace(" ", "").replace("\u3000", "")
+    return re.sub(r"[（(](?:必填|选填)[）)]$", "", normalized)
 
 
 def cell_to_text(value):

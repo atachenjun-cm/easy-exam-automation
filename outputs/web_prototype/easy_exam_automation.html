@@ -1825,9 +1825,12 @@
       .view-heading h1 { margin: 0; font-size: 25px; }
       .view-actions { display: flex; gap: 10px; }
       .project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
-      .project-card { border: 1px solid var(--line); border-radius: 16px; background: #fff; padding: 18px; box-shadow: 0 10px 28px rgba(15,23,42,.05); cursor: pointer; }
+      .project-card { border: 1px solid var(--line); border-radius: 16px; background: #fff; padding: 18px; box-shadow: 0 10px 28px rgba(15,23,42,.05); cursor: pointer; overflow: hidden; box-sizing: border-box; }
       .project-card:hover { border-color: #a8ccff; box-shadow: 0 14px 34px rgba(15,23,42,.08); }
       .project-card-head, .task-summary { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; }
+      .card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; width: 100%; max-width: 100%; box-sizing: border-box; }
+      .card-actions button { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      @media (max-width: 768px) { .card-actions { grid-template-columns: 1fr; } }
       .project-title { font-size: 17px; font-weight: 800; margin-bottom: 6px; }
       .task-meta { color: var(--muted); font-size: 12px; line-height: 1.7; }
       .status-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 4px 9px; border-radius: 999px; background: #f1f5f9; color: #64748b; font-size: 12px; font-weight: 800; white-space: nowrap; }
@@ -2460,11 +2463,10 @@
                               <th>考生人数</th>
                               <th>监控账号</th>
                               <th>监控口令</th>
-                              <th>监考地址</th>
                             </tr>
                           </thead>
                           <tbody id="monitorAccountRows">
-                            <tr><td colspan="7">等待自动分班完成</td></tr>
+                            <tr><td colspan="6">等待自动分班完成</td></tr>
                           </tbody>
                         </table>
                       </div>
@@ -2951,7 +2953,7 @@
                 <div class="project-card-head"><div><div class="project-title">${safeText(task.projectName)}</div><div class="task-meta">客户名称：${safeText(task.customerName || "未记录")}<br>来源账号：${safeText(task.sourceAccount || "未记录")}<br>考试任务：1 · 正式场次：${formalCount} · 试考场次：${trialCount}<br>更新时间：${formatTaskTime(task.updatedAt)}</div></div>${statusChip(task.status)}</div>
                 <div class="mini-progress"><span style="width:${Math.max(0, Math.min(100, Number(task.progress || 0)))}%"></span></div>
                 <div class="task-meta" style="margin-top:7px;">当前进度 ${Number(task.progress || 0).toFixed(1)}%</div>
-                <div class="view-actions" style="margin-top:12px;"><button class="btn project-action" data-action="view" type="button">查看</button><button class="btn project-action" data-action="edit" type="button">编辑</button><button class="btn project-action" data-action="auto" type="button">进入自动配置</button><button class="btn project-action" data-action="delete" type="button">删除</button></div>
+                <div class="card-actions" style="margin-top:12px;"><button class="btn project-action" data-action="view" type="button">查看</button><button class="btn project-action" data-action="edit" type="button">编辑</button><button class="btn project-action" data-action="auto" type="button">进入自动配置</button><button class="btn project-action" data-action="delete" type="button">删除</button></div>
               </article>`;
             }).join("")
           : `<div class="empty-state">暂无匹配项目</div>`;
@@ -3075,6 +3077,21 @@
         return `<div class="task-step-actions"><button class="task-step-action" data-monitor-download="${safeText(sessionType)}" data-session-id="${safeText(sessionId)}" data-session-name="${safeText(session?.name || "")}" type="button" ${disabled ? "disabled" : ""} title="${safeText(title)}">下载监考账号</button></div>`;
       }
 
+      function buildScoreProcessAction(task, scoreStep) {
+        const status = scoreStep?.status || "pending";
+        const processText = status === "running" ? "处理中" : status === "success" ? "重新处理" : "触发成绩处理";
+        const downloadHtml = status === "success"
+          ? `<button class="task-step-action" data-score-download="${safeText(task.taskId)}" type="button">下载成绩反馈单</button>`
+          : "";
+        return `<div class="task-step-actions"><button class="task-step-action" data-score-process="${safeText(task.taskId)}" type="button" ${status === "running" ? "disabled" : ""}>${processText}</button>${downloadHtml}</div>`;
+      }
+
+      function buildSharedSheetAction(task, sharedSheetStep) {
+        const status = sharedSheetStep?.status || "pending";
+        const actionText = status === "running" ? "填写中" : status === "success" ? "重新填写" : "触发填写";
+        return `<div class="task-step-actions"><button class="task-step-action" data-shared-sheet-fill="${safeText(task.taskId)}" type="button" ${status === "running" ? "disabled" : ""}>${actionText}</button></div>`;
+      }
+
       function buildGroupedCandidateStep(task, stepMap, sessionType) {
         const importKey = sessionType === "formal" ? "formal_candidate_import" : "trial_candidate_import";
         const subKey = sessionType === "formal" ? "formalExamStatus" : "trialExamStatus";
@@ -3130,6 +3147,24 @@
         }));
         display.push(buildGroupedCandidateStep(task, stepMap, "trial"));
         display.push(buildGroupedCandidateStep(task, stepMap, "formal"));
+        const sharedSheetStep = stepMap.get("project_shared_sheet");
+        display.push(cloneTaskStep(sharedSheetStep, {
+          stepKey: "project_shared_sheet",
+          stepName: "项目共享大表",
+          status: sharedSheetStep?.status || "pending",
+          triggerActionHtml: buildSharedSheetAction(task, sharedSheetStep),
+          extraDetail: sharedSheetStep?.result?.updatedRows
+            ? `已填写场次：${sharedSheetStep.result.updatedRows} 个`
+            : "",
+        }));
+        const scoreStep = stepMap.get("score_process");
+        display.push(cloneTaskStep(scoreStep, {
+          stepKey: "score_process",
+          stepName: "成绩处理",
+          status: scoreStep?.status || "pending",
+          triggerActionHtml: buildScoreProcessAction(task, scoreStep),
+          extraDetail: scoreStep?.result?.fileName ? `成绩反馈单文件：${scoreStep.result.fileName}` : "",
+        }));
         return display;
       }
 
@@ -3206,6 +3241,34 @@
         const link = document.createElement("a");
         link.href = url;
         link.download = monitorAccountFileName(payload.session);
+        link.click();
+        URL.revokeObjectURL(url);
+      }
+
+      async function triggerScoreProcess(taskId) {
+        if (!taskId) throw new Error("缺少任务编号");
+        const task = await fetchJson(`/api/tasks/${encodeURIComponent(taskId)}/scores/process`, { method: "POST" });
+        renderTaskDetail(task);
+      }
+
+      async function triggerProjectSharedSheetFill(taskId) {
+        if (!taskId) throw new Error("缺少任务编号");
+        const task = await fetchJson(`/api/tasks/${encodeURIComponent(taskId)}/shared-sheet/fill`, { method: "POST" });
+        renderTaskDetail(task);
+      }
+
+      async function downloadScoreFeedback(taskId) {
+        if (!taskId) throw new Error("缺少任务编号");
+        const response = await fetch(`${runtime.apiBase}/api/tasks/${encodeURIComponent(taskId)}/scores/download`);
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || "成绩反馈单下载失败");
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "成绩反馈单.xlsx";
         link.click();
         URL.revokeObjectURL(url);
       }
@@ -3944,8 +4007,13 @@
         return `${sanitizeDownloadName(`${session.session_id}-${session.name}`)}.xlsx`;
       }
 
+      function monitorSessionUrl(sessionId) {
+        const normalized = String(sessionId || "").trim();
+        return normalized ? `https://eztest.org/monitor/session/${encodeURIComponent(normalized)}/` : "";
+      }
+
       function buildMonitorAccounts(session, rooms) {
-        const sessionUrl = session?.url || "";
+        const sessionUrl = monitorSessionUrl(session?.session_id);
         return rooms.map((room) => ({
           session_id: session.session_id,
           session_name: session.name,
@@ -3953,7 +4021,7 @@
           num: room.num,
           account: room.account,
           pwd: room.pwd,
-          monitor_url: room.monitor_url || room.monitorUrl || room.url || sessionUrl,
+          monitor_url: sessionUrl,
         }));
       }
 
@@ -3975,11 +4043,10 @@
                     <td>${escapeHtml(String(row.num))}</td>
                     <td>${escapeHtml(row.account)}</td>
                     <td>${escapeHtml(row.pwd)}</td>
-                    <td>${escapeHtml(row.monitor_url || "")}</td>
                   </tr>`,
               )
               .join("")
-          : `<tr><td colspan="7">等待自动分班完成</td></tr>`;
+          : `<tr><td colspan="6">等待自动分班完成</td></tr>`;
       }
 
       async function downloadMonitorAccountsExcel() {
@@ -4941,6 +5008,60 @@
           } finally {
             monitorDownload.textContent = originalText;
             monitorDownload.disabled = false;
+          }
+          return;
+        }
+        const sharedSheetFill = event.target.closest("[data-shared-sheet-fill]");
+        if (sharedSheetFill) {
+          event.stopPropagation();
+          if (sharedSheetFill.disabled) return;
+          sharedSheetFill.disabled = true;
+          const originalText = sharedSheetFill.textContent;
+          sharedSheetFill.textContent = "填写中";
+          try {
+            await triggerProjectSharedSheetFill(sharedSheetFill.dataset.sharedSheetFill);
+          } catch (error) {
+            alert(error.message || String(error));
+            await openTaskDetail(taskViewState.currentTaskId);
+          } finally {
+            sharedSheetFill.textContent = originalText;
+            sharedSheetFill.disabled = false;
+          }
+          return;
+        }
+        const scoreProcess = event.target.closest("[data-score-process]");
+        if (scoreProcess) {
+          event.stopPropagation();
+          if (scoreProcess.disabled) return;
+          scoreProcess.disabled = true;
+          const originalText = scoreProcess.textContent;
+          scoreProcess.textContent = "处理中";
+          try {
+            await triggerScoreProcess(scoreProcess.dataset.scoreProcess);
+          } catch (error) {
+            alert(error.message || String(error));
+            await openTaskDetail(taskViewState.currentTaskId);
+          } finally {
+            scoreProcess.textContent = originalText;
+            scoreProcess.disabled = false;
+          }
+          return;
+        }
+        const scoreDownload = event.target.closest("[data-score-download]");
+        if (scoreDownload) {
+          event.stopPropagation();
+          if (scoreDownload.disabled) return;
+          scoreDownload.disabled = true;
+          const originalText = scoreDownload.textContent;
+          scoreDownload.textContent = "正在下载...";
+          try {
+            await downloadScoreFeedback(scoreDownload.dataset.scoreDownload);
+          } catch (error) {
+            alert(error.message || String(error));
+            await openTaskDetail(taskViewState.currentTaskId);
+          } finally {
+            scoreDownload.textContent = originalText;
+            scoreDownload.disabled = false;
           }
           return;
         }

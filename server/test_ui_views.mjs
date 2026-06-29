@@ -158,11 +158,21 @@ test("project management supports deleting projects", () => {
   assert.ok(html.includes("/api/tasks/"));
 });
 
+test("project card actions use a bounded two-column grid", () => {
+  assert.match(html, /\.project-card\s*\{[^}]*overflow:\s*hidden[^}]*box-sizing:\s*border-box/s);
+  assert.match(html, /\.card-actions\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*max-width:\s*100%/s);
+  assert.match(html, /\.card-actions\s+button\s*\{[^}]*width:\s*100%[^}]*min-width:\s*0[^}]*text-overflow:\s*ellipsis/s);
+  assert.ok(html.includes('class="card-actions"'));
+});
+
 test("exam detail progress cards include paper binding and grouped candidate flows", () => {
   assert.ok(html.includes("buildTaskDisplaySteps(task)"));
   assert.ok(html.includes("试卷绑定"));
   assert.ok(html.includes("试考考生导入 & 自动分班"));
   assert.ok(html.includes("正式考试考生导入 & 自动分班"));
+  assert.ok(html.includes("成绩处理"));
+  assert.ok(html.includes("data-score-process"));
+  assert.ok(html.includes("data-score-download"));
   assert.ok(html.includes("data-monitor-download"));
   assert.ok(html.includes("下载监考账号"));
   assert.ok(html.includes("触发试卷绑定"));
@@ -170,4 +180,33 @@ test("exam detail progress cards include paper binding and grouped candidate flo
   assert.ok(html.includes("paperFormBind"));
   assert.ok(html.includes('stepName: "试卷绑定"'));
   assert.ok(html.includes("/steps/paper_form_bind/retry"));
+});
+
+test("exam detail shows project shared sheet before score processing with a manual trigger", () => {
+  assert.ok(html.includes("项目共享大表"));
+  assert.ok(html.includes("data-shared-sheet-fill"));
+  assert.ok(html.includes("触发填写"));
+  assert.ok(html.includes("重新填写"));
+  assert.ok(html.includes("/shared-sheet/fill"));
+  const displaySteps = html.slice(
+    html.indexOf("function buildTaskDisplaySteps(task)"),
+    html.indexOf("function renderTaskDetail(task)"),
+  );
+  assert.ok(displaySteps.indexOf('stepKey: "project_shared_sheet"') < displaySteps.indexOf('stepKey: "score_process"'));
+});
+
+test("monitor account preview uses monitor session URL", () => {
+  assert.ok(html.includes("function monitorSessionUrl"));
+  assert.ok(html.includes("https://eztest.org/monitor/session/"));
+  const buildMonitorAccounts = html.slice(html.indexOf("function buildMonitorAccounts"));
+  assert.ok(buildMonitorAccounts.includes("monitor_url: sessionUrl"));
+});
+
+test("candidate monitor account preview hides monitor address but keeps it in download payload", () => {
+  const previewMarkup = html.slice(html.indexOf('id="monitorAccountCard"'), html.indexOf('async function downloadMonitorAccountsExcel'));
+  assert.equal(previewMarkup.includes("<th>监考地址</th>"), false);
+  assert.equal(previewMarkup.includes("row.monitor_url"), false);
+  assert.ok(previewMarkup.includes('colspan="6"'));
+  const downloadFn = html.slice(html.indexOf("async function downloadMonitorAccountsExcel"));
+  assert.ok(downloadFn.includes("monitor_url: row.monitor_url || \"\""));
 });

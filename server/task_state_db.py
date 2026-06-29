@@ -16,11 +16,14 @@ STEP_DEFS = [
     ("formal_candidate_import", "正式考试考生导入"),
     ("sessions_auto_rooms", "试考、正式考试自动分班"),
     ("sessions_invigilator_export", "试考、正式考试监考账号导出"),
+    ("project_shared_sheet", "项目共享大表"),
+    ("score_process", "成绩处理"),
 ]
 
 VALID_STATUSES = {
     "pending", "running", "success", "failed", "waiting_manual", "skipped"
 }
+STEP_ORDER = {step_key: index for index, (step_key, _) in enumerate(STEP_DEFS)}
 
 
 def utc_now():
@@ -139,6 +142,14 @@ class TaskStore:
             if "hidden_at" not in columns:
                 db.execute("ALTER TABLE exam_tasks ADD COLUMN hidden_at TEXT")
 
+    def _ensure_steps(self, db, task_id):
+        for step_key, step_name in STEP_DEFS:
+            db.execute(
+                """INSERT OR IGNORE INTO exam_task_steps
+                (task_id, step_key, step_name) VALUES (?, ?, ?)""",
+                (task_id, step_key, step_name),
+            )
+
     def create_task(self, project_name, source_account="", config=None, task_id=None, owner_email=""):
         task_id = task_id or str(uuid.uuid4())
         now = utc_now()
@@ -149,12 +160,7 @@ class TaskStore:
                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (task_id, project_name or "未命名项目", source_account or "", owner_email or "", now, now, json.dumps(config or {}, ensure_ascii=False)),
             )
-            for step_key, step_name in STEP_DEFS:
-                db.execute(
-                    """INSERT OR IGNORE INTO exam_task_steps
-                    (task_id, step_key, step_name) VALUES (?, ?, ?)""",
-                    (task_id, step_key, step_name),
-                )
+            self._ensure_steps(db, task_id)
         return self.get_task(task_id)
 
     def upsert_session(self, task_id, session_type, session):
@@ -372,8 +378,9 @@ class TaskStore:
 
     def _refresh_task(self, db, task_id):
         rows = db.execute(
-            "SELECT step_name, status FROM exam_task_steps WHERE task_id=? ORDER BY rowid", (task_id,)
+            "SELECT step_key, step_name, status FROM exam_task_steps WHERE task_id=?", (task_id,)
         ).fetchall()
+        rows = sorted(rows, key=lambda row: STEP_ORDER.get(row["step_key"], len(STEP_ORDER)))
         effective = [row for row in rows if row["status"] != "skipped"]
         completed = sum(1 for row in effective if row["status"] == "success")
         progress = round((completed / len(effective) * 100) if effective else 100, 1)
@@ -415,8 +422,10 @@ class TaskStore:
             task = db.execute("SELECT * FROM exam_tasks WHERE task_id=?", (task_id,)).fetchone()
             if not task:
                 return None
+            self._ensure_steps(db, task_id)
             sessions = db.execute("SELECT * FROM exam_sessions WHERE task_id=? ORDER BY session_type", (task_id,)).fetchall()
-            steps = db.execute("SELECT * FROM exam_task_steps WHERE task_id=? ORDER BY rowid", (task_id,)).fetchall()
+            steps = db.execute("SELECT * FROM exam_task_steps WHERE task_id=?", (task_id,)).fetchall()
+            steps = sorted(steps, key=lambda row: STEP_ORDER.get(row["step_key"], len(STEP_ORDER)))
         result = self._task_summary(task)
         result["config"] = loads(task["config_json"], {})
         result["sessions"] = [self._session(row) for row in sessions]
