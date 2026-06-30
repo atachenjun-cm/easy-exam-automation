@@ -41,6 +41,107 @@ test("candidate import forwards optional course_code to EasyExam tenant API", ()
   assert.ok(serverSource.includes("candidate_tenant_payload.mjs"));
 });
 
+test("candidate import and auto rooms write back task detail state", () => {
+  assert.ok(serverSource.includes("async function syncTaskDetailSessionState"));
+  const importHandler = serverSource.slice(
+    serverSource.indexOf("async function handleCandidateImport"),
+    serverSource.indexOf("async function handleRoomsPreview"),
+  );
+  assert.ok(importHandler.includes("updateTaskSessionProgress(task, sessionId"));
+  assert.ok(importHandler.includes("taskSessionImportStepKey(session.sessionType)"));
+
+  const roomsHandler = serverSource.slice(
+    serverSource.indexOf("async function handleRoomsAuto"),
+    serverSource.indexOf("async function handleCreateJob"),
+  );
+  assert.ok(roomsHandler.includes("updateTaskSessionProgress(task, sessionId"));
+  assert.ok(roomsHandler.includes("sessions_auto_rooms"));
+  assert.ok(roomsHandler.includes("sessions_invigilator_export"));
+
+  const detailHandler = serverSource.slice(
+    serverSource.indexOf("async function handleTaskDetail"),
+    serverSource.indexOf("async function handleTaskHide"),
+  );
+  assert.ok(detailHandler.includes("syncTaskDetailSessionState(req, task)"));
+});
+
+test("monitor account export uses monitor session URL instead of exam URL", () => {
+  assert.ok(serverSource.includes("function monitorSessionUrl"));
+  assert.ok(serverSource.includes("https://eztest.org/monitor/session/"));
+  assert.equal(serverSource.includes("/exam/session/"), false);
+});
+
+test("exam detail monitor download can fall back to cached generated monitor accounts", () => {
+  assert.ok(serverSource.includes("async function findCachedMonitorAccounts"));
+  const handler = serverSource.slice(
+    serverSource.indexOf("async function handleSessionMonitorAccounts"),
+    serverSource.indexOf("function normalizeTenantList"),
+  );
+  assert.ok(handler.includes("findCachedMonitorAccounts(sessionId)"));
+  assert.ok(handler.includes("tenantRooms"));
+  assert.ok(handler.includes("cachedRooms"));
+  assert.ok(serverSource.includes("num: room.num || cached.num || \"\""));
+});
+
+test("score processing exposes task endpoint and uses template exporter", () => {
+  assert.ok(serverSource.includes("scoreFeedbackExporterScript"));
+  assert.ok(serverSource.includes("async function handleScoreProcess"));
+  assert.ok(serverSource.includes("scoreProcessMatch"));
+  assert.ok(serverSource.includes("scoreDownloadMatch"));
+  assert.ok(serverSource.includes("score_process"));
+  assert.ok(serverSource.includes("成绩处理"));
+  assert.ok(serverSource.includes("processedDate"));
+});
+
+test("score processing fetches paged entry and score data before exporting", () => {
+  assert.ok(serverSource.includes("async function fetchAllSessionEntries"));
+  assert.ok(serverSource.includes("async function fetchAllSessionScores"));
+  assert.ok(serverSource.includes("async function fetchSingleEntryStatus"));
+  assert.ok(serverSource.includes("async function fetchSingleEntryScore"));
+  assert.ok(serverSource.includes("/entry/${encodeURIComponent(page)}/${encodeURIComponent(perPage)}/"));
+  assert.ok(serverSource.includes("/score/${encodeURIComponent(page)}/${encodeURIComponent(perPage)}/"));
+  assert.ok(serverSource.includes("/entry/${encodeURIComponent(permit)}/score/"));
+  assert.ok(serverSource.includes("mergeEntryAndScoreRows"));
+  const handler = serverSource.slice(
+    serverSource.indexOf("async function handleScoreProcess"),
+    serverSource.indexOf("async function handleScoreDownload"),
+  );
+  assert.ok(handler.includes("fetchAllSessionEntries(login, formalSession.session_id"));
+  assert.ok(handler.includes("fetchAllSessionScores(login, formalSession.session_id"));
+  assert.ok(handler.includes("mergeEntryAndScoreRows"));
+  assert.ok(handler.includes("attachCourseNamesToCandidates"));
+});
+
+test("completed API creation jobs sync formal and trial sessions to Tencent Docs without blocking EasyExam", () => {
+  assert.ok(serverSource.includes('from "./tencent_docs_sync.mjs"'));
+  const creationJob = serverSource.slice(
+    serverSource.indexOf("async function runYikaoApiCreationJob"),
+    serverSource.indexOf("async function runPythonJson"),
+  );
+  assert.ok(creationJob.includes("syncExamConfigToTencentDocs"));
+  assert.ok(creationJob.includes("tencentDocsSettingsFromEnv(process.env)"));
+  assert.ok(creationJob.includes("腾讯文档] 已同步"));
+  assert.ok(creationJob.includes("腾讯文档] 自动同步失败"));
+  assert.ok(creationJob.indexOf("syncExamConfigToTencentDocs") < creationJob.indexOf('type: "done"'));
+});
+
+test("project shared sheet trigger persists status and syncs formal plus optional trial sessions", () => {
+  assert.ok(serverSource.includes("async function handleProjectSharedSheetFill(taskId, req, res)"));
+  const handler = serverSource.slice(
+    serverSource.indexOf("async function handleProjectSharedSheetFill"),
+    serverSource.indexOf("function scoreFeedbackFileName"),
+  );
+  assert.ok(handler.includes('updateTaskStep(taskId, "project_shared_sheet", "running"'));
+  assert.ok(handler.includes('session.sessionType === "formal"'));
+  assert.ok(handler.includes('session.sessionType === "trial"'));
+  assert.ok(handler.includes("tencentDocsSettingsFromEnv(process.env)"));
+  assert.ok(handler.includes("syncExamConfigToTencentDocs"));
+  assert.ok(handler.includes('updateTaskStep(taskId, "project_shared_sheet", "success"'));
+  assert.ok(handler.includes('updateTaskStep(taskId, "project_shared_sheet", "failed"'));
+  assert.ok(serverSource.includes("shared-sheet\\/fill$/"));
+  assert.ok(serverSource.includes("handleProjectSharedSheetFill(decodeURIComponent(sharedSheetFillMatch[1]), req, res)"));
+});
+
 test("candidate import configures selected import fields as visible personal fields before importing", () => {
   assert.ok(serverSource.includes("const {"));
   assert.ok(serverSource.includes("selectedImportFields"));

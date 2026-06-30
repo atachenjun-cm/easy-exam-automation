@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildBatchUpdateRequests,
   buildTencentDocRows,
+  syncExamConfigToTencentDocs,
 } from "./tencent_docs_sync.mjs";
 
 const config = {
@@ -18,6 +19,8 @@ const config = {
   clientExam: true,
   videoMonitor: true,
   hawkeye: true,
+  loginVerifyMode: "考后公安验证",
+  timeRule: "迟到扣时",
 };
 
 const created = [
@@ -28,17 +31,24 @@ const created = [
 test("builds Tencent Docs rows through AD with configured defaults", () => {
   const rows = buildTencentDocRows({ config, created });
 
+  assert.equal(rows.length, 2);
   assert.equal(rows[0].length, 30);
+  assert.equal(rows[0][0], "项目招聘考试");
   assert.equal(rows[0][1], "F0020795");
   assert.equal(rows[0][2], "");
   assert.equal(rows[0][3], "正式");
   assert.equal(rows[0][4], "蜀道集团");
   assert.equal(rows[0][5], "81");
+  assert.equal(rows[0][6], "2026/07/01");
+  assert.equal(rows[0][7], "2026/07/01");
+  assert.equal(rows[0][8], "提前30分钟登录，允许迟到20分钟");
+  assert.equal(rows[0][9], "2026/07/01 09:00-2026/07/01 11:00");
   assert.equal(rows[0][10], "120分钟");
   assert.equal(rows[0][11], "客户端，10次");
   assert.equal(rows[0][12], "是，作答60分钟可交卷");
   assert.equal(rows[0][13], "一个单元，60-120分钟");
   assert.equal(rows[0][14], "准考证号");
+  assert.equal(rows[0][15], "formal-1");
   assert.equal(rows[0][16], "准点收卷，迟到及离开扣时");
   assert.equal(rows[0][17], "双监控");
   assert.equal(rows[0][18], "考中侦测");
@@ -48,6 +58,8 @@ test("builds Tencent Docs rows through AD with configured defaults", () => {
   assert.equal(rows[0][22], "纸质草稿纸");
   assert.equal(rows[0][23], "客户端");
   assert.equal(rows[0][24], "仅在线客服");
+  assert.equal(rows[0][25], "不允许");
+  assert.equal(rows[0][26], "鹰眼");
   assert.equal(rows[0][28], "声音监控");
   assert.match(rows[0][29], /考生您好！项目招聘考试笔试将于北京时间2026年7月1日\(周三\)09:00-11:00举行。/);
   assert.match(rows[0][29], /试考时间为2026年6月30日15:00-6月30日17:00/);
@@ -55,12 +67,54 @@ test("builds Tencent Docs rows through AD with configured defaults", () => {
   assert.match(rows[0][29], /考试口令统一为：formal-1/);
 
   assert.equal(rows[1][3], "试考-分散模式");
+  assert.equal(rows[1][5], "62");
+  assert.equal(rows[1][6], "2026/06/30");
+  assert.equal(rows[1][7], "2026/06/30");
+  assert.equal(rows[1][8], "不允许提前登录，无迟到限制");
   assert.equal(rows[1][10], "90分钟");
   assert.equal(rows[1][12], "是，作答10分钟可交卷");
   assert.equal(rows[1][13], "一个单元，10-90分钟");
+  assert.equal(rows[1][15], "trial-1");
   assert.equal(rows[1][16], "不准点收卷，无迟到扣时");
   assert.equal(rows[1][17], "不需要");
   assert.equal(rows[1][18], "不需要");
+  assert.equal(rows[1][20], "ATA短信");
+  assert.equal(rows[1][21], "已通知");
+});
+
+test("leaves AI cloud monitoring blank when hawkeye is disabled", () => {
+  const rows = buildTencentDocRows({ config: { ...config, hawkeye: false }, created: [created[0]] });
+  assert.equal(rows[0][26], "");
+});
+
+test("copies Tencent Docs example rows before overriding task-specific fields", () => {
+  const remoteRows = [
+    ["考试名称"],
+    ["示例-试考", "F0020795", "司园园", "试考-分散模式", "蜀道集团", "138", "2026/6/24", "2026/6/25", "不允许提前登录，无迟到限制", "示例时间", "90分钟", "客户端，10次", "是，作答10分钟可交卷", "一个单元，10-90分钟", "手机号码", "427183", "", "", "", "", "ATA短信", "已通知", "", "客户端", "", "不允许", "鹰眼", "", "", "模板短信"],
+    ["示例-正式", "F0020795", "司园园", "正式", "蜀道集团", "138", "2026/6/25", "2026/6/25", "提前30分钟登录，允许迟到20分钟", "示例时间", "120分钟", "客户端，10次", "是，作答60分钟可交卷", "第一单元 60-90分钟\n第二单元 0-30分钟", "手机号码", "427182", "", "", "", "", "ATA短信", "已通知", "", "客户端", "", "不允许", "鹰眼", "", "", "模板短信"],
+  ];
+
+  const rows = buildTencentDocRows({ config, created, remoteRows });
+
+  assert.equal(rows[0][0], "项目招聘考试");
+  assert.equal(rows[0][1], "F0020795");
+  assert.equal(rows[0][2], "");
+  assert.equal(rows[0][4], "蜀道集团");
+  assert.equal(rows[0][5], "81");
+  assert.equal(rows[0][12], "是，作答60分钟可交卷");
+  assert.equal(rows[0][13], "一个单元，60-120分钟");
+  assert.equal(rows[0][15], "formal-1");
+  assert.equal(rows[0][20], "ATA短信");
+  assert.equal(rows[0][21], "已通知");
+  assert.equal(rows[0][22], "纸质草稿纸");
+  assert.notEqual(rows[0][29], "模板短信");
+  assert.match(rows[0][29], /考试口令统一为：formal-1/);
+  assert.equal(rows[1][1], "F0020795");
+  assert.equal(rows[1][3], "试考-分散模式");
+  assert.equal(rows[1][5], "62");
+  assert.equal(rows[1][12], "是，作答10分钟可交卷");
+  assert.equal(rows[1][13], "一个单元，10-90分钟");
+  assert.equal(rows[1][15], "trial-1");
 });
 
 test("appends to blank rows and writes font plus centered alignment", () => {
@@ -76,8 +130,69 @@ test("appends to blank rows and writes font plus centered alignment", () => {
   });
 
   assert.deepEqual(requests.map((item) => item.updateRangeRequest.gridData.startRow), [2, 3]);
-  const cell = requests[0].updateRangeRequest.gridData.rows[0].values[29];
-  assert.equal(cell.cellFormat.textFormat.fontSize, 10);
-  assert.equal(cell.cellFormat.horizontalAlignment, "CENTER");
-  assert.equal(cell.cellFormat.verticalAlignment, "MIDDLE");
+  assert.equal(requests[0].updateRangeRequest.sheetId, "BB08J2");
+  assert.equal(requests[0].updateRangeRequest.gridData.rows[0].values[15].cellValue.text, "formal-1");
+  assert.equal(requests[1].updateRangeRequest.gridData.rows[0].values[15].cellValue.text, "trial-1");
+
+  for (const request of requests) {
+    const rowValues = request.updateRangeRequest.gridData.rows[0].values;
+    assert.equal(rowValues.length, 30);
+    assert.equal(rowValues[15].cellFormat.textFormat.fontSize, 10);
+    assert.equal(rowValues[15].cellFormat.horizontalAlignment, "CENTER");
+    assert.equal(rowValues[15].cellFormat.verticalAlignment, "MIDDLE");
+    assert.equal(rowValues[29].cellFormat.textFormat.fontSize, 10);
+    assert.equal(rowValues[29].cellFormat.horizontalAlignment, "CENTER");
+    assert.equal(rowValues[29].cellFormat.verticalAlignment, "MIDDLE");
+  }
+});
+
+test("sync reads the sheet through AD before submitting a batch update", async () => {
+  const calls = [];
+  const fetchImpl = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    if (!options.method || options.method === "GET") {
+      if (String(url).endsWith("/A1:AD200")) {
+        return new Response(JSON.stringify({
+          gridData: {
+            rows: [
+              { values: [{ cellValue: { text: "考试名称" } }] },
+              { values: Array.from({ length: 16 }, (_, index) => ({ cellValue: { text: index === 15 ? "formal-1" : "" } })) },
+            ],
+          },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (String(url).endsWith("/A201:AD400")) {
+        return new Response(JSON.stringify({
+          code: 400001,
+          message: "invalid param error: 'range' invalid",
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      throw new Error(`unexpected read range: ${url}`);
+    }
+    return new Response(JSON.stringify({ responses: [{ updateRangeResponse: {} }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  const result = await syncExamConfigToTencentDocs({
+    config,
+    created: [created[0]],
+    settings: {
+      clientId: "client",
+      accessToken: "token",
+      openId: "open",
+      fileId: "file",
+      sheetId: "BB08J2",
+    },
+    fetchImpl,
+  });
+
+  assert.equal(result.updatedRows, 1);
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].options.headers["Access-Token"], "token");
+  assert.ok(calls[0].url.endsWith("/A1:AD200"));
+  assert.ok(calls[1].url.endsWith("/A201:AD400"));
+  assert.equal(calls[2].options.method, "POST");
+  assert.equal(JSON.parse(calls[2].options.body).requests.length, 1);
 });

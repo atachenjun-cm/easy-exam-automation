@@ -63,6 +63,35 @@ class TaskStoreTest(unittest.TestCase):
         step = next(item for item in detail["steps"] if item["stepKey"] == "paper_bind")
         self.assertEqual(step["stepName"], "正式场次绑定科目")
 
+    def test_get_task_backfills_score_process_step_for_existing_tasks(self):
+        task = self.store.create_task("旧项目", "account-a", {})
+        task_id = task["taskId"]
+        with self.store.connect() as db:
+            db.execute("DELETE FROM exam_task_steps WHERE task_id=? AND step_key=?", (task_id, "score_process"))
+
+        detail = self.store.get_task(task_id)
+
+        score_step = next(step for step in detail["steps"] if step["stepKey"] == "score_process")
+        self.assertEqual(score_step["stepName"], "成绩处理")
+        self.assertEqual(score_step["status"], "pending")
+
+    def test_get_task_backfills_project_shared_sheet_before_score_process(self):
+        task = self.store.create_task("旧项目", "account-a", {})
+        task_id = task["taskId"]
+        with self.store.connect() as db:
+            db.execute(
+                "DELETE FROM exam_task_steps WHERE task_id=? AND step_key=?",
+                (task_id, "project_shared_sheet"),
+            )
+
+        detail = self.store.get_task(task_id)
+        step_keys = [step["stepKey"] for step in detail["steps"]]
+        shared_step = next(step for step in detail["steps"] if step["stepKey"] == "project_shared_sheet")
+
+        self.assertEqual(shared_step["stepName"], "项目共享大表")
+        self.assertEqual(shared_step["status"], "pending")
+        self.assertLess(step_keys.index("project_shared_sheet"), step_keys.index("score_process"))
+
     def test_combined_step_requires_both_children(self):
         task = self.store.create_task("项目甲", "account-a", {})
         task_id = task["taskId"]
