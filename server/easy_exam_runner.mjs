@@ -3450,7 +3450,7 @@ async function runBasicInfo(page, config, emit) {
   const timeRule = config.isMockExam ? "不扣时" : "迟到及离开扣时";
   await selectRadioInGroup(page, "试卷扣时规则", timeRule);
   await selectRadioInGroup(page, "场次类型", "考试");
-  await selectRadioInGroup(page, "考试地址", "独立考试地址");
+  await selectRadioInGroup(page, "考试地址", "统一考试地址");
   await selectRadioInGroup(page, "交卷后跳转", "不跳转");
 
   if (config.welcomeText) {
