@@ -2177,11 +2177,11 @@
                   </svg>
                   重置
                 </button>
-                <button class="btn" id="demoBtn" type="button" title="使用当前测试需求单模拟导入">
+                <button class="btn" id="demoBtn" type="button" title="下载新版易考需求单导入模板">
                   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                    <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
                   </svg>
-                  模拟导入
+                  导入模板下载
                 </button>
                 <button class="btn primary" id="runBtn" type="button" disabled title="开始自动配置">
                   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -3079,7 +3079,7 @@
 
       function buildScoreProcessAction(task, scoreStep) {
         const status = scoreStep?.status || "pending";
-        const processText = status === "running" ? "处理中" : status === "success" ? "重新处理" : "触发成绩处理";
+        const processText = status === "running" ? "处理中" : status === "success" ? "重新处理" : "成绩处理";
         const downloadHtml = status === "success"
           ? `<button class="task-step-action" data-score-download="${safeText(task.taskId)}" type="button">下载成绩反馈单</button>`
           : "";
@@ -3088,8 +3088,8 @@
 
       function buildSharedSheetAction(task, sharedSheetStep) {
         const status = sharedSheetStep?.status || "pending";
-        const actionText = status === "running" ? "填写中" : status === "success" ? "重新填写" : "触发填写";
-        return `<div class="task-step-actions"><button class="task-step-action" data-shared-sheet-fill="${safeText(task.taskId)}" type="button" ${status === "running" ? "disabled" : ""}>${actionText}</button></div>`;
+        const actionText = status === "running" ? "填写中" : status === "success" ? "重新填写" : "填写";
+        return `<div class="task-step-actions"><a class="task-step-action" href="https://docs.qq.com/sheet/DR3NiT296WmtpWXVM?tab=BB08J2" target="_blank" rel="noopener noreferrer">打开在线表</a><button class="task-step-action" data-shared-sheet-fill="${safeText(task.taskId)}" type="button" ${status === "running" ? "disabled" : ""}>${actionText}</button></div>`;
       }
 
       function buildGroupedCandidateStep(task, stepMap, sessionType) {
@@ -3140,7 +3140,7 @@
           completedAt: paperState.completedAt || null,
           durationMs: paperState.durationMs || null,
           errorMessage: paperState.errorMessage || "",
-          triggerActionHtml: `<div class="task-step-actions"><button class="task-step-action" data-trigger-step="paper_form_bind" type="button">${paperState.status === "failed" ? "重试试卷绑定" : "触发试卷绑定"}</button></div>`,
+          triggerActionHtml: `<div class="task-step-actions"><button class="task-step-action" data-trigger-step="paper_form_bind" type="button">${paperState.status === "failed" ? "重试试卷绑定" : "试卷绑定"}</button></div>`,
           logs: Array.isArray(paperState.logs) && paperState.logs.length
             ? paperState.logs
             : [{ time: null, message: "等待正式场次绑定科目完成后处理试卷绑定。" }],
@@ -4428,7 +4428,7 @@
                 </div>
                 <div class="eq-field">
                   <div class="eq-label">考试地址</div>
-                  <div class="eq-inline"><span><span class="eq-radio on"></span>独立考试地址</span><span><span class="eq-radio"></span>统一考试地址</span></div>
+                  <div class="eq-inline"><span><span class="eq-radio"></span>独立考试地址</span><span><span class="eq-radio on"></span>统一考试地址</span></div>
                 </div>
                 <div class="eq-field">
                   <div class="eq-label">交卷后跳转</div>
@@ -4687,9 +4687,13 @@
       });
 
       demoBtn.addEventListener("click", () => {
-        uiState.uploadId = "demo";
-        uiState.imported = demoData;
-        applyImportResult(demoData.filename, demoData);
+        const link = document.createElement("a");
+        link.href = `${runtime.apiBase}/api/templates/exam-request`;
+        link.download = "v2易考新建考试需求单.xlsx";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        addLog("已开始下载导入模板。", "success");
       });
 
       saveLoginBtn.addEventListener("click", async () => {
@@ -5070,7 +5074,7 @@
           event.stopPropagation();
           trigger.disabled = true;
           const originalText = trigger.textContent;
-          trigger.textContent = "正在触发...";
+          trigger.textContent = "处理中...";
           try {
             const task = await fetchJson(`/api/tasks/${encodeURIComponent(taskViewState.currentTaskId)}/steps/${encodeURIComponent(trigger.dataset.triggerStep)}/retry`, { method: "POST" });
             renderTaskDetail(task);

@@ -434,6 +434,81 @@ async function selectRadioInGroup(page, groupLabel, optionLabel) {
   );
 }
 
+async function ensureRadioOptionInRow(page, rowLabel, optionLabel) {
+  await evaluate(
+    page,
+    ({ rowLabel: targetRowLabel, optionLabel: targetOptionLabel }) => {
+      const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const checked = (inputOrWrapper) => {
+        const root = inputOrWrapper instanceof HTMLInputElement
+          ? inputOrWrapper.closest(".ant-radio-wrapper") || inputOrWrapper.closest("label") || inputOrWrapper.closest(".ant-radio")
+          : inputOrWrapper;
+        const antRadio = root?.querySelector?.(".ant-radio") || root?.closest?.(".ant-radio");
+        const input = root?.querySelector?.("input[type='radio']") || (inputOrWrapper instanceof HTMLInputElement ? inputOrWrapper : null);
+        return antRadio ? antRadio.classList.contains("ant-radio-checked") : Boolean(input?.checked);
+      };
+      const clickRadio = (input, wrapper) => {
+        const target =
+          wrapper ||
+          input.closest(".ant-radio-wrapper") ||
+          input.closest("label") ||
+          input.closest(".ant-radio")?.querySelector(".ant-radio-inner") ||
+          input;
+        target.scrollIntoView?.({ block: "center", inline: "center" });
+        for (const el of [target, target.querySelector?.(".ant-radio-inner"), input].filter(Boolean)) {
+          el.click();
+        }
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+
+      const rows = [...document.querySelectorAll("div, li, section")]
+        .filter((el) => visible(el) && norm(el.textContent).includes(targetRowLabel) && el.querySelector("input[type='radio']"))
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return ar.height - br.height || ar.width - br.width || a.querySelectorAll("*").length - b.querySelectorAll("*").length;
+        });
+      let row = rows[0];
+      if (row && (!norm(row.textContent).includes(targetOptionLabel) || row.querySelectorAll("input[type='radio']").length < 2)) {
+        row = rows.find((el) => norm(el.textContent).includes(targetOptionLabel) && el.querySelectorAll("input[type='radio']").length >= 2) || row;
+      }
+      if (!row) throw new Error(`未找到单选行：${targetRowLabel}`);
+
+      let wrappers = [...row.querySelectorAll("label, .ant-radio-wrapper")].filter((el) => visible(el) && el.querySelector("input[type='radio']"));
+      let wrapper = wrappers.find((el) => norm(el.textContent).includes(targetOptionLabel));
+
+      if (!wrapper) {
+        const label = [...document.querySelectorAll("label, span, div")]
+          .filter((el) => visible(el) && norm(el.textContent) === targetRowLabel)
+          .sort((a, b) => a.getBoundingClientRect().width - b.getBoundingClientRect().width)[0];
+        const labelRect = label?.getBoundingClientRect();
+        if (labelRect) {
+          wrappers = [...document.querySelectorAll("label, .ant-radio-wrapper")]
+            .filter((el) => {
+              if (!visible(el) || !el.querySelector("input[type='radio']")) return false;
+              const rect = el.getBoundingClientRect();
+              return Math.abs((rect.top + rect.bottom) / 2 - (labelRect.top + labelRect.bottom) / 2) < 45;
+            })
+            .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+          wrapper = wrappers.find((el) => norm(el.textContent).includes(targetOptionLabel));
+        }
+      }
+
+      const input = wrapper?.querySelector("input[type='radio']");
+      if (!input) throw new Error(`未找到单选项：${targetRowLabel} / ${targetOptionLabel}`);
+      if (!checked(wrapper)) clickRadio(input, wrapper);
+      if (!checked(wrapper)) throw new Error(`单选项未选中：${targetRowLabel} / ${targetOptionLabel}`);
+    },
+    { rowLabel, optionLabel },
+  );
+}
+
 async function fillTextInputByPlaceholder(page, placeholder, value) {
   const locator = page.getByPlaceholder(placeholder).first();
   await locator.click();
@@ -2554,10 +2629,10 @@ async function ensurePostPoliceVerifySelected(page) {
   await ensureOptionCheckedByMouse(page, "考后公安验证", "radio");
 }
 
-async function setWebExamLeaveLimit(page, value) {
+async function setWebExamLeaveField(page, value, inputIndex = -1, fieldLabel = "网页考试输入框") {
   await evaluate(
     page,
-    (nextValue) => {
+    ({ nextValue, inputIndex, fieldLabel }) => {
       const norm = (text) => (text || "").replace(/\s+/g, " ").trim();
       const visible = (el) => {
         if (!(el instanceof HTMLElement)) return false;
@@ -2570,9 +2645,10 @@ async function setWebExamLeaveLimit(page, value) {
         .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length)[0];
       const inputs = [...(row || document).querySelectorAll("input")]
         .filter((input) => visible(input) && input.type !== "checkbox" && input.type !== "radio");
-      const input = inputs[inputs.length - 1] || inputs[0];
+      const normalizedIndex = inputIndex < 0 ? inputs.length + inputIndex : inputIndex;
+      const input = inputs[normalizedIndex] || inputs[inputs.length - 1] || inputs[0];
       if (!input) {
-        throw new Error("未找到网页考试允许离开次数输入框");
+        throw new Error(`未找到${fieldLabel}`);
       }
       const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set;
       input.focus();
@@ -2582,8 +2658,16 @@ async function setWebExamLeaveLimit(page, value) {
       input.dispatchEvent(new Event("change", { bubbles: true }));
       input.dispatchEvent(new Event("blur", { bubbles: true }));
     },
-    value,
+    { nextValue: value, inputIndex, fieldLabel },
   );
+}
+
+async function setWebExamLeaveSeconds(page, value) {
+  await setWebExamLeaveField(page, value, 0, "网页考试离开计时秒数输入框");
+}
+
+async function setWebExamLeaveLimit(page, value) {
+  await setWebExamLeaveField(page, value, -1, "网页考试允许离开次数输入框");
 }
 
 async function toggleSwitchByText(page, label, desired) {
@@ -3450,7 +3534,9 @@ async function runBasicInfo(page, config, emit) {
   const timeRule = config.isMockExam ? "不扣时" : "迟到及离开扣时";
   await selectRadioInGroup(page, "试卷扣时规则", timeRule);
   await selectRadioInGroup(page, "场次类型", "考试");
-  await selectRadioInGroup(page, "考试地址", "统一考试地址");
+  const examAddress = boolValue(config.unifiedExamAddress) || String(config.examAddress || config.examUrlType || "").includes("统一") ? "统一考试地址" : "独立考试地址";
+  await ensureRadioOptionInRow(page, "考试地址", examAddress);
+  emit(event("log", { level: "success", message: `已选择考试地址：${examAddress}。` }));
   await selectRadioInGroup(page, "交卷后跳转", "不跳转");
 
   if (config.welcomeText) {
@@ -3639,13 +3725,15 @@ async function runExamConfig(page, config, emit) {
     emit(event("log", { level: "success", message: "已配置锁定考试：客户端考试；电脑端和独占网络由易考页面自动联动。" }));
   } else if (config.webExam) {
     await setMasterCheckboxByLabel(page, "锁定考试", true);
+    await setStepValue(page, 0, config.clientLoginLimit || 10);
     await setCheckboxNearText(page, "网页考试", true);
+    await setWebExamLeaveSeconds(page, config.webLeaveSeconds || 5);
     if (config.leaveLimit != null) {
       await setWebExamLeaveLimit(page, config.leaveLimit);
     } else {
       emit(event("log", { level: "warn", message: "需求单未填写允许离开次数，网页考试离开次数保持页面默认值。" }));
     }
-    emit(event("log", { level: "success", message: `已配置锁定考试：网页考试，允许离开 ${config.leaveLimit ?? "空"} 次。` }));
+    emit(event("log", { level: "success", message: `已配置锁定考试：网页考试，允许登录 ${config.clientLoginLimit || 10} 次，每超过 ${config.webLeaveSeconds || 5} 秒计为离开一次，允许离开 ${config.leaveLimit ?? "空"} 次。` }));
   }
   if (config.watermark) {
     await setMasterCheckboxByLabel(page, "答题水印", true);

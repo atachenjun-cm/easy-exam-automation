@@ -175,7 +175,8 @@ test("exam detail progress cards include paper binding and grouped candidate flo
   assert.ok(html.includes("data-score-download"));
   assert.ok(html.includes("data-monitor-download"));
   assert.ok(html.includes("下载监考账号"));
-  assert.ok(html.includes("触发试卷绑定"));
+  assert.ok(html.includes("试卷绑定"));
+  assert.equal(html.includes("触发试卷绑定"), false);
   assert.ok(html.includes('data-trigger-step="paper_form_bind"'));
   assert.ok(html.includes("paperFormBind"));
   assert.ok(html.includes('stepName: "试卷绑定"'));
@@ -185,7 +186,10 @@ test("exam detail progress cards include paper binding and grouped candidate flo
 test("exam detail shows project shared sheet before score processing with a manual trigger", () => {
   assert.ok(html.includes("项目共享大表"));
   assert.ok(html.includes("data-shared-sheet-fill"));
-  assert.ok(html.includes("触发填写"));
+  assert.ok(html.includes("打开在线表"));
+  assert.ok(html.includes("https://docs.qq.com/sheet/DR3NiT296WmtpWXVM?tab=BB08J2"));
+  assert.ok(html.includes("填写"));
+  assert.equal(html.includes("触发填写"), false);
   assert.ok(html.includes("重新填写"));
   assert.ok(html.includes("/shared-sheet/fill"));
   const displaySteps = html.slice(
@@ -193,6 +197,13 @@ test("exam detail shows project shared sheet before score processing with a manu
     html.indexOf("function renderTaskDetail(task)"),
   );
   assert.ok(displaySteps.indexOf('stepKey: "project_shared_sheet"') < displaySteps.indexOf('stepKey: "score_process"'));
+});
+
+test("auto config page exposes exam request template download instead of demo import", () => {
+  assert.ok(html.includes("导入模板下载"));
+  assert.ok(html.includes("/api/templates/exam-request"));
+  assert.equal(html.includes("模拟导入"), false);
+  assert.equal(html.includes("applyImportResult(demoData.filename, demoData)"), false);
 });
 
 test("monitor account preview uses monitor session URL", () => {

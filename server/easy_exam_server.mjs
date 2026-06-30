@@ -76,6 +76,7 @@ const monitorAccountExporterScript = path.join(__dirname, "monitor_account_expor
 const scoreFeedbackExporterScript = path.join(__dirname, "score_feedback_exporter.py");
 const taskStateScript = path.join(__dirname, "task_state_db.py");
 const scoreFeedbackTemplatePath = path.join(rootDir, "template", "成绩单模板.xlsx");
+const examRequestTemplatePath = path.join(rootDir, "template", "v2易考新建考试需求单.xlsx");
 const taskDbPath = path.join(runtimeDir, "task_state.sqlite3");
 const pythonBin =
   process.env.CODEX_PYTHON ||
@@ -436,8 +437,11 @@ function buildSessionPayloads(config) {
   const clientExam = boolValue(config.clientExam) || String(config.examType || "").includes("客户端");
   const pledgeContent = String(config.pledgeContent || "").trim();
   const usePostPoliceVerify = videoMonitor && String(config.loginVerifyMode || "考后公安验证").includes("考后公安");
+  const unifiedExamAddress =
+    boolValue(config.unifiedExamAddress) || String(config.examAddress || config.examUrlType || "").includes("统一");
   const common = {
     allow_anonymous: false,
+    unified_exam_address: unifiedExamAddress,
     face_detection: false,
     face_detection_dur: true,
     face_detection_review: false,
@@ -450,7 +454,7 @@ function buildSessionPayloads(config) {
     show_score_detail: false,
     publish_score: false,
     send_result_email: false,
-    manual_score: false,
+    manual_score: boolValue(config.manualScore),
     new_mark: false,
     practice_mode: false,
     monitor: videoMonitor,
@@ -482,11 +486,14 @@ function buildSessionPayloads(config) {
       client_required: true,
       lock_screen: true,
       exclusive_network: true,
-      login_times: 10,
+      login_times: positiveNumber(config.clientLoginLimit, 10),
     });
   } else {
     Object.assign(main, {
       client_required: false,
+      lock_screen: true,
+      login_times: positiveNumber(config.clientLoginLimit, 10),
+      lock_screen_exit_sec: positiveNumber(config.webLeaveSeconds, 5),
       lock_screen_time: positiveNumber(config.leaveLimit, 5),
     });
   }
@@ -499,6 +506,8 @@ function buildSessionPayloads(config) {
       start: normalizeSessionDate(config.mockStartTimeDisplay),
       end: normalizeSessionDate(config.mockEndTimeDisplay),
       save_video: false,
+      nda: false,
+      nda_notice: "",
     };
     applyTimeRule(trial, "不扣时");
     delete trial.early;
@@ -513,7 +522,10 @@ function buildSessionPayloads(config) {
     } else {
       Object.assign(trial, {
         client_required: false,
-        lock_screen_time: 99,
+        lock_screen: true,
+        login_times: positiveNumber(config.clientLoginLimit, 10),
+        lock_screen_exit_sec: positiveNumber(config.webLeaveSeconds, 5),
+        lock_screen_time: positiveNumber(config.leaveLimit, 10),
       });
     }
     payloads.push({ kind: "mock", payload: trial });
@@ -630,21 +642,7 @@ async function runYikaoApiCreationJob({ job, login }) {
     const creationCapture = await saveApiCreationCapture(job, created);
     pushEvent(job, { type: "captures", captures: [creationCapture], ts: ts() });
     emitLog("[API 创建] 已生成创建完成确认截图，可在网页最后确认截图区域查看");
-    const tencentDocsSettings = tencentDocsSettingsFromEnv(process.env);
-    if (tencentDocsSettings.enabled) {
-      try {
-        const syncResult = await syncExamConfigToTencentDocs({
-          config: job.config,
-          created,
-          settings: tencentDocsSettings,
-        });
-        emitLog(`[腾讯文档] 已同步 ${syncResult.updatedRows} 个考试场次到在线表`);
-      } catch (error) {
-        emitLog(`[腾讯文档] 自动同步失败，不影响易考配置结果：${error instanceof Error ? error.message : String(error)}`, "warn");
-      }
-    } else {
-      emitLog("[腾讯文档] 未配置授权信息，已跳过在线表同步", "warn");
-    }
+    emitLog("[腾讯文档] 项目共享大表未自动填写，请在考试详情中点击“触发填写”。");
     emitStage("完成", 100);
     pushEvent(job, {
       type: "done",
@@ -1233,6 +1231,19 @@ async function handleCandidateTemplate(req, res) {
     "Content-Disposition": 'attachment; filename="yikao_candidates_template.xlsx"',
   });
   createReadStream(outputPath).pipe(res);
+}
+
+async function handleExamRequestTemplate(req, res) {
+  try {
+    await fs.access(examRequestTemplatePath);
+  } catch {
+    return notFound(res);
+  }
+  res.writeHead(200, {
+    "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "Content-Disposition": 'attachment; filename="v2_yikao_exam_request_template.xlsx"',
+  });
+  createReadStream(examRequestTemplatePath).pipe(res);
 }
 
 async function handleMonitorAccountsExcel(req, res) {
@@ -3080,6 +3091,9 @@ async function requestHandler(req, res) {
     }
     if (req.method === "POST" && url.pathname === "/api/import") {
       return await handleImport(req, res);
+    }
+    if (req.method === "GET" && url.pathname === "/api/templates/exam-request") {
+      return await handleExamRequestTemplate(req, res);
     }
     if (req.method === "POST" && url.pathname === "/api/jobs") {
       return await handleCreateJob(req, res);

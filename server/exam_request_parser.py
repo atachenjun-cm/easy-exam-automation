@@ -30,12 +30,31 @@ def parse_bool(value, default=False):
     return default
 
 
+def parse_enabled_text(value, default=False):
+    text = normalize_text(value)
+    if not text:
+        return default
+    lowered = text.lower()
+    if lowered in BOOL_FALSE or any(token in lowered for token in ("不需要", "无需", "不开", "关闭", "否")):
+        return False
+    return True
+
+
 def parse_minutes(value):
     text = normalize_text(value)
     if not text:
         return None
     match = re.search(r"(\d+)", text)
     return int(match.group(1)) if match else None
+
+
+def normalize_exam_address(value):
+    text = normalize_text(value)
+    if "统一" in text:
+        return "统一考试地址"
+    if "独立" in text:
+        return "独立考试地址"
+    return text
 
 
 def split_subject_names(value):
@@ -231,6 +250,7 @@ def build_preview(config):
     add("基础信息", "提前登录时间", f'{config["earlyLoginMinutes"] or 0} 分钟', "自动填写")
     add("基础信息", "限制迟到时间", f'{config["lateLimitMinutes"] or 0} 分钟', "自动填写")
     add("基础信息", "试卷扣时规则", config["timeRule"] or "系统默认", "自动选择")
+    add("基础信息", "考试地址", config["examAddress"] or "系统默认", "按需求单选择")
     add("基础信息", "考前等待提示", config["preLoginPrompt"] or "空", "自动填写")
     add("基础信息", "欢迎语", config["welcomeText"] or "空", "自动填写")
     add("科目管理", "批量导入科目", "、".join(config["subjects"]) or "空", "下载后台模板后导入")
@@ -253,7 +273,7 @@ def build_preview(config):
         "考试中",
         "锁定考试",
         (
-            "客户端考试；登录限制 5 次"
+            f'客户端考试；登录限制 {config["clientLoginLimit"]} 次'
             if config["clientExam"]
             else f'网页考试；允许离开 {config["leaveLimit"]} 次'
             if config["webExam"] and config["leaveLimit"] is not None
@@ -263,6 +283,7 @@ def build_preview(config):
     )
     add("考试中", "答题水印", "是" if config["watermark"] else "否", "自动勾选")
     add("考试中", "禁止复制", "是" if config["disableCopy"] else "否", "自动勾选")
+    add("考试后", "人工判分", config["manualScoreText"] or ("是" if config["manualScore"] else "否"), "按需求单配置")
     if config["mockExamEnabled"]:
         add("试考", "试考名称", config["mockExamName"], "自动新建")
         add(
@@ -322,6 +343,9 @@ def parse_workbook(path_str):
     subject_import_path = build_subject_workbook(subjects, subject_import_dir) if subjects else ""
 
     time_rule = get_field("试卷扣时规则", "扣时规则", "扣时")
+    exam_type = get_field("考试类型")
+    exam_address = normalize_exam_address(get_field("考试地址", "考试网址类型", "考试链接类型"))
+    manual_score_text = get_field("人工判分", "主观题判分", "判分方式")
 
     config = {
         "examName": get_field("考试名称", "考试名"),
@@ -336,6 +360,8 @@ def parse_workbook(path_str):
         "earlyLoginMinutes": parse_minutes(get_field("提前登录时间", "提前登录分钟", "提前登录")),
         "lateLimitMinutes": parse_minutes(get_field("限制迟到时间", "限制迟到分钟", "限制迟到")),
         "timeRule": time_rule,
+        "examAddress": exam_address,
+        "unifiedExamAddress": exam_address == "统一考试地址",
         "preLoginPrompt": get_field("考前等待提示", "考前提示", "考前等待"),
         "welcomeText": get_field("欢迎语"),
         "pledgeContent": get_field("考试承诺书内容", "承诺书内容"),
@@ -343,11 +369,13 @@ def parse_workbook(path_str):
         "videoRecord": parse_bool(get_field("视频录制")),
         "loginVerifyMode": "考后公安验证",
         "hawkeye": parse_bool(get_field("鹰眼监控")),
-        "examType": get_field("考试类型"),
-        "clientExam": get_field("考试类型") == "客户端考试",
-        "webExam": get_field("考试类型") == "网页考试",
+        "examType": exam_type,
+        "clientExam": exam_type == "客户端考试",
+        "webExam": exam_type == "网页考试",
         "leaveLimit": parse_minutes(get_field("允许离开次数", "离开次数", "只允许离开次数")),
-        "clientLoginLimit": 5,
+        "clientLoginLimit": parse_minutes(get_field("登陆次数", "登录次数", "允许登录次数")) or 10,
+        "manualScore": parse_enabled_text(manual_score_text),
+        "manualScoreText": manual_score_text,
         "watermark": parse_bool(field_map.get("答题水印")),
         "disableCopy": parse_bool(field_map.get("禁止复制")),
         "subjects": subjects,

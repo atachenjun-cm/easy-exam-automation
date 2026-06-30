@@ -66,6 +66,33 @@ function monthDayTime(value) {
   return match ? `${Number(match[1])}月${Number(match[2])}日${match[3]}` : "";
 }
 
+function unifiedExamCodeFromUrl(value) {
+  const normalized = text(value);
+  const match = normalized.match(/\/exam\/(\d+)\/uniform\/login\/?/i);
+  return match ? `E${match[1]}` : "";
+}
+
+function examPasswordText(config, session) {
+  const sessionId = text(session.session_id || session.id);
+  const explicitCode = text(
+    config.unifiedExamCode ||
+    config.unifiedExamPassword ||
+    config.examPassword ||
+    config.examCode ||
+    session.unified_exam_code ||
+    session.unifiedExamCode ||
+    session.exam_code ||
+    session.examCode,
+  );
+  if (explicitCode) return explicitCode;
+  const unifiedCode = unifiedExamCodeFromUrl(session.url) || unifiedExamCodeFromUrl(config.examUrl);
+  if (unifiedCode) return unifiedCode;
+  if (sessionId) return sessionId;
+  return text(
+    "【考试口令】",
+  );
+}
+
 function loginWindowText(config, kind) {
   if (kind === "mock") return "不允许提前登录，无迟到限制";
   const early = Number(config?.earlyLoginMinutes || 0);
@@ -113,15 +140,13 @@ function notificationText(config, session) {
     ? `${fullDateTimeText(trialStart)}-${monthDayTime(trialEnd)}`
     : "XXX年XX月XX日XX:XX-X月XX日XX:XX";
   const sessionId = text(session.session_id || session.id);
-  const examCode = text(config.examPassword || config.examCode || sessionId || "【考试口令】");
+  const examCode = examPasswordText(config, session);
   const clientDownload = text(
     config.clientDownloadUrl ||
     config.clientDownload ||
-    (examCode && examCode !== "【考试口令】"
-      ? `https://eztest.org/exam/session/${encodeURIComponent(examCode)}/client/download`
-      : sessionId
-        ? `https://eztest.org/exam/session/${encodeURIComponent(sessionId)}/client/download`
-        : "【客户端下载】"),
+    (sessionId
+      ? `https://eztest.org/exam/session/${encodeURIComponent(sessionId)}/client/download`
+      : "【客户端下载】"),
   );
   return `考生您好！${examName}笔试将于北京时间${formalRange}举行。本次考试为在线考试，要求使用电脑下载安装考试客户端作答，并自行准备第二台移动设备作为第二视角监控，客户端下载地址：${clientDownload} 。本次考试设置试考环节，请提前参加试考调试考试设备。试考时间为${trialRange}，请在上述时间内完成考前测试。正式考试和试考时，打开考试客户端输入口令和您的准考证号即可登录参加考试，考试口令统一为：${examCode}，准考证号均为个人手机号。正式考试可提前30分钟登录系统，迟到20分钟后系统将无法登录。若遇系统问题，请联系考试系统界面上的技术支持。祝您考试顺利！（蜀道集团）`;
 }

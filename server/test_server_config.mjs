@@ -12,6 +12,12 @@ test("server listen host can be configured for LAN deployment", () => {
   assert.ok(serverSource.includes("server.listen(port, host"));
 });
 
+test("server exposes exam request template download endpoint", () => {
+  assert.ok(serverSource.includes('path.join(rootDir, "template", "v2易考新建考试需求单.xlsx")'));
+  assert.ok(serverSource.includes("async function handleExamRequestTemplate"));
+  assert.ok(serverSource.includes('/api/templates/exam-request'));
+});
+
 test("EasyExam account settings are stored per console user", () => {
   assert.ok(serverSource.includes('path.join(runtimeDir, "user_settings.json")'));
   assert.ok(serverSource.includes("saveUserLogin(state.userSettings, user"));
@@ -34,6 +40,64 @@ test("session creation does not enable bluetooth blocking by default", () => {
     serverSource.indexOf("async function runYikaoApiCreationJob"),
   );
   assert.equal(buildPayloads.includes("check_bluetooth: true"), false);
+});
+
+test("session creation forwards requirement exam address selection to tenant API", () => {
+  const buildPayloads = serverSource.slice(
+    serverSource.indexOf("function buildSessionPayloads"),
+    serverSource.indexOf("async function runYikaoApiCreationJob"),
+  );
+  assert.ok(buildPayloads.includes("unified_exam_address: unifiedExamAddress"));
+  assert.ok(buildPayloads.includes("config.unifiedExamAddress"));
+  assert.ok(buildPayloads.includes('config.examAddress || config.examUrlType || ""'));
+});
+
+test("session creation forwards manual scoring selection to tenant API", () => {
+  const buildPayloads = serverSource.slice(
+    serverSource.indexOf("function buildSessionPayloads"),
+    serverSource.indexOf("async function runYikaoApiCreationJob"),
+  );
+  assert.ok(buildPayloads.includes("manual_score: boolValue(config.manualScore)"));
+  assert.equal(buildPayloads.includes("manual_score: false"), false);
+});
+
+test("trial session disables pledge content by default", () => {
+  const buildPayloads = serverSource.slice(
+    serverSource.indexOf("function buildSessionPayloads"),
+    serverSource.indexOf("async function runYikaoApiCreationJob"),
+  );
+  const trialBlock = buildPayloads.slice(
+    buildPayloads.indexOf("const trial = {"),
+    buildPayloads.indexOf('applyTimeRule(trial, "不扣时")'),
+  );
+  assert.ok(trialBlock.includes("nda: false"));
+  assert.ok(trialBlock.includes('nda_notice: ""'));
+});
+
+test("web exam session enables lock screen and forwards leave limit", () => {
+  const buildPayloads = serverSource.slice(
+    serverSource.indexOf("function buildSessionPayloads"),
+    serverSource.indexOf("async function runYikaoApiCreationJob"),
+  );
+  const webMainBlock = buildPayloads.slice(
+    buildPayloads.indexOf("} else {\n    Object.assign(main"),
+    buildPayloads.indexOf("const payloads ="),
+  );
+  assert.ok(webMainBlock.includes("client_required: false"));
+  assert.ok(webMainBlock.includes("lock_screen: true"));
+  assert.ok(webMainBlock.includes("login_times: positiveNumber(config.clientLoginLimit, 10)"));
+  assert.ok(webMainBlock.includes("lock_screen_exit_sec: positiveNumber(config.webLeaveSeconds, 5)"));
+  assert.ok(webMainBlock.includes("lock_screen_time: positiveNumber(config.leaveLimit, 5)"));
+
+  const webTrialBlock = buildPayloads.slice(
+    buildPayloads.indexOf("} else {\n      Object.assign(trial"),
+    buildPayloads.indexOf("payloads.push"),
+  );
+  assert.ok(webTrialBlock.includes("client_required: false"));
+  assert.ok(webTrialBlock.includes("lock_screen: true"));
+  assert.ok(webTrialBlock.includes("login_times: positiveNumber(config.clientLoginLimit, 10)"));
+  assert.ok(webTrialBlock.includes("lock_screen_exit_sec: positiveNumber(config.webLeaveSeconds, 5)"));
+  assert.ok(webTrialBlock.includes("lock_screen_time: positiveNumber(config.leaveLimit, 10)"));
 });
 
 test("candidate import forwards optional course_code to EasyExam tenant API", () => {
@@ -112,17 +176,15 @@ test("score processing fetches paged entry and score data before exporting", () 
   assert.ok(handler.includes("attachCourseNamesToCandidates"));
 });
 
-test("completed API creation jobs sync formal and trial sessions to Tencent Docs without blocking EasyExam", () => {
+test("completed API creation jobs do not automatically sync Tencent Docs", () => {
   assert.ok(serverSource.includes('from "./tencent_docs_sync.mjs"'));
   const creationJob = serverSource.slice(
     serverSource.indexOf("async function runYikaoApiCreationJob"),
     serverSource.indexOf("async function runPythonJson"),
   );
-  assert.ok(creationJob.includes("syncExamConfigToTencentDocs"));
-  assert.ok(creationJob.includes("tencentDocsSettingsFromEnv(process.env)"));
-  assert.ok(creationJob.includes("腾讯文档] 已同步"));
-  assert.ok(creationJob.includes("腾讯文档] 自动同步失败"));
-  assert.ok(creationJob.indexOf("syncExamConfigToTencentDocs") < creationJob.indexOf('type: "done"'));
+  assert.equal(creationJob.includes("syncExamConfigToTencentDocs"), false);
+  assert.equal(creationJob.includes("tencentDocsSettingsFromEnv(process.env)"), false);
+  assert.ok(creationJob.includes("项目共享大表未自动填写"));
 });
 
 test("project shared sheet trigger persists status and syncs formal plus optional trial sessions", () => {
