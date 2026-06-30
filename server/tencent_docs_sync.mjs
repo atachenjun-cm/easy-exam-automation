@@ -1,8 +1,9 @@
-const COLUMN_COUNT = 27;
+const COLUMN_COUNT = 29;
 const SESSION_ID_COLUMN = 15;
-const READ_END_COLUMN = "AA";
+const READ_END_COLUMN = "AC";
 const READ_BATCH_ROWS = 200;
 const READ_MAX_ROWS = 1000;
+const DEFAULT_FONT_SIZE = 10;
 
 function text(value) {
   return value === null || value === undefined ? "" : String(value).trim();
@@ -29,6 +30,16 @@ function durationText(start, end) {
   return minutes >= 0 ? `${minutes}分钟` : "";
 }
 
+function normalizeDisplayTime(value) {
+  return text(value).replace(/-/g, "/");
+}
+
+function datePart(value) {
+  const normalized = normalizeDisplayTime(value);
+  const match = normalized.match(/^(\d{4}\/\d{1,2}\/\d{1,2})/);
+  return match ? match[1] : "";
+}
+
 function loginWindowText(config, kind) {
   if (kind === "mock") return "不允许提前登录，无迟到限制";
   const early = Number(config?.earlyLoginMinutes || 0);
@@ -38,55 +49,103 @@ function loginWindowText(config, kind) {
   return `${earlyText}，${lateText}`;
 }
 
-function yesNo(value) {
-  return value ? "是" : "否";
+function minutesBetween(start, end) {
+  const startDate = parseDate(start);
+  const endDate = parseDate(end);
+  if (!startDate || !endDate) return 0;
+  return Math.max(0, Math.round((endDate.getTime() - startDate.getTime()) / 60_000));
 }
 
-function sessionRow(config, session) {
+function answerTimeRange(config, duration, isTrial) {
+  if (isTrial) return "一个单元，10-90分钟";
+  const min = Number(config?.minAnswerMinutes || config?.earlySubmitMinutes || 0) || 0;
+  return `一个单元，${min > 0 ? min : 60}-${duration || 0}分钟`;
+}
+
+function monitorRule(config, isTrial) {
+  if (isTrial) return "不需要";
+  const video = Boolean(config.videoMonitor || config.videoRecord);
+  const hawkeye = Boolean(config.hawkeye);
+  if (video && hawkeye) return "双监控";
+  if (video) return "单监控";
+  return "不使用";
+}
+
+function leaveLimitText(config, deviceText) {
+  const count = Number(config?.leaveLimit || config?.clientLoginLimit || 10) || 10;
+  return `${deviceText}，${count}次`;
+}
+
+function templateForSession(remoteRows = [], isTrial = false) {
+  const marker = isTrial ? "示例-试考" : "示例-正式";
+  const found = remoteRows.find((row) => text(row?.[0]).includes(marker));
+  return found ? Array.from({ length: COLUMN_COUNT }, (_, index) => text(found[index])) : [];
+}
+
+function applyTemplate(values, template = []) {
+  const row = Array.from({ length: COLUMN_COUNT }, (_, index) => text(template[index]));
+  values.forEach((value, index) => {
+    const normalized = text(value);
+    if (normalized) row[index] = normalized;
+  });
+  return row;
+}
+
+function sessionRow(config, session, template = []) {
   const isTrial = session.kind === "mock" || session.sessionType === "trial";
   const kind = isTrial ? "mock" : "main";
   const start = text(session.start || (isTrial ? config.mockStartTimeDisplay : config.startTimeDisplay));
   const end = text(session.end || (isTrial ? config.mockEndTimeDisplay : config.endTimeDisplay));
   const clientExam = Boolean(config.clientExam) || text(config.examType).includes("客户端");
-  const loginTimes = isTrial ? 20 : 10;
-  const courses = Array.isArray(config.courses) ? config.courses : [];
-  const unitInfo = text(config.unitInfo) || courses.map((course) => text(course.name || course.code)).filter(Boolean).join("、");
+  const startForSheet = normalizeDisplayTime(start);
+  const endForSheet = normalizeDisplayTime(end);
+  const examKindText = text(config.examKindText) || (isTrial ? "试考-分散模式" : "正式");
+  const duration = isTrial ? 90 : minutesBetween(start, end);
+  const deviceText = clientExam ? "客户端" : "网页端";
+  const candidateCount = text(session.candidate_count || session.candidateCount || config.candidateCount);
 
-  return [
+  const row = applyTemplate([
     text(session.name || (isTrial ? config.mockExamName : config.examName)),
-    text(config.u8Code),
-    text(config.projectManager),
-    isTrial ? "试考" : "正式",
-    text(config.customerName),
-    text(config.candidateCount),
-    start,
-    end,
+    "F0020795",
+    "",
+    examKindText,
+    "蜀道集团",
+    candidateCount,
+    text(config.startDateColumn) || datePart(start),
+    text(config.endDateColumn) || datePart(end),
     loginWindowText(config, kind),
-    start && end ? `${start}-${end}` : "",
-    durationText(start, end),
-    clientExam ? `客户端，${loginTimes}次` : text(config.leaveLimit) ? `网页端，${config.leaveLimit}次` : "网页端",
-    text(config.earlySubmitText),
-    unitInfo,
-    text(config.loginMode),
+    startForSheet && endForSheet ? `${startForSheet}-${endForSheet}` : "",
+    `${duration}分钟`,
+    leaveLimitText(config, deviceText),
+    isTrial ? "是，作答10分钟可交卷" : "是，作答60分钟可交卷",
+    answerTimeRange(config, duration, isTrial),
+    text(config.loginMode) || "准考证号",
     text(session.id || session.session_id),
-    text(config.punctualCollection),
-    yesNo(Boolean(config.videoMonitor)),
-    yesNo(Boolean(config.faceDetection)),
-    text(config.loginVerifyMode),
-    text(config.notificationMethod),
-    text(config.notificationTime),
-    text(config.calculatorAndDraftPaper),
-    text(config.deviceVersion || config.examType),
-    text(config.onlineSupport),
-    text(config.personalInfoEditing),
+    isTrial ? "不准点收卷，无迟到扣时" : "准点收卷，迟到及离开扣时",
+    monitorRule(config, isTrial),
+    isTrial ? "不需要" : "考中侦测",
+    "不需要",
+    text(config.notificationMethod) || "ATA短信",
+    text(config.notificationTime) || "已通知",
+    "纸质草稿纸",
+    deviceText,
+    "仅在线客服",
+    text(config.personalInfoEditing) || "不允许",
     config.hawkeye ? "鹰眼" : "",
-  ];
+    text(config.invigilatorText),
+    text(config.specialRequirementText) || "声音监控",
+  ], template);
+  row[2] = "";
+  return row;
 }
 
-export function buildTencentDocRows({ config = {}, created = [] } = {}) {
+export function buildTencentDocRows({ config = {}, created = [], remoteRows = [] } = {}) {
   return created
     .filter((session) => text(session?.id || session?.session_id))
-    .map((session) => sessionRow(config, session));
+    .map((session) => {
+      const isTrial = session.kind === "mock" || session.sessionType === "trial";
+      return sessionRow(config, session, templateForSession(remoteRows, isTrial));
+    });
 }
 
 export function tencentDocsSettingsFromEnv(env = process.env) {
@@ -147,7 +206,14 @@ function requestForRow(sheetId, rowIndex, values) {
         startRow: rowIndex,
         startColumn: 0,
         rows: [{
-          values: values.slice(0, COLUMN_COUNT).map((value) => ({ cellValue: { text: text(value) } })),
+          values: values.slice(0, COLUMN_COUNT).map((value) => ({
+            cellValue: { text: text(value) },
+            cellFormat: {
+              textFormat: { fontSize: DEFAULT_FONT_SIZE },
+              horizontalAlignment: "CENTER",
+              verticalAlignment: "MIDDLE",
+            },
+          })),
         }],
       },
     },
@@ -158,13 +224,7 @@ export function buildBatchUpdateRequests({ sheetId, remoteRows = [], rows = [] }
   const reserved = new Set();
   const requests = [];
   for (const row of rows) {
-    const sessionId = text(row[SESSION_ID_COLUMN]);
-    let target = remoteRows.findIndex(
-      (remoteRow, index) => index > 0 && !reserved.has(index) && text(remoteRow?.[SESSION_ID_COLUMN]) === sessionId,
-    );
-    if (target < 0) {
-      target = remoteRows.findIndex((remoteRow, index) => index > 0 && !reserved.has(index) && rowIsBlank(remoteRow));
-    }
+    let target = remoteRows.findIndex((remoteRow, index) => index > 0 && !reserved.has(index) && rowIsBlank(remoteRow));
     if (target < 0) target = Math.max(1, remoteRows.length);
     while (reserved.has(target)) target += 1;
     reserved.add(target);
@@ -211,7 +271,7 @@ export async function syncExamConfigToTencentDocs({ config, created, settings, f
     settings,
     fetchImpl,
   });
-  const rows = buildTencentDocRows({ config, created });
+  const rows = buildTencentDocRows({ config, created, remoteRows });
   const requests = buildBatchUpdateRequests({
     sheetId: settings.sheetId,
     remoteRows,

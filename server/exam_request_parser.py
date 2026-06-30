@@ -325,6 +325,10 @@ def parse_workbook(path_str):
 
     config = {
         "examName": get_field("考试名称", "考试名"),
+        "u8Code": get_field("U8代码", "U8编码", "U8", "项目代码"),
+        "projectManager": get_field("项目经理", "项目负责人", "负责人"),
+        "customerName": get_field("客户名称", "客户", "单位名称", "委托单位"),
+        "candidateCount": parse_minutes(get_field("人次", "考生人数", "人数")) or "",
         "startTimeDisplay": format_datetime(start_dt),
         "endTimeDisplay": format_datetime(end_dt),
         "startTimeIso": start_dt.isoformat() if start_dt else "",

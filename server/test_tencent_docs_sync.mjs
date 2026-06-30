@@ -28,23 +28,51 @@ const created = [
   { kind: "mock", id: "trial-1", name: "项目招聘考试-试考", start: "2026-06-30 15:00", end: "2026-06-30 17:00" },
 ];
 
-test("builds one 27-column Tencent Docs row for each created session", () => {
+test("builds one 29-column Tencent Docs row for each created session", () => {
   const rows = buildTencentDocRows({ config, created });
 
   assert.equal(rows.length, 2);
-  assert.equal(rows[0].length, 27);
+  assert.equal(rows[0].length, 29);
   assert.equal(rows[0][0], "项目招聘考试");
+  assert.equal(rows[0][1], "F0020795");
+  assert.equal(rows[0][2], "");
   assert.equal(rows[0][3], "正式");
+  assert.equal(rows[0][4], "蜀道集团");
+  assert.equal(rows[0][6], "2026/07/01");
+  assert.equal(rows[0][7], "2026/07/01");
   assert.equal(rows[0][8], "提前30分钟登录，允许迟到20分钟");
-  assert.equal(rows[0][9], "2026-07-01 09:00-2026-07-01 11:00");
+  assert.equal(rows[0][9], "2026/07/01 09:00-2026/07/01 11:00");
   assert.equal(rows[0][10], "120分钟");
   assert.equal(rows[0][11], "客户端，10次");
+  assert.equal(rows[0][12], "是，作答60分钟可交卷");
+  assert.equal(rows[0][13], "一个单元，60-120分钟");
+  assert.equal(rows[0][14], "准考证号");
   assert.equal(rows[0][15], "formal-1");
-  assert.equal(rows[0][17], "是");
+  assert.equal(rows[0][16], "准点收卷，迟到及离开扣时");
+  assert.equal(rows[0][17], "双监控");
+  assert.equal(rows[0][18], "考中侦测");
+  assert.equal(rows[0][19], "不需要");
+  assert.equal(rows[0][20], "ATA短信");
+  assert.equal(rows[0][21], "已通知");
+  assert.equal(rows[0][22], "纸质草稿纸");
+  assert.equal(rows[0][23], "客户端");
+  assert.equal(rows[0][24], "仅在线客服");
+  assert.equal(rows[0][25], "不允许");
   assert.equal(rows[0][26], "鹰眼");
-  assert.equal(rows[1][3], "试考");
+  assert.equal(rows[0][28], "声音监控");
+  assert.equal(rows[1][3], "试考-分散模式");
+  assert.equal(rows[1][6], "2026/06/30");
+  assert.equal(rows[1][7], "2026/06/30");
   assert.equal(rows[1][8], "不允许提前登录，无迟到限制");
+  assert.equal(rows[1][10], "90分钟");
+  assert.equal(rows[1][12], "是，作答10分钟可交卷");
+  assert.equal(rows[1][13], "一个单元，10-90分钟");
   assert.equal(rows[1][15], "trial-1");
+  assert.equal(rows[1][16], "不准点收卷，无迟到扣时");
+  assert.equal(rows[1][17], "不需要");
+  assert.equal(rows[1][18], "不需要");
+  assert.equal(rows[1][20], "ATA短信");
+  assert.equal(rows[1][21], "已通知");
 });
 
 test("leaves AI cloud monitoring blank when hawkeye is disabled", () => {
@@ -52,10 +80,38 @@ test("leaves AI cloud monitoring blank when hawkeye is disabled", () => {
   assert.equal(rows[0][26], "");
 });
 
-test("updates an existing session row and appends a new session to the first blank row", () => {
+test("copies Tencent Docs example rows before overriding task-specific fields", () => {
+  const remoteRows = [
+    ["考试名称"],
+    ["示例-试考", "F0020795", "司园园", "试考-分散模式", "蜀道集团", "138", "2026/6/24", "2026/6/25", "不允许提前登录，无迟到限制", "示例时间", "90分钟", "客户端，10次", "是，作答10分钟可交卷", "一个单元，10-90分钟", "手机号码", "427183", "", "", "", "", "ATA短信", "已通知", "", "客户端", "", "不允许", "鹰眼", "", ""],
+    ["示例-正式", "F0020795", "司园园", "正式", "蜀道集团", "138", "2026/6/25", "2026/6/25", "提前30分钟登录，允许迟到20分钟", "示例时间", "120分钟", "客户端，10次", "是，作答60分钟可交卷", "第一单元 60-90分钟\n第二单元 0-30分钟", "手机号码", "427182", "", "", "", "", "ATA短信", "已通知", "", "客户端", "", "不允许", "鹰眼", "", ""],
+  ];
+
+  const rows = buildTencentDocRows({ config, created, remoteRows });
+
+  assert.equal(rows[0][0], "项目招聘考试");
+  assert.equal(rows[0][1], "F0020795");
+  assert.equal(rows[0][2], "");
+  assert.equal(rows[0][4], "蜀道集团");
+  assert.equal(rows[0][5], "138");
+  assert.equal(rows[0][13], "一个单元，60-120分钟");
+  assert.equal(rows[0][12], "是，作答60分钟可交卷");
+  assert.equal(rows[0][20], "ATA短信");
+  assert.equal(rows[0][21], "已通知");
+  assert.equal(rows[0][22], "纸质草稿纸");
+  assert.equal(rows[0][15], "formal-1");
+  assert.equal(rows[1][1], "F0020795");
+  assert.equal(rows[1][3], "试考-分散模式");
+  assert.equal(rows[1][13], "一个单元，10-90分钟");
+  assert.equal(rows[1][12], "是，作答10分钟可交卷");
+  assert.equal(rows[1][15], "trial-1");
+});
+
+test("always appends to blank rows instead of overwriting existing session rows", () => {
   const remoteRows = [
     Array.from({ length: 26 }, (_, index) => index === 0 ? "考试名称" : ""),
     Array.from({ length: 26 }, (_, index) => index === 15 ? "formal-1" : index === 0 ? "旧名称" : ""),
+    Array(26).fill(""),
     Array(26).fill(""),
   ];
 
@@ -65,10 +121,16 @@ test("updates an existing session row and appends a new session to the first bla
     rows: buildTencentDocRows({ config, created }),
   });
 
-  assert.deepEqual(requests.map((item) => item.updateRangeRequest.gridData.startRow), [1, 2]);
+  assert.deepEqual(requests.map((item) => item.updateRangeRequest.gridData.startRow), [2, 3]);
   assert.equal(requests[0].updateRangeRequest.sheetId, "BB08J2");
   assert.equal(requests[0].updateRangeRequest.gridData.rows[0].values[15].cellValue.text, "formal-1");
+  assert.equal(requests[0].updateRangeRequest.gridData.rows[0].values[15].cellFormat.textFormat.fontSize, 10);
+  assert.equal(requests[0].updateRangeRequest.gridData.rows[0].values[15].cellFormat.horizontalAlignment, "CENTER");
+  assert.equal(requests[0].updateRangeRequest.gridData.rows[0].values[15].cellFormat.verticalAlignment, "MIDDLE");
   assert.equal(requests[1].updateRangeRequest.gridData.rows[0].values[15].cellValue.text, "trial-1");
+  assert.equal(requests[1].updateRangeRequest.gridData.rows[0].values[15].cellFormat.textFormat.fontSize, 10);
+  assert.equal(requests[1].updateRangeRequest.gridData.rows[0].values[15].cellFormat.horizontalAlignment, "CENTER");
+  assert.equal(requests[1].updateRangeRequest.gridData.rows[0].values[15].cellFormat.verticalAlignment, "MIDDLE");
 });
 
 test("sync reads the sheet before submitting an idempotent batch update", async () => {
@@ -76,7 +138,7 @@ test("sync reads the sheet before submitting an idempotent batch update", async 
   const fetchImpl = async (url, options = {}) => {
     calls.push({ url: String(url), options });
     if (!options.method || options.method === "GET") {
-      if (String(url).endsWith("/A1:AA200")) {
+      if (String(url).endsWith("/A1:AC200")) {
         return new Response(JSON.stringify({
           gridData: {
             rows: [
@@ -86,7 +148,7 @@ test("sync reads the sheet before submitting an idempotent batch update", async 
           },
         }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
-      if (String(url).endsWith("/A201:AA400")) {
+      if (String(url).endsWith("/A201:AC400")) {
         return new Response(JSON.stringify({
           code: 400001,
           message: "invalid param error: 'range' invalid",
@@ -116,8 +178,8 @@ test("sync reads the sheet before submitting an idempotent batch update", async 
   assert.equal(result.updatedRows, 1);
   assert.equal(calls.length, 3);
   assert.equal(calls[0].options.headers["Access-Token"], "token");
-  assert.ok(calls[0].url.endsWith("/A1:AA200"));
-  assert.ok(calls[1].url.endsWith("/A201:AA400"));
+  assert.ok(calls[0].url.endsWith("/A1:AC200"));
+  assert.ok(calls[1].url.endsWith("/A201:AC400"));
   assert.equal(calls[2].options.method, "POST");
   assert.equal(JSON.parse(calls[2].options.body).requests.length, 1);
 });
