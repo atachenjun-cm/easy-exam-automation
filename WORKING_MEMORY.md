@@ -25,6 +25,12 @@
 /Users/chen/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node server/easy_exam_server.mjs
 ```
 
+## 易考接口文档（2026-06-30）
+
+- 租户内部 API 文档：`https://api-doc.eztest.cn/tenant-api/internal/#/`
+- 后续涉及租户 API 路径、字段、鉴权、请求体或响应结构时，优先参考该文档。
+- 不要把 API Key、Token、Cookie、账号密码等敏感信息写入源码、文档或项目记忆。
+
 ## 需求单结构
 
 Excel 包含 3 个工作表：
