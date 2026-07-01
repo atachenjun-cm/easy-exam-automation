@@ -116,6 +116,36 @@ test("dispatch route stores object source metadata as text", async () => {
   }));
 });
 
+test("dispatch route stores analysis candidates as an audit event", async () => {
+  const dbPath = path.join(os.tmpdir(), `requirements-${Date.now()}-${Math.random()}.sqlite3`);
+  const handler = createRequirementRequestHandler({ dbPath, pythonBin: "python3" });
+  const analysisCandidates = {
+    enabled: true,
+    merged: {
+      fields: {
+        subjects: { status: "llm_only", llmValue: ["数学"], evidence: ["客户：科目增加数学"], confidence: 0.91 },
+      },
+      conflicts: [],
+    },
+  };
+
+  const created = await callHandler(handler, "POST", "/api/ai/requirements/dispatch", {
+    intent: "collecting",
+    requestId: "analysis-candidate-test",
+    customer: { name: "内部测试客户" },
+    requirement: completeRequirementPayload(),
+    message: "客户：科目增加数学",
+    source: { type: "wechat_group", groupName: "AI赋能运营自动化小组" },
+    analysisCandidates,
+  });
+  const fetched = await callHandler(handler, "GET", "/api/requirements/analysis-candidate-test");
+
+  assert.equal(created.statusCode, 200);
+  const event = fetched.body.events.find((item) => item.eventType === "analysis_candidate_recorded");
+  assert.ok(event);
+  assert.equal(event.payload.analysisCandidates.merged.fields.subjects.status, "llm_only");
+});
+
 test("staff routes can mark a confirmed requirement ready and link a task", async () => {
   const dbPath = path.join(os.tmpdir(), `requirements-${Date.now()}-${Math.random()}.sqlite3`);
   const handler = createRequirementRequestHandler({ dbPath, pythonBin: "python3" });

@@ -5,6 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { scanWechatDownloadedFiles } from "../server/wechat_attachment_scanner.mjs";
+import { parseWechatRequirementWithLlm } from "../server/wechat_llm_requirement_parser.mjs";
 import {
   buildWechatRequirementDraft,
   loadWechatGroupConfig,
@@ -156,15 +157,31 @@ export function assertCapturedTextUsable(text, { captureMode = "clipboard" } = {
 export function assertDraftHasRequirementSignal(draft = {}) {
   const requirement = draft.requirement && typeof draft.requirement === "object" ? draft.requirement : {};
   const changeRecords = Array.isArray(draft.changeRecords) ? draft.changeRecords : [];
+  const analysisCandidates = draft.analysisCandidates || {};
+  const requirementCandidates = analysisCandidates.requirementCandidates || {};
+  const changeCandidates = Array.isArray(analysisCandidates.changeCandidates) ? analysisCandidates.changeCandidates : [];
   const hasRequirementValue = Object.values(requirement).some((value) => {
     if (Array.isArray(value)) return value.length > 0;
     if (typeof value === "string") return value.trim().length > 0;
     return value !== undefined && value !== null;
   });
-  if (hasRequirementValue || changeRecords.length) return;
+  if (hasRequirementValue || changeRecords.length || Object.keys(requirementCandidates).length || changeCandidates.length) return;
   const error = new Error("OCR 文本未识别到需求字段或需求变更，已禁止写入 checkpoint 和需求中心");
   error.code = "NO_REQUIREMENT_SIGNAL";
   throw error;
+}
+
+export function buildLlmParserConfig(args = {}, env = process.env, runtimeConfig = {}) {
+  const saved = runtimeConfig.llm_parse || runtimeConfig.llmParse || {};
+  const mode = String(args.llmParse || env.WECHAT_LLM_PARSE || (saved.enabled ? "candidate" : "") || "").trim();
+  if (mode !== "candidate") return { enabled: false };
+  return {
+    enabled: true,
+    provider: String(args.llmProvider || env.WECHAT_LLM_PROVIDER || saved.provider || "openai").trim(),
+    model: String(args.llmModel || env.WECHAT_LLM_MODEL || saved.model || "gpt-4.1-mini").trim(),
+    endpoint: String(args.llmEndpoint || env.WECHAT_LLM_ENDPOINT || saved.endpoint || "https://api.openai.com/v1/responses").trim(),
+    apiKey: String(args.llmApiKey || env.OPENAI_API_KEY || env.WECHAT_LLM_API_KEY || saved.api_key || saved.apiKey || "").replace(/\s+/g, ""),
+  };
 }
 
 async function assertRequirementCenterReachable(apiBase = "http://127.0.0.1:8765") {
@@ -427,7 +444,8 @@ async function main() {
     return;
   }
   try {
-  const config = loadWechatGroupConfig(readFileSync(args.config, "utf8"));
+  const rawConfig = JSON.parse(readFileSync(args.config, "utf8"));
+  const config = loadWechatGroupConfig(rawConfig);
   const validation = validateWechatGroupConfig(config, { requireEnabled: true });
   if (!validation.ok) throw new Error(validation.error);
   let groups = config.groups.filter((group) => group.enabled);
@@ -440,6 +458,7 @@ async function main() {
   if (!groups.length) throw new Error("没有找到可采集的微信群配置。");
 
   const state = readState(args.state);
+  const llmParserConfig = buildLlmParserConfig(args, process.env, rawConfig);
   const results = [];
   const runSummary = {
     startedAt,
@@ -512,6 +531,20 @@ async function main() {
         text: capturedText,
         checkpoint,
       });
+      if (llmParserConfig.enabled) {
+        try {
+          draft.analysisCandidates = await parseWechatRequirementWithLlm({
+            text: capturedText,
+            ruleResult: draft,
+            config: llmParserConfig,
+          });
+        } catch (error) {
+          draft.analysisCandidates = {
+            enabled: true,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
       assertDraftHasRequirementSignal(draft);
       const attachmentModifiedSince = resolveAttachmentModifiedSince(args, state.groups?.[group.groupName]);
       const attachmentCandidates = scanDownloadedAttachments(args, state.groups?.[group.groupName]);

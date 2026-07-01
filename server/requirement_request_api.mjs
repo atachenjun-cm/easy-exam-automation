@@ -115,6 +115,7 @@ export function createRequirementRequestHandler(options = {}) {
           requestId,
           customerMessage: payload.customerMessage || payload.customer_message || payload.customer_summary || "",
           changes: payload.changes || payload.requirement || {},
+          analysisCandidates: payload.analysisCandidates || payload.analysis_candidates || null,
         });
         if (!requirement) return true;
         json(res, 200, { ok: true, action: "change_request", requirement });
@@ -127,6 +128,7 @@ export function createRequirementRequestHandler(options = {}) {
         requirement: payload.requirement || {},
         message: payload.message || "",
         source: normalizeSource(payload.source),
+        analysisCandidates: payload.analysisCandidates || payload.analysis_candidates || null,
       });
       json(res, 200, { ok: true, action: "upsert", requirement });
       return true;
@@ -140,6 +142,7 @@ export function createRequirementRequestHandler(options = {}) {
         requirement: payload.requirement || {},
         message: payload.message || "",
         source: normalizeSource(payload.source),
+        analysisCandidates: payload.analysisCandidates || payload.analysis_candidates || null,
       });
       json(res, 200, { ok: true, requirement });
       return true;
@@ -173,6 +176,7 @@ export function createRequirementRequestHandler(options = {}) {
         requestId: decodeSegment(changeMatch[1]),
         customerMessage: payload.customerMessage || payload.customer_message || "",
         changes: payload.changes || {},
+        analysisCandidates: payload.analysisCandidates || payload.analysis_candidates || null,
       });
       json(res, 200, { ok: true, requirement });
       return true;

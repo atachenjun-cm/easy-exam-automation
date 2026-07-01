@@ -145,6 +145,48 @@ test("visible WeChat collector rejects OCR text with no requirement signal", asy
   }
 });
 
+test("visible WeChat collector accepts LLM candidates as a requirement signal", async () => {
+  const moduleUrl = new URL("../scripts/wechat_visible_collect.mjs", import.meta.url);
+  const { assertDraftHasRequirementSignal, buildLlmParserConfig } = await import(moduleUrl.href);
+
+  assert.doesNotThrow(() => assertDraftHasRequirementSignal({
+    requirement: {},
+    changeRecords: [],
+    analysisCandidates: {
+      requirementCandidates: {
+        subjects: { value: ["数学"], evidence: ["客户：科目增加数学"], confidence: 0.9 },
+      },
+    },
+  }));
+  assert.deepEqual(buildLlmParserConfig({
+    llmParse: "candidate",
+    llmModel: "test-model",
+    llmEndpoint: "https://llm.example/v1/responses",
+  }, { OPENAI_API_KEY: "secret" }), {
+    enabled: true,
+    provider: "openai",
+    model: "test-model",
+    endpoint: "https://llm.example/v1/responses",
+    apiKey: "secret",
+  });
+  assert.deepEqual(buildLlmParserConfig({}, {}, {
+    llm_parse: {
+      enabled: true,
+      provider: "qwen",
+      model: "qwen-plus",
+      endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      api_key: "qwen-secret",
+    },
+  }), {
+    enabled: true,
+    provider: "qwen",
+    model: "qwen-plus",
+    endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    apiKey: "qwen-secret",
+  });
+  assert.equal(buildLlmParserConfig({}, {}).enabled, false);
+});
+
 test("visible WeChat collector keeps the previous checkpoint when there are no new messages", async () => {
   const moduleUrl = new URL("../scripts/wechat_visible_collect.mjs", import.meta.url);
   const { buildStateUpdateForRun } = await import(moduleUrl.href);

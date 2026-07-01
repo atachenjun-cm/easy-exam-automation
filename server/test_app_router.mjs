@@ -14,6 +14,7 @@ const routeCases = [
   ["/requirements", "requirements", {}],
   ["/requirements/req-001", "requirement-detail", { requestId: "req-001" }],
   ["/wechat-collector", "wechat-collector", {}],
+  ["/system-config", "system-config", {}],
   ["/templates", "templates", {}],
   ["/logs", "logs", {}],
 ];
@@ -32,6 +33,7 @@ test("maps detail routes to exactly one navigation item", () => {
   assert.equal(menuKeyForRoute(matchRoute("/exams/e1")), "exams");
   assert.equal(menuKeyForRoute(matchRoute("/requirements/r1")), "requirements");
   assert.equal(menuKeyForRoute(matchRoute("/wechat-collector")), "wechat-collector");
+  assert.equal(menuKeyForRoute(matchRoute("/system-config")), "system-config");
   assert.equal(menuKeyForRoute(matchRoute("/auto-config")), "auto-config");
 });
 

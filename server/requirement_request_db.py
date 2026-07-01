@@ -204,7 +204,7 @@ class RequirementStore:
                 """
             )
 
-    def create_or_update_requirement(self, customer=None, requirement=None, message="", request_id=None, source="dify"):
+    def create_or_update_requirement(self, customer=None, requirement=None, message="", request_id=None, source="dify", analysis_candidates=None):
         request_id = request_id or str(uuid.uuid4())
         now = utc_now()
         normalized = normalize_requirement(requirement or {})
@@ -257,6 +257,11 @@ class RequirementStore:
                 "status": status,
                 "missingFields": missing,
             })
+            if analysis_candidates:
+                self._record_event(db, request_id, "analysis_candidate_recorded", source, {
+                    "analysisCandidates": analysis_candidates,
+                    "version": next_version,
+                })
         return self.get_requirement(request_id)
 
     def list_requirements(self):
@@ -342,7 +347,7 @@ class RequirementStore:
             {"message": message or ""},
         )
 
-    def create_change_request(self, request_id, customer_message="", changes=None):
+    def create_change_request(self, request_id, customer_message="", changes=None, analysis_candidates=None):
         now = utc_now()
         normalized_message = str(customer_message or "").strip()
         normalized_changes = normalize_requirement(changes or {})
@@ -377,6 +382,11 @@ class RequirementStore:
                 self._record_event(db, request_id, "change_requested", "customer", {
                     "message": normalized_message,
                 })
+                if analysis_candidates:
+                    self._record_event(db, request_id, "analysis_candidate_recorded", "wechat_llm", {
+                        "analysisCandidates": analysis_candidates,
+                        "changeMessage": normalized_message,
+                    })
         return self.get_requirement(request_id)
 
     def accept_change_request(self, request_id, change_id, reviewer="", message=""):
@@ -621,6 +631,7 @@ def main():
             message=payload.get("message", ""),
             request_id=payload.get("requestId") or payload.get("request_id"),
             source=payload.get("source", "dify"),
+            analysis_candidates=payload.get("analysisCandidates") or payload.get("analysis_candidates"),
         )
     elif action == "list":
         result = store.list_requirements()
@@ -637,6 +648,7 @@ def main():
             payload.get("requestId") or payload.get("request_id"),
             payload.get("customerMessage") or payload.get("customer_message") or "",
             payload.get("changes") or {},
+            payload.get("analysisCandidates") or payload.get("analysis_candidates"),
         )
     elif action == "accept_change":
         result = store.accept_change_request(

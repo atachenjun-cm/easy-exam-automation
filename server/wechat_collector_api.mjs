@@ -16,6 +16,10 @@ import {
   defaultWechatFileRoots,
   scanWechatDownloadedFiles,
 } from "./wechat_attachment_scanner.mjs";
+import {
+  buildWechatRequirementDraft,
+  pushWechatDraftToRequirementCenter,
+} from "./wechat_requirement_collector.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -142,6 +146,28 @@ async function readRunHistory(filePath, limit = 20) {
   } catch {
     return [];
   }
+}
+
+async function appendRunHistory(filePath, payload, { maxEntries = 500 } = {}) {
+  let entries = [];
+  try {
+    const text = await fs.readFile(filePath, "utf8");
+    entries = text.split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch {}
+  entries.push(payload);
+  const trimmed = entries.slice(-Math.max(1, Number(maxEntries || 500)));
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${trimmed.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
 }
 
 async function readCollectorLogs(paths = {}, maxChars = 4000) {
@@ -323,8 +349,117 @@ function normalizeConfig(payload = {}) {
         requirement_request_id: String(group.requirement_request_id || group.requirementRequestId || "").trim(),
         enabled: group.enabled !== false,
         interval_minutes: Number(rawInterval),
+        initial_collection_mode: normalizeInitialCollectionMode(group.initial_collection_mode || group.initialCollectionMode),
+        initial_collected_at: String(group.initial_collected_at || group.initialCollectedAt || "").trim(),
       };
     }).filter((group) => group.group_name),
+    llm_parse: normalizeLlmConfig(payload.llm_parse || payload.llmParse || {}),
+  };
+}
+
+function normalizeInitialCollectionMode(value) {
+  return String(value || "ocr_current_window").trim() === "none" ? "none" : "ocr_current_window";
+}
+
+function normalizeLlmConfig(payload = {}, previous = {}) {
+  const provider = String(payload.provider || previous.provider || "openai").trim();
+  const safeProvider = provider === "qwen" ? "qwen" : "openai";
+  const defaultEndpoint = safeProvider === "qwen"
+    ? "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    : "https://api.openai.com/v1/responses";
+  const defaultModel = safeProvider === "qwen" ? "qwen-plus" : "gpt-4.1-mini";
+  const clearApiKey = payload.clearApiKey === true || payload.clear_api_key === true;
+  const hasNewKey = typeof payload.apiKey === "string" || typeof payload.api_key === "string";
+  const nextKey = clearApiKey ? "" : normalizeApiKey(hasNewKey ? payload.apiKey ?? payload.api_key ?? "" : previous.api_key || "");
+  return {
+    enabled: payload.enabled === true,
+    provider: safeProvider,
+    model: String(payload.model || previous.model || defaultModel).trim(),
+    endpoint: String(payload.endpoint || previous.endpoint || defaultEndpoint).trim(),
+    api_key: nextKey,
+  };
+}
+
+function normalizeApiKey(value) {
+  return String(value || "").replace(/\s+/g, "");
+}
+
+function redactLlmConfig(config = {}) {
+  return {
+    enabled: config.enabled === true,
+    provider: config.provider || "openai",
+    model: config.model || "",
+    endpoint: config.endpoint || "",
+    apiKeyConfigured: Boolean(config.api_key),
+  };
+}
+
+function llmModelsEndpoint(endpoint) {
+  const url = new URL(endpoint || "https://api.openai.com/v1/responses");
+  if (url.pathname.endsWith("/chat/completions")) {
+    url.pathname = url.pathname.replace(/\/chat\/completions$/, "/models");
+  } else if (url.pathname.endsWith("/responses")) {
+    url.pathname = url.pathname.replace(/\/responses$/, "/models");
+  } else if (!url.pathname.endsWith("/models")) {
+    url.pathname = `${url.pathname.replace(/\/$/, "")}/models`;
+  }
+  return url.toString();
+}
+
+function normalizeModelListPayload(payload = {}) {
+  const items = Array.isArray(payload.data)
+    ? payload.data
+    : (Array.isArray(payload.models) ? payload.models : []);
+  return items
+    .map((item) => (typeof item === "string" ? item : item?.id))
+    .filter(Boolean);
+}
+
+async function fetchLlmModels({ llmConfig, fetchImpl }) {
+  if (!llmConfig.api_key) {
+    return { ok: false, error: "请先填写或保存 API Key" };
+  }
+  if (typeof fetchImpl !== "function") {
+    return { ok: false, error: "当前 Node 运行时不可用 fetch，无法验证 API Key" };
+  }
+  let endpoint = "";
+  try {
+    endpoint = llmModelsEndpoint(llmConfig.endpoint);
+  } catch {
+    return { ok: false, error: "LLM Endpoint 不是合法 URL" };
+  }
+  let response;
+  try {
+    response = await fetchImpl(endpoint, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${normalizeApiKey(llmConfig.api_key)}`,
+      },
+    });
+  } catch (error) {
+    return { ok: false, error: `模型列表读取失败：${error instanceof Error ? error.message.replace(/Bearer\s+\S+/g, "Bearer ***") : String(error)}` };
+  }
+  const text = await response.text();
+  let body = {};
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    return { ok: false, error: "模型列表响应不是合法 JSON" };
+  }
+  if (!response.ok) {
+    return { ok: false, error: body.error?.message || `模型列表读取失败：HTTP ${response.status}` };
+  }
+  const models = normalizeModelListPayload(body);
+  if (!models.length) {
+    return { ok: false, error: "模型列表为空或格式不支持" };
+  }
+  return { ok: true, models, endpoint };
+}
+
+function redactConfig(config = {}) {
+  return {
+    ...config,
+    llm_parse: redactLlmConfig(config.llm_parse || {}),
   };
 }
 
@@ -604,6 +739,8 @@ function buildGroupStatusSummary({ config, status, state }) {
       requirementRequestId: group.requirement_request_id || "",
       enabled: group.enabled !== false,
       intervalMinutes,
+      initialCollectionMode: group.initial_collection_mode || "ocr_current_window",
+      initialCollectedAt: group.initial_collected_at || checkpoint.ocr?.initialCollectedAt || "",
       latestStatus: latestRun.status || "not_run",
       latestRunAt,
       requestId: latestRun.requestId || checkpoint.requestId || group.requirement_request_id || "",
@@ -645,9 +782,10 @@ export function createWechatCollectorHandler(options = {}) {
   const uninstallScheduler = options.uninstallScheduler || uninstallWechatCollectorLaunchd;
   const installService = options.installService || installEasyExamServiceLaunchd;
   const uninstallService = options.uninstallService || uninstallEasyExamServiceLaunchd;
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
   const requirementCenterStatus = options.requirementCenterStatus || (() => defaultRequirementCenterStatus({
     apiBase,
-    fetchImpl: options.fetchImpl || globalThis.fetch,
+    fetchImpl,
   }));
   const ocrStatus = options.ocrStatus || (() => defaultOcrStatus({
     toolPath: options.ocrToolPath,
@@ -714,13 +852,17 @@ export function createWechatCollectorHandler(options = {}) {
   return async function handleWechatCollector(req, res, url = new URL(req.url, "http://127.0.0.1")) {
     if (req.method === "GET" && url.pathname === "/api/wechat-collector/config") {
       const config = normalizeConfig(await readJsonFile(configPath, { groups: [] }));
-      json(res, 200, { config, path: configPath });
+      json(res, 200, { config: redactConfig(config), path: configPath });
       return true;
     }
 
     if (req.method === "PUT" && url.pathname === "/api/wechat-collector/config") {
       const payload = parseJsonSafe(await readBody(req)) || {};
-      const config = normalizeConfig(payload);
+      const previousConfig = normalizeConfig(await readJsonFile(configPath, { groups: [] }));
+      const config = normalizeConfig({
+        ...payload,
+        llm_parse: normalizeLlmConfig(payload.llm_parse || payload.llmParse || {}, previousConfig.llm_parse || {}),
+      });
       const validation = validateConfig(config);
       if (!validation.ok) {
         json(res, 400, { error: validation.error });
@@ -729,7 +871,16 @@ export function createWechatCollectorHandler(options = {}) {
       await fs.mkdir(path.dirname(configPath), { recursive: true });
       const backupPath = await backupExistingJsonFile(configPath, configBackupDir, now);
       await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-      json(res, 200, { ok: true, config, path: configPath, backupPath });
+      json(res, 200, { ok: true, config: redactConfig(config), path: configPath, backupPath });
+      return true;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/wechat-collector/llm/models") {
+      const payload = parseJsonSafe(await readBody(req)) || {};
+      const previousConfig = normalizeConfig(await readJsonFile(configPath, { groups: [] }));
+      const llmConfig = normalizeLlmConfig(payload.llm_parse || payload.llmParse || {}, previousConfig.llm_parse || {});
+      const result = await fetchLlmModels({ llmConfig, fetchImpl });
+      json(res, result.ok ? 200 : 400, result);
       return true;
     }
 
@@ -761,7 +912,7 @@ export function createWechatCollectorHandler(options = {}) {
       await fs.mkdir(path.dirname(configPath), { recursive: true });
       const currentBackupPath = await backupExistingJsonFile(configPath, configBackupDir, now);
       await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-      json(res, 200, { ok: true, config, path: configPath, backupPath, currentBackupPath });
+      json(res, 200, { ok: true, config: redactConfig(config), path: configPath, backupPath, currentBackupPath });
       return true;
     }
 

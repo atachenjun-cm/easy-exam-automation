@@ -90,10 +90,15 @@ export function buildRequirementCenterPayload(draft, { requestId = "", attachmen
       groupName: draft.source?.groupName || "",
       projectName: draft.project?.projectName || "",
       collectedAt: draft.source?.collectedAt || "",
+      channel: draft.source?.channel || "",
+      chatId: draft.source?.chatId || "",
+      messageId: draft.source?.messageId || "",
+      sender: draft.source?.sender || "",
       attachmentCount: attachments.length,
       attachments: summarizeAttachments(attachments),
     },
   };
+  if (draft.analysisCandidates) payload.analysisCandidates = draft.analysisCandidates;
   const stableRequestId = requestId || draft.project?.requirementRequestId || "";
   if (stableRequestId) payload.requestId = stableRequestId;
   return payload;
@@ -101,7 +106,7 @@ export function buildRequirementCenterPayload(draft, { requestId = "", attachmen
 
 export function buildChangeRequestPayload(draft, requestId, { attachments = [] } = {}) {
   if (!requestId) throw new Error("requestId is required for WeChat change requests.");
-  return {
+  const payload = {
     intent: "change_request",
     requestId,
     customerMessage: (draft.changeRecords || []).map((record) => record.message).join("\n"),
@@ -115,10 +120,16 @@ export function buildChangeRequestPayload(draft, requestId, { attachments = [] }
       groupName: draft.source?.groupName || "",
       projectName: draft.project?.projectName || "",
       collectedAt: draft.source?.collectedAt || "",
+      channel: draft.source?.channel || "",
+      chatId: draft.source?.chatId || "",
+      messageId: draft.source?.messageId || "",
+      sender: draft.source?.sender || "",
       attachmentCount: attachments.length,
       attachments: summarizeAttachments(attachments),
     },
   };
+  if (draft.analysisCandidates) payload.analysisCandidates = draft.analysisCandidates;
+  return payload;
 }
 
 export async function pushRequirementCenterPayload(payload, {

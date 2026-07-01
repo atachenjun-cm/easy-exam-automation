@@ -141,6 +141,8 @@ test("wechat collector API summarizes configured groups with latest run and chec
     requirementRequestId: "wechat-ai-ops",
     enabled: true,
     intervalMinutes: 15,
+    initialCollectionMode: "ocr_current_window",
+    initialCollectedAt: "",
     latestStatus: "pushed",
     latestRunAt: "2026-06-25T08:01:00.000Z",
     requestId: "wechat-ai-ops",
@@ -1884,6 +1886,163 @@ test("wechat collector API writes normalized runtime config", async () => {
   const saved = JSON.parse(readFileSync(configPath, "utf8"));
   assert.equal(saved.groups[0].project_name, "某客户校招考试");
   assert.equal(saved.groups[0].interval_minutes, 30);
+});
+
+test("wechat collector API drops legacy cc-connect group fields", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "wechat-api-"));
+  const configPath = path.join(dir, "wechat-requirement-groups.json");
+  const statusPath = path.join(dir, "wechat-last-run.json");
+  const handler = createWechatCollectorHandler({ configPath, statusPath });
+
+  const result = await call(handler, "PUT", "/api/wechat-collector/config", {
+    groups: [{
+      groupName: "客户项目群",
+      projectName: "客户考试项目",
+      customerName: "客户",
+      requirementRequestId: "customer-exam",
+      enabled: true,
+      intervalMinutes: 15,
+      initialCollectionMode: "ocr_current_window",
+      incrementalSource: "cc_connect",
+      ccConnectEnabled: true,
+      ccConnectChatId: "1234567890@chatroom",
+      initialCollectedAt: "2026-06-30T08:00:00.000Z",
+      incrementalStartedAt: "2026-06-30T08:05:00.000Z",
+    }],
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.config.groups[0].incremental_source, undefined);
+  assert.equal(result.body.config.groups[0].cc_connect_enabled, undefined);
+  assert.equal(result.body.config.groups[0].cc_connect_chat_id, undefined);
+  const saved = JSON.parse(readFileSync(configPath, "utf8"));
+  assert.equal(saved.groups[0].initial_collection_mode, "ocr_current_window");
+  assert.equal(saved.groups[0].incremental_started_at, undefined);
+});
+
+test("wechat collector API saves and redacts LLM parser config", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "wechat-api-"));
+  const configPath = path.join(dir, "wechat-requirement-groups.json");
+  const statusPath = path.join(dir, "wechat-last-run.json");
+  const configBackupDir = path.join(dir, "config-backups");
+  const handler = createWechatCollectorHandler({ configPath, statusPath, configBackupDir });
+
+  const saved = await call(handler, "PUT", "/api/wechat-collector/config", {
+    groups: [{ groupName: "AI赋能运营自动化小组", enabled: true, intervalMinutes: 15 }],
+    llmParse: {
+      enabled: true,
+      provider: "qwen",
+      model: "qwen-plus",
+      endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      apiKey: "qwen-secret",
+    },
+  });
+  const fetched = await call(handler, "GET", "/api/wechat-collector/config");
+
+  assert.equal(saved.statusCode, 200);
+  assert.equal(saved.body.config.llm_parse.enabled, true);
+  assert.equal(saved.body.config.llm_parse.provider, "qwen");
+  assert.equal(saved.body.config.llm_parse.apiKeyConfigured, true);
+  assert.equal(saved.body.config.llm_parse.api_key, undefined);
+  assert.equal(fetched.body.config.llm_parse.apiKeyConfigured, true);
+  assert.equal(fetched.body.config.llm_parse.api_key, undefined);
+  const raw = JSON.parse(readFileSync(configPath, "utf8"));
+  assert.equal(raw.llm_parse.api_key, "qwen-secret");
+
+  const retained = await call(handler, "PUT", "/api/wechat-collector/config", {
+    groups: [{ groupName: "AI赋能运营自动化小组", enabled: true, intervalMinutes: 15 }],
+    llmParse: {
+      enabled: true,
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      endpoint: "https://api.openai.com/v1/responses",
+    },
+  });
+  assert.equal(retained.statusCode, 200);
+  assert.equal(JSON.parse(readFileSync(configPath, "utf8")).llm_parse.api_key, "qwen-secret");
+
+  const cleared = await call(handler, "PUT", "/api/wechat-collector/config", {
+    groups: [{ groupName: "AI赋能运营自动化小组", enabled: true, intervalMinutes: 15 }],
+    llmParse: { enabled: false, provider: "openai", clearApiKey: true },
+  });
+  assert.equal(cleared.statusCode, 200);
+  assert.equal(JSON.parse(readFileSync(configPath, "utf8")).llm_parse.api_key, "");
+});
+
+test("wechat collector API validates LLM key and lists models", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "wechat-api-"));
+  const configPath = path.join(dir, "wechat-requirement-groups.json");
+  const statusPath = path.join(dir, "wechat-last-run.json");
+  writeFileSync(configPath, JSON.stringify({
+    groups: [{ group_name: "AI赋能运营自动化小组", enabled: true, interval_minutes: 15 }],
+    llm_parse: {
+      enabled: true,
+      provider: "qwen",
+      model: "qwen-plus",
+      endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      api_key: "saved-key",
+    },
+  }));
+  const calls = [];
+  const handler = createWechatCollectorHandler({
+    configPath,
+    statusPath,
+    fetchImpl: async (url, options = {}) => {
+      calls.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ data: [{ id: "qwen-plus" }, { id: "qwen-max" }] }),
+      };
+    },
+  });
+
+  const result = await call(handler, "POST", "/api/wechat-collector/llm/models", {
+    llmParse: {
+      provider: "qwen",
+      endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    },
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.deepEqual(result.body.models, ["qwen-plus", "qwen-max"]);
+  assert.equal(calls[0].url, "https://dashscope.aliyuncs.com/compatible-mode/v1/models");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer saved-key");
+});
+
+test("wechat collector API removes whitespace from LLM key before validation", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "wechat-api-"));
+  const configPath = path.join(dir, "wechat-requirement-groups.json");
+  const statusPath = path.join(dir, "wechat-last-run.json");
+  writeFileSync(configPath, JSON.stringify({
+    groups: [{ group_name: "AI赋能运营自动化小组", enabled: true, interval_minutes: 15 }],
+    llm_parse: {
+      enabled: true,
+      provider: "qwen",
+      endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      api_key: " saved-\nkey ",
+    },
+  }));
+  const calls = [];
+  const handler = createWechatCollectorHandler({
+    configPath,
+    statusPath,
+    fetchImpl: async (url, options = {}) => {
+      calls.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ data: [{ id: "qwen-plus" }] }),
+      };
+    },
+  });
+
+  const result = await call(handler, "POST", "/api/wechat-collector/llm/models", {
+    llmParse: { provider: "qwen" },
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(calls[0].options.headers.Authorization, "Bearer saved-key");
 });
 
 test("wechat collector API restores runtime config from a backup safely", async () => {

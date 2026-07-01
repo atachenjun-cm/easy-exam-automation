@@ -178,6 +178,24 @@ test("builds requirement-center payload from a WeChat draft", () => {
   assert.match(payload.message, /变更一下，科目增加数学/);
 });
 
+test("adds LLM analysis candidates to collecting payload when present", () => {
+  const config = loadWechatGroupConfig(sampleConfig);
+  const draft = buildWechatRequirementDraft({
+    config,
+    groupName: "AI赋能运营自动化小组",
+    text: sampleChat,
+  });
+  draft.analysisCandidates = {
+    enabled: true,
+    merged: { fields: { subjects: { status: "consistent", evidence: ["科目增加数学"] } }, conflicts: [] },
+  };
+
+  const payload = buildRequirementCenterPayload(draft);
+
+  assert.equal(payload.analysisCandidates.enabled, true);
+  assert.equal(payload.analysisCandidates.merged.fields.subjects.status, "consistent");
+});
+
 test("appends downloaded attachment previews to requirement-center audit message", () => {
   const config = loadWechatGroupConfig(sampleConfig);
   const draft = buildWechatRequirementDraft({
@@ -239,6 +257,24 @@ test("builds change-request payload from WeChat change records", () => {
   assert.equal(payload.source.groupName, "AI赋能运营自动化小组");
   assert.equal(payload.changes.changeRecords[0].type, "subject_change");
   assert.deepEqual(payload.changes.latestRequirement.subjects, ["行测", "英语", "数学"]);
+});
+
+test("adds LLM analysis candidates to change-request payload when present", () => {
+  const config = loadWechatGroupConfig(configuredRequestConfig);
+  const draft = buildWechatRequirementDraft({
+    config,
+    groupName: "AI赋能运营自动化小组",
+    text: "客户：变更一下，科目增加数学。",
+  });
+  draft.analysisCandidates = {
+    enabled: true,
+    merged: { fields: { subjects: { status: "llm_only", evidence: ["科目增加数学"] } }, conflicts: [] },
+  };
+
+  const payload = buildChangeRequestPayload(draft, "wechat-ai-ops");
+
+  assert.equal(payload.analysisCandidates.enabled, true);
+  assert.equal(payload.analysisCandidates.merged.fields.subjects.status, "llm_only");
 });
 
 test("parses real WeChat change wording for time subjects and login limits", () => {
