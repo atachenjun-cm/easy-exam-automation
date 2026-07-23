@@ -5,6 +5,13 @@ set "SOURCE_DIR=%~dp0"
 set "INSTALL_DIR=%LOCALAPPDATA%\YikaoFanweiHelper"
 set "STARTUP_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 set "STARTUP_LAUNCHER=%STARTUP_DIR%\YikaoFanweiHelper.bat"
+set "CONFIG_SOURCE=%SOURCE_DIR%config.env"
+set "CONSOLE_ORIGINS=http://172.16.13.214:8765"
+if exist "%CONFIG_SOURCE%" (
+  for /f "tokens=1,* delims==" %%A in ('findstr /B "YIKAO_CONSOLE_ORIGINS=" "%CONFIG_SOURCE%"') do set "CONSOLE_ORIGINS=%%B"
+)
+for /f "tokens=1 delims=, " %%A in ("%CONSOLE_ORIGINS%") do set "CONSOLE_ORIGIN=%%A"
+if "%CONSOLE_ORIGIN%"=="" set "CONSOLE_ORIGIN=http://172.16.13.214:8765"
 
 echo [1/4] Installing Yikao Fanwei Helper...
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
@@ -22,10 +29,14 @@ if errorlevel 1 (
   exit /b 1
 )
 
->"%INSTALL_DIR%\config.env" echo YIKAO_HELPER_HOST=127.0.0.1
->>"%INSTALL_DIR%\config.env" echo YIKAO_HELPER_PORT=18765
->>"%INSTALL_DIR%\config.env" echo YIKAO_HELPER_CHROME_PORT=19222
->>"%INSTALL_DIR%\config.env" echo YIKAO_CONSOLE_ORIGINS=http://172.16.13.214:8765
+if exist "%CONFIG_SOURCE%" (
+  copy /Y "%CONFIG_SOURCE%" "%INSTALL_DIR%\config.env" >nul
+) else (
+  >"%INSTALL_DIR%\config.env" echo YIKAO_HELPER_HOST=127.0.0.1
+  >>"%INSTALL_DIR%\config.env" echo YIKAO_HELPER_PORT=18765
+  >>"%INSTALL_DIR%\config.env" echo YIKAO_HELPER_CHROME_PORT=19222
+  >>"%INSTALL_DIR%\config.env" echo YIKAO_CONSOLE_ORIGINS=%CONSOLE_ORIGIN%
+)
 >>"%INSTALL_DIR%\config.env" echo YIKAO_HELPER_RUNTIME_DIR=%INSTALL_DIR%
 
 echo [2/4] Registering current-user startup launcher...
@@ -41,7 +52,7 @@ if errorlevel 1 (
 )
 
 echo [4/4] Opening the shared Fanwei page...
-start "" "http://172.16.13.214:8765/fanwei-test"
+start "" "%CONSOLE_ORIGIN%/fanwei-test"
 echo Installation completed.
 timeout /t 2 /nobreak >nul
 exit /b 0

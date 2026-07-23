@@ -1,5 +1,5 @@
 import { once } from "node:events";
-import { mkdir, realpath } from "node:fs/promises";
+import { mkdir, readFile, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,44 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 18765;
 const DEFAULT_CHROME_PORT = 19222;
 const DEFAULT_SHUTDOWN_GRACE_MS = 2000;
+const HELPER_ENV_KEYS = new Set([
+  "YIKAO_HELPER_HOST",
+  "YIKAO_HELPER_PORT",
+  "YIKAO_HELPER_CHROME_PORT",
+  "YIKAO_HELPER_RUNTIME_DIR",
+  "YIKAO_CONSOLE_ORIGINS",
+]);
+
+function parseEnvFile(text = "") {
+  const result = {};
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const index = trimmed.indexOf("=");
+    if (index <= 0) continue;
+    const key = trimmed.slice(0, index).trim();
+    if (!HELPER_ENV_KEYS.has(key)) continue;
+    result[key] = trimmed.slice(index + 1).trim();
+  }
+  return result;
+}
+
+export async function mergeHelperConfigEnv(env = process.env) {
+  const moduleRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const runtimeDir = String(env.YIKAO_HELPER_RUNTIME_DIR || "").trim();
+  const candidates = [
+    env.YIKAO_HELPER_CONFIG_FILE,
+    runtimeDir ? path.join(runtimeDir, "config.env") : "",
+    path.join(process.cwd(), "config.env"),
+    path.join(moduleRoot, "config.env"),
+  ].filter(Boolean);
+  for (const candidate of Array.from(new Set(candidates))) {
+    try {
+      return { ...env, ...parseEnvFile(await readFile(candidate, "utf8")) };
+    } catch {}
+  }
+  return env;
+}
 
 function portFromEnv(value, name, fallback) {
   const text = String(value ?? "").trim();
@@ -56,9 +94,10 @@ export function helperConfigFromEnv(env = process.env) {
 }
 
 export async function runFanweiLocalHelperCli(env = process.env) {
-  const config = helperConfigFromEnv(env);
+  const mergedEnv = await mergeHelperConfigEnv(env);
+  const config = helperConfigFromEnv(mergedEnv);
   const shutdownGraceMs = portFromEnv(
-    env.YIKAO_HELPER_SHUTDOWN_GRACE_MS,
+    mergedEnv.YIKAO_HELPER_SHUTDOWN_GRACE_MS,
     "YIKAO_HELPER_SHUTDOWN_GRACE_MS",
     DEFAULT_SHUTDOWN_GRACE_MS,
   );

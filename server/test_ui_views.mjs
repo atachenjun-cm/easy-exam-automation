@@ -1656,8 +1656,34 @@ test("exam task overview starts collapsed and removes redundant top actions", ()
   assert.ok(html.includes('id="taskOverviewTitle"'));
   assert.ok(html.includes('id="taskOverviewProgress"'));
   assert.ok(html.includes('id="taskOverviewBody" style="max-height: 0px; opacity: 0" inert'));
+  assert.ok(html.includes("批次名称"));
+  assert.match(html, /<textarea class="task-overview-input" data-score-stamp-batch-name-input rows="1"[^>]*>\$\{safeText\(task\.config\?\.scoreStampBatchName \|\| ""\)\}<\/textarea>/);
+  assert.match(html, /data-score-stamp-batch-name-save="\$\{safeText\(task\.taskId\)\}" type="button" hidden>保存<\/button>/);
+  assert.ok(html.includes("/score-stamp-batch-name"));
+  assert.ok(html.includes("async function saveScoreStampBatchName(taskId, batchName)"));
+  assert.match(html, /\.task-overview-value\s*\{[^}]*font-weight:\s*800;[^}]*line-height:\s*1\.35/);
+  assert.match(html, /\.task-overview-input\s*\{[^}]*width:\s*calc\(100% \+ 1px\);[^}]*margin-top:\s*-1px;[^}]*margin-left:\s*-1px;[^}]*padding:\s*0;[^}]*border:\s*1px solid transparent;[^}]*background:\s*transparent;[^}]*font:\s*inherit;[^}]*font-size:\s*inherit;[^}]*font-weight:\s*800;[^}]*line-height:\s*1\.35;[^}]*white-space:\s*pre-wrap;[^}]*overflow-wrap:\s*anywhere;[^}]*resize:\s*none/);
+  assert.match(html, /\.task-overview-input:focus\s*\{[^}]*border-color:\s*var\(--blue\);[^}]*background:\s*var\(--surface\)/);
+  assert.ok(html.includes("function resizeTaskOverviewBatchNameInput(input)"));
+  assert.ok(html.includes('taskOverview.addEventListener("input"'));
+  assert.ok(html.includes('resizeTaskOverviewBatchNameInput(taskOverview.querySelector("[data-score-stamp-batch-name-input]"))'));
+  assert.ok(html.includes('taskOverview.addEventListener("focusin"'));
+  assert.ok(html.includes('taskOverview.addEventListener("focusout"'));
+  assert.ok(html.includes("if (saveButton) saveButton.hidden = false;"));
+  assert.ok(html.includes("if (saveButton && !saveButton.disabled) saveButton.hidden = true;"));
   assert.ok(html.includes("function setTaskOverviewExpanded(expanded)"));
   assert.ok(html.includes("transition: max-height 200ms ease-out, opacity 200ms ease-out"));
+  assert.match(html, /#taskDetailView \.task-detail-overview-title\s*\{[^}]*font-size:\s*inherit/);
+  assert.equal(html.includes('<div class="task-overview-label">任务编号</div><div class="task-overview-value">${safeText(task.taskId)}</div>'), false);
+  assert.equal(html.includes("#taskOverview .task-overview-grid { grid-template-columns: repeat(6"), false);
+  assert.match(html, /#taskOverview \.task-overview-grid\s*\{[^}]*grid-template-columns:\s*max-content var\(--task-batch-width, 320px\) max-content max-content max-content;[^}]*align-items:\s*start;[^}]*justify-content:\s*space-between;[^}]*column-gap:\s*16px/);
+  assert.match(html, /#taskOverview \.task-overview-grid > :last-child\s*\{[^}]*padding-right:\s*34px/);
+  assert.ok(html.includes('context.measureText(input.value || input.placeholder || "").width'));
+  assert.ok(html.includes('filter((item) => !item.matches("[data-score-stamp-batch-name-editor]"))'));
+  assert.ok(html.includes("grid.clientWidth - siblingWidth - (16 * (grid.children.length - 1))"));
+  assert.ok(html.includes('grid.style.setProperty("--task-batch-width"'));
+  assert.ok(html.includes("const borderHeight = input.offsetHeight - input.clientHeight;"));
+  assert.ok(html.includes("input.scrollHeight + borderHeight"));
   assert.equal(html.includes("task-detail-overview-status"), false);
 });
 
@@ -1688,7 +1714,8 @@ test("exam progress cards show independent status rows for every requirement", (
   assert.ok(html.includes("roomStep?.requirementProgress?.[requirementKey]"));
   assert.ok(html.includes("monitorStep?.requirementProgress?.[requirementKey]"));
   assert.ok(html.includes("status: aggregateRequirementDisplayStatus(Object.values(requirementProgress).map((entry) => entry.status))"));
-  assert.ok(html.includes("${requirementProgressHtml}"));
+  assert.ok(html.includes("const collapsibleContentHtml = ["));
+  assert.ok(html.includes("requirementProgressHtml,"));
   assert.ok(html.includes("const subHtml = !requirementProgressHtml && Object.keys(sub).length"));
   assert.match(html, /\.task-step-requirement-row\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto/s);
 });
@@ -1762,7 +1789,6 @@ test("exam detail progress cards include paper binding and grouped candidate flo
   assert.ok(html.includes('data-score-format="pdf"'));
   assert.ok(html.includes("下载成绩单 Excel"));
   assert.ok(html.includes("下载成绩单 PDF"));
-  assert.ok(html.includes("下载盖章压缩包"));
   assert.ok(html.includes("data-score-stamp-archive-download"));
   assert.ok(html.includes("data-score-stamp-application"));
   assert.ok(html.includes("?format=${encodeURIComponent(format)}"));
@@ -1775,7 +1801,7 @@ test("exam detail progress cards include paper binding and grouped candidate flo
   assert.ok(html.includes("function shouldShowInlineRetryStepAction(step)"));
   assert.ok(html.includes("function retryStepActionHtml(step)"));
   assert.ok(html.includes('step.stepKey === "trial_paper_bind" && step.status === "pending"'));
-  assert.ok(html.includes("${shouldShowInlineRetryStepAction(step) ? retryStepActionHtml(step) : \"\"}"));
+  assert.ok(html.includes('shouldShowInlineRetryStepAction(step) ? retryStepActionHtml(step) : "",'));
   assert.ok(html.includes("${step.extraDetail ? `<div>${safeText(step.extraDetail)}</div>` : \"\"}"));
   assert.equal(html.includes("!step.hideLogs ? `<div style=\"margin-top:8px;\">${safeText(logs)}</div>` : \"\""), false);
   assert.ok(html.includes("继续绑定试考试卷"));
@@ -1797,11 +1823,10 @@ test("paper binding controls and state are separated by requirement", () => {
   assert.ok(html.includes("paperFormBindRequirementSummary(task, requirementIndex, paperState)"));
   assert.ok(html.includes('body: JSON.stringify({ requirementIndex: Number(trigger.dataset.requirementIndex || 0) })'));
   assert.ok(html.includes('"试卷名称"'));
-  assert.ok(html.includes('["17", "试卷名称"]'));
-  assert.ok(html.includes('["18", "科目信息"]'));
+  assert.equal(html.includes('["17", "试卷名称"]'), false);
+  assert.ok(html.includes('["17", "科目信息"]'));
   assert.ok(html.includes("function buildPaperBindFeedbackForTask(task, paperStates)"));
   assert.ok(html.includes("extraHtml: buildPaperBindFeedbackForTask(task, paperStates)"));
-  assert.ok(html.includes("collapseExtraHtml: true"));
   assert.equal(html.includes('paper-bind-label">试卷编号'), false);
 });
 
@@ -1813,10 +1838,15 @@ test("formal course binding feedback lists courses from every requirement", () =
   assert.ok(html.includes('<span class="course-bind-label">需求单</span>${requirementIndex + 1}'));
 });
 
-test("course and paper binding details stay collapsed until their step card opens", () => {
+test("all step card supporting content stays collapsed until its card opens", () => {
   assert.ok(html.includes(".task-step-extra-detail { display: none; }"));
   assert.ok(html.includes(".task-step-card.open .task-step-extra-detail { display: block; }"));
-  assert.ok(html.includes('step.collapseExtraHtml ? `<div class="task-step-extra-detail">${step.extraHtml}</div>` : step.extraHtml'));
+  assert.ok(html.includes("const collapsibleContentHtml = ["));
+  assert.ok(html.includes("requirementProgressHtml,"));
+  assert.ok(html.includes('step.monitorActionHtml || "",'));
+  assert.ok(html.includes('step.triggerActionHtml || "",'));
+  assert.ok(html.includes('step.extraHtml || "",'));
+  assert.ok(html.includes('${collapsibleContentHtml ? `<div class="task-step-extra-detail">${collapsibleContentHtml}</div>` : ""}'));
   assert.ok(html.includes('if (card) card.classList.toggle("open")'));
 });
 
@@ -1934,7 +1964,6 @@ test("exam detail shows project shared sheet before score processing with a manu
   assert.equal(smsStep.includes("extraDetail: notificationMessage"), false);
   assert.ok(smsStep.includes("hideDetail: true"));
   assert.ok(smsStep.includes("extraHtml"));
-  assert.ok(smsStep.includes("collapseExtraHtml: true"));
   assert.ok(html.includes("data-copy-sms"));
   assert.ok(smsStep.includes("buildRequirementSmsHtml(task)"));
   assert.ok(html.includes("sms-action-row"));
@@ -2000,8 +2029,13 @@ test("score feedback downloads use the server-provided exam-prefixed filename", 
 });
 
 test("score process card downloads assessment documents when links exist", () => {
+  const scoreAction = sourceBetween("function buildScoreProcessAction", "function scoreStampApplicationStatusText");
   assert.ok(html.includes("下载测评文档"));
   assert.ok(html.includes("data-score-report-download"));
+  assert.equal(scoreAction.includes("下载盖章压缩包"), false);
+  assert.equal(scoreAction.includes("data-score-stamp-archive-download"), false);
+  assert.ok(scoreAction.indexOf("下载成绩单 PDF") < scoreAction.indexOf("${reportDownloadHtml}"));
+  assert.ok(scoreAction.indexOf("${reportDownloadHtml}") < scoreAction.indexOf("${stampApplicationHtml}"));
   assert.ok(html.includes("reportLinkCount"));
   assert.ok(html.includes("Number(scoreStep?.result?.reportLinkCount || 0) > 0"));
   assert.ok(html.includes("/scores/reports/download"));
@@ -2017,7 +2051,25 @@ test("score process card can retry OA seal application and download encrypted st
   assert.ok(html.includes("上传加密压缩包并保存"));
   assert.ok(html.includes("已打开 OA 申请页并上传加密压缩包"));
   assert.ok(html.includes("async function triggerScoreStampApplication(taskId)"));
-  assert.ok(html.includes("/scores/stamp-application"));
+  assert.ok(html.includes("async function triggerScoreStampApplicationViaHelper(taskId)"));
+  assert.ok(html.includes("async function ensureScoreStampLocalHelper()"));
+  assert.ok(html.includes("async function submitScoreStampApplicationResult(taskId, stampApplication)"));
+  assert.ok(html.includes("SCORE_STAMP_TODO_LIST_URL"));
+  assert.ok(html.includes("https://oa.ata.net.cn/wui/index.html#/main/workflow/listDoing?menuIds=1,13&menuPathIds=1,13&_key=wx3if1"));
+  assert.ok(html.includes(">提交申请</a>"));
+  assert.ok(html.includes("stampStatus === \"opened\" && stampApplication.saved"));
+  assert.ok(html.includes('fetchFanweiHelper("/score-stamp/start"'));
+  assert.ok(html.includes("/scores/stamp-application/prepare"));
+  assert.ok(html.includes("/scores/stamp-application/result"));
+  assert.ok(html.includes("本机助手版本过旧"));
+  assert.ok(html.includes("await triggerScoreStampApplication(taskId)"));
+  const triggerFunction = sourceBetween(
+    "async function triggerScoreStampApplication(taskId)",
+    "async function triggerProjectSharedSheetFill(taskId)",
+  );
+  assert.ok(triggerFunction.includes("triggerScoreStampApplicationViaHelper(taskId)"));
+  assert.equal(triggerFunction.includes("/scores/stamp-application"), false);
+  assert.equal(triggerFunction.includes("IS_LOOPBACK_CONSOLE"), false);
   assert.ok(html.includes("async function downloadScoreStampArchive(taskId)"));
   assert.ok(html.includes("/scores/stamp-archive/download"));
   assert.ok(html.includes("scoreStampArchiveDownloadFileName(response)"));
@@ -2042,6 +2094,10 @@ test("Fanwei local helper owns status, Chrome launch, and reads on the coworker'
   assert.ok(fanweiSection.includes('id="fanweiSerialInput"'));
   assert.ok(fanweiSection.includes('id="fanweiImportBtn" type="button" disabled'));
   assert.ok(fanweiSection.includes('id="fanweiInstallHelperBtn" type="button" hidden'));
+  assert.ok(fanweiSection.includes('id="fanweiHelperWindowsDownload" href="/api/fanwei/helper-installer?platform=windows" hidden'));
+  assert.ok(fanweiSection.includes('id="fanweiHelperMacDownload" href="/api/fanwei/helper-installer?platform=macos" hidden'));
+  assert.ok(fanweiSection.includes("/api/fanwei/helper-installer?platform=windows"));
+  assert.ok(fanweiSection.includes("/api/fanwei/helper-installer?platform=macos"));
   assert.equal(fanweiSection.includes('id="fanweiSerialInput" value="R0042182"'), false);
   assert.match(fanweiSection, /自动读取|自动读取真实泛微字段/);
   assert.equal(fanweiSection.includes("到已登录的泛微主表页执行"), false);
@@ -2058,6 +2114,8 @@ test("Fanwei local helper owns status, Chrome launch, and reads on the coworker'
   assert.ok(helperFetchFunction.includes("response.text()"));
   assert.ok(helperFetchFunction.includes("JSON.parse"));
   assert.ok(helperFetchFunction.includes("data.error?.message"));
+  assert.ok(helperFetchFunction.includes("本机助手未连接或未授权当前 8765 地址"));
+  assert.ok(helperFetchFunction.includes('helperError.code = "helper_unreachable"'));
 
   const copyFunction = sourceBetween(
     "async function copyFanweiReaderScript()",
@@ -2088,6 +2146,15 @@ test("Fanwei local helper owns status, Chrome launch, and reads on the coworker'
     "async function loadFanweiAutoReadStatus()",
     "async function createFanweiRequirementImport()",
   );
+  const downloadVisibilityFunction = sourceBetween(
+    "function setFanweiHelperDownloadsVisible(visible)",
+    "function resetFanweiReadState()",
+  );
+  assert.ok(downloadVisibilityFunction.includes("fanweiHelperWindowsDownload.hidden = !visible"));
+  assert.ok(downloadVisibilityFunction.includes("fanweiHelperMacDownload.hidden = !visible"));
+  assert.ok(statusFunction.includes("setFanweiHelperDownloadsVisible(false)"));
+  assert.ok(statusFunction.includes("setFanweiHelperDownloadsVisible(true)"));
+  assert.ok(statusFunction.indexOf("setFanweiHelperDownloadsVisible(true)") > statusFunction.indexOf("} catch (error) {"));
   assert.ok(statusFunction.includes('fetchFanweiHelper("/health"'));
   assert.ok(statusFunction.includes('fetchFanweiHelper("/chrome/ensure"'));
   assert.ok(statusFunction.includes("IS_LOOPBACK_CONSOLE"));
@@ -2116,6 +2183,8 @@ test("fanwei top actions keep hint spacing visually balanced", () => {
   assert.ok(toolbar.includes('<div class="view-actions items-center">'));
   assert.ok(toolbar.includes('class="field-input h-10" id="fanweiSerialInput"'));
   assert.ok(toolbar.includes('class="btn h-10" id="fanweiCopyScriptBtn"'));
+  assert.ok(toolbar.includes('class="btn h-10" id="fanweiHelperWindowsDownload" href="/api/fanwei/helper-installer?platform=windows" hidden'));
+  assert.ok(toolbar.includes('class="btn h-10" id="fanweiHelperMacDownload" href="/api/fanwei/helper-installer?platform=macos" hidden'));
   assert.ok(toolbar.includes('class="btn primary h-10" id="fanweiImportBtn"'));
   assert.ok(toolbar.includes('<button class="btn primary h-10" id="fanweiImportBtn" type="button" disabled>进入自动配置</button>'));
   assert.equal(toolbar.includes("生成需求单并进入自动配置"), false);
@@ -2295,6 +2364,13 @@ test("dark theme covers the complete Fanwei workbench", () => {
   assert.match(html, /:root\[data-theme="dark"\]\s+\.fanwei-select,[\s\S]*\.fanwei-editable\s*\{[^}]*background:\s*var\(--input\)[^}]*color:\s*var\(--text-normal\)/s);
   assert.match(html, /:root\[data-theme="dark"\]\s+\.fanwei-requirement-sheet \.fanwei-highlight\s*\{[^}]*color:\s*var\(--amber\)/s);
   assert.match(html, /:root\[data-theme="dark"\]\s+\.fanwei-requirement-sheet \.fanwei-warn-item\s*\{[^}]*color:\s*var\(--red\)/s);
+});
+
+test("dark theme keeps the selected session date visible", () => {
+  const darkPanelRuleIndex = html.indexOf(':root[data-theme="dark"] :where(');
+  const selectedDayRuleIndex = html.indexOf(':root[data-theme="dark"] .session-time-day.is-selected');
+  assert.ok(selectedDayRuleIndex > darkPanelRuleIndex);
+  assert.match(html, /:root\[data-theme="dark"\]\s+\.session-time-day\.is-selected\s*\{[^}]*background:\s*var\(--blue\);[^}]*color:\s*#ffffff;[^}]*box-shadow:/s);
 });
 
 test("fanwei requirement sheet edits sync into generated import payload", () => {

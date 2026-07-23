@@ -78,9 +78,19 @@ test("server exposes authenticated prebuilt Fanwei helper installer downloads", 
   assert.ok(serverSource.includes('path.join(runtimeDir, "fanwei-helper")'));
   assert.ok(serverSource.includes('path.join(rootDir, "dist", "fanwei-helper")'));
   assert.ok(serverSource.includes("async function handleFanweiHelperInstaller"));
+  assert.ok(serverSource.includes("function requestOrigin(req)"));
+  assert.ok(serverSource.includes("function helperPackageConfig(origin = \"\")"));
+  assert.ok(serverSource.includes("async function dynamicFanweiHelperPackagePath"));
+  assert.ok(serverSource.includes("async function overlayLatestFanweiHelperFiles"));
+  assert.ok(serverSource.includes("await extractFanweiHelperPackageZip(packagePath, tempRoot)"));
+  assert.ok(serverSource.includes("YIKAO_CONSOLE_ORIGINS=${origins}"));
+  assert.ok(serverSource.includes('"http://127.0.0.1:8765"'));
+  assert.ok(serverSource.includes('"http://localhost:8765"'));
+  assert.equal(serverSource.includes("defaultFanweiHelperConsoleOrigin"), false);
+  assert.equal(serverSource.includes("将使用预构建安装包"), false);
   assert.ok(serverSource.includes('/api/fanwei/helper-installer'));
   const requestHandlerBlock = serverSource.slice(serverSource.indexOf("async function requestHandler"));
-  assert.ok(requestHandlerBlock.indexOf("!getAuthUserFromRequest(auth, req)") < requestHandlerBlock.indexOf("handleFanweiHelperInstaller(url, res)"));
+  assert.ok(requestHandlerBlock.indexOf("!getAuthUserFromRequest(auth, req)") < requestHandlerBlock.indexOf("handleFanweiHelperInstaller(req, url, res)"));
 });
 
 test("EasyExam account settings are stored per console user", () => {
@@ -199,6 +209,9 @@ test("project source snapshots can be edited and rebuild downstream workflow dat
   assert.ok(serverSource.includes("async function handleContentTaskRemark(taskId, req, res)"));
   assert.ok(serverSource.includes("/content-task-remarks$/"));
   assert.ok(serverSource.includes("contentTaskRemarks"));
+  assert.ok(serverSource.includes("async function handleScoreStampBatchName(taskId, req, res)"));
+  assert.ok(serverSource.includes("/score-stamp-batch-name$/"));
+  assert.ok(serverSource.includes("scoreStampBatchName"));
   assert.ok(serverSource.includes("sourceKey: fanweiSource.serialNo"));
   assert.ok(serverSource.includes('projectName: source === "fanwei"'));
   assert.ok(serverSource.includes('runTaskState("update_config", {'));
@@ -535,15 +548,30 @@ test("score processing automatically prepares and uploads encrypted OA seal appl
   assert.ok(serverSource.includes("createPasswordProtectedScoreArchive"));
   assert.ok(serverSource.includes("scoreStampArchivePassword"));
   assert.ok(serverSource.includes('process.env.SCORE_STAMP_ARCHIVE_PASSWORD || "1234"'));
-  assert.ok(serverSource.includes("tryStartScoreStampApplication(task, scoreResult, req)"));
+  const scoreProcessHandler = serverSource.slice(
+    serverSource.indexOf("async function handleScoreProcess"),
+    serverSource.indexOf("async function handleScoreDownload"),
+  );
+  assert.equal(scoreProcessHandler.includes("tryStartScoreStampApplication"), false);
+  assert.equal(scoreProcessHandler.includes("isLoopbackRequest(req)"), false);
+  assert.ok(scoreProcessHandler.includes("将通过当前电脑的本机助手自动打开本机 Chrome"));
+  assert.ok(serverSource.includes("handleScoreStampApplicationPrepare"));
+  assert.ok(serverSource.includes("handleScoreStampApplicationResult"));
+  assert.ok(serverSource.includes("publicScoreStampApplicationPayload"));
+  assert.ok(serverSource.includes("normalizeScoreStampApplicationResult"));
   assert.ok(serverSource.includes("function parseChromeJsonValue"));
   assert.ok(serverSource.includes("parseChromeJsonValue(raw)"));
   assert.ok(serverSource.includes("uploadFilesToChromeDevToolsFileInput"));
   assert.ok(serverSource.includes("buildScoreStampAttachmentPrepareScript()"));
   assert.ok(serverSource.includes("buildScoreStampApplicationSaveScript()"));
+  assert.ok(serverSource.includes("attempts: 1"));
+  assert.ok(serverSource.includes("OA 保存后页面已跳转，按已保存处理"));
+  assert.ok(serverSource.includes("navigatedAfterSave: Boolean(saveResult.navigatedAfterSave)"));
   assert.ok(serverSource.includes("OA 成绩盖章申请页保存失败"));
   assert.ok(serverSource.includes("saved: Boolean(saveResult.saved)"));
   assert.ok(serverSource.includes("scoreStampApplicationMatch"));
+  assert.ok(serverSource.includes("scoreStampApplicationPrepareMatch"));
+  assert.ok(serverSource.includes("scoreStampApplicationResultMatch"));
   assert.ok(serverSource.includes("scoreStampArchiveDownloadMatch"));
 });
 

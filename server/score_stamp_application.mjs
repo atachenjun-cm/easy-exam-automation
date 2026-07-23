@@ -151,6 +151,7 @@ export function buildScoreStampApplicationPayload({
   const date = shanghaiDate(now);
   const applicant = first(env.SCORE_STAMP_APPLICANT_NAME, user.name, business.applicant, user.email);
   const projectName = first(task.projectName, business.project_name, scoreResult.examName);
+  const manualBatchName = first(config.scoreStampBatchName);
   const fallbackBatchKeyword = first(
     config.operationBatchCode,
     config.operationBatch?.code,
@@ -160,7 +161,7 @@ export function buildScoreStampApplicationPayload({
     config.projectCode,
     task.taskId,
   );
-  const batchSearchTerms = buildScoreStampBatchSearchTerms(
+  const batchSearchTerms = manualBatchName ? [manualBatchName] : buildScoreStampBatchSearchTerms(
     projectName,
     business.project_name,
     config.projectCode,
@@ -171,6 +172,7 @@ export function buildScoreStampApplicationPayload({
   );
   const batchSearchKeyword = first(
     env.SCORE_STAMP_BATCH_KEYWORD,
+    manualBatchName,
     ...batchSearchTerms,
     projectName,
     business.project_name,
@@ -187,8 +189,8 @@ export function buildScoreStampApplicationPayload({
     applicationDate: date,
     batchKeyword: batchSearchKeyword || fallbackBatchKeyword,
     batchSearchKeyword,
-    batchSearchQueries: unique([batchSearchKeyword, ...batchSearchTerms, fallbackBatchKeyword]).slice(0, 12),
-    batchMatchKeywords: unique([
+    batchSearchQueries: manualBatchName ? [batchSearchKeyword || manualBatchName] : unique([batchSearchKeyword, ...batchSearchTerms, fallbackBatchKeyword]).slice(0, 12),
+    batchMatchKeywords: manualBatchName ? [batchSearchKeyword || manualBatchName] : unique([
       projectName,
       business.project_name,
       ...batchSearchTerms,
@@ -228,16 +230,41 @@ export function buildScoreStampApplicationFillScript(payload = {}) {
   const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
   const clean = (value) => String(value ?? "").replace(/\\u00a0/g, " ").replace(/[\\t\\r\\n ]+/g, " ").replace(/[：:]$/, "").trim();
   const isVisible = (element) => Boolean(element && element.getClientRects && element.getClientRects().length);
+  const makeDomEvent = (element, eventName, init = {}) => {
+    const view = element?.ownerDocument?.defaultView || window;
+    const EventCtor = view.Event || window.Event;
+    if (EventCtor) return new EventCtor(eventName, init);
+    if (!element?.ownerDocument?.createEvent) return null;
+    const event = element.ownerDocument.createEvent("Event");
+    event.initEvent(eventName, Boolean(init.bubbles), Boolean(init.cancelable));
+    return event;
+  };
   const dispatch = (element) => {
     for (const eventName of ["input", "change", "blur"]) {
-      element.dispatchEvent(new Event(eventName, { bubbles: true }));
+      const event = makeDomEvent(element, eventName, { bubbles: true });
+      if (event) element.dispatchEvent(event);
     }
   };
+  const controlValue = (element) => clean(element?.value ?? element?.textContent ?? element?.getAttribute?.("value") ?? "");
   const valueSetter = (element, value) => {
-    const proto = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
-    if (descriptor?.set) descriptor.set.call(element, value);
-    else element.value = value;
+    const view = element?.ownerDocument?.defaultView || window;
+    const tag = String(element?.tagName || "").toUpperCase();
+    const proto = tag === "TEXTAREA"
+      ? view.HTMLTextAreaElement?.prototype
+      : view.HTMLInputElement?.prototype;
+    const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, "value") : null;
+    let assigned = false;
+    try {
+      if (descriptor?.set) descriptor.set.call(element, value);
+      else element.value = value;
+      assigned = true;
+    } catch {
+      try {
+        element.setAttribute?.("value", value);
+        if (tag === "TEXTAREA") element.textContent = value;
+      } catch {}
+    }
+    return assigned || controlValue(element) === clean(value);
   };
   const rows = () => Array.from(document.querySelectorAll("tr")).filter(isVisible);
   const rowText = (row) => clean(row.innerText || row.textContent);
@@ -253,10 +280,49 @@ export function buildScoreStampApplicationFillScript(payload = {}) {
     const index = labelCellIndex(row, labels);
     return index >= 0 ? cells.slice(index + 1) : cells;
   };
+  const batchRoot = () => document.querySelector('[data-fieldmark="field499948"], .field499948_swapDiv') ||
+    findRow(["选择批次"])?.querySelector("td:nth-child(2)");
+  const findBatchSearchButton = (root = batchRoot()) => {
+    const containers = [
+      root,
+      root?.closest("td"),
+      findRow(["选择批次"]),
+    ].filter(Boolean);
+    for (const container of containers) {
+      const exact = container.querySelector("button.ant-btn-icon-only, button.ant-btn-ghost.ant-btn-icon-only");
+      if (exact && isVisible(exact)) return exact;
+      const iconButton = Array.from(container.querySelectorAll("button")).find((item) =>
+        isVisible(item) && (
+          String(item.className || "").includes("ant-btn-icon-only") ||
+          Boolean(item.querySelector(".anticon-search, .anticon"))
+        )
+      );
+      if (iconButton) return iconButton;
+    }
+    return null;
+  };
+  const optionInputsReady = (labels, options) => {
+    const targets = (Array.isArray(options) ? options : []).map(clean).filter(Boolean);
+    if (!targets.length) return true;
+    const containers = valueContainers(labels);
+    if (!containers.length) return false;
+    return targets.every((target) => {
+      const label = containers.flatMap((container) => Array.from(container.querySelectorAll("label")))
+        .find((item) => isVisible(item) && clean(item.innerText || item.textContent).includes(target));
+      const input = label?.querySelector("input[type=checkbox],input[type=radio]") ||
+        containers.flatMap((container) => Array.from(container.querySelectorAll("input[type=checkbox],input[type=radio]")))
+          .find((item) => clean(item.parentElement?.innerText || item.value).includes(target));
+      return Boolean(input);
+    });
+  };
+  const textControlReady = (labels) => valueContainers(labels)
+    .flatMap((container) => Array.from(container.querySelectorAll("textarea,input:not([type=hidden]),[contenteditable=true]")))
+    .some((element) => isVisible(element) && !["checkbox", "radio", "file"].includes(String(element.type || "").toLowerCase()));
   const setControlValue = (control, value) => {
     if (!control || control.disabled || control.readOnly) return false;
+    if (controlValue(control) === clean(value)) return true;
     control.focus?.();
-    valueSetter(control, value);
+    if (!valueSetter(control, value)) return false;
     dispatch(control);
     return true;
   };
@@ -298,8 +364,10 @@ export function buildScoreStampApplicationFillScript(payload = {}) {
         warnings.push(\`\${name}未找到选项：\${target}\`);
         continue;
       }
-      if (!input.checked) input.click();
-      dispatch(input);
+      if (!input.checked) {
+        clickElement(label || input);
+        dispatch(input);
+      }
       matched += 1;
     }
     if (matched) filled.push(name);
@@ -307,10 +375,34 @@ export function buildScoreStampApplicationFillScript(payload = {}) {
   };
   const clickElement = (element) => {
     if (!element) return false;
-    element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
-    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
-    element.click();
-    return true;
+    const view = element?.ownerDocument?.defaultView || window;
+    const MouseCtor = view.MouseEvent || window.MouseEvent;
+    const mouseEvent = (name) => MouseCtor
+      ? new MouseCtor(name, { bubbles: true, cancelable: true, view })
+      : makeDomEvent(element, name, { bubbles: true, cancelable: true });
+    const down = mouseEvent("mousedown");
+    const up = mouseEvent("mouseup");
+    if (down) element.dispatchEvent(down);
+    if (up) element.dispatchEvent(up);
+    try {
+      if (typeof element.click === "function") {
+        element.click();
+        return true;
+      }
+    } catch {}
+    try {
+      const nativeClick = view.HTMLElement?.prototype?.click || view.Element?.prototype?.click;
+      if (nativeClick) {
+        nativeClick.call(element);
+        return true;
+      }
+    } catch {}
+    const click = mouseEvent("click");
+    if (click) {
+      element.dispatchEvent(click);
+      return true;
+    }
+    return false;
   };
   const visibleModal = () => Array.from(document.querySelectorAll(".ant-modal")).reverse().find(isVisible);
   const batchKeywords = () => [...new Set([
@@ -349,8 +441,7 @@ export function buildScoreStampApplicationFillScript(payload = {}) {
     const keywords = batchKeywords();
     if (!keywords.length) return true;
     const queries = batchSearchQueries(keywords);
-    const root = document.querySelector('[data-fieldmark="field499948"], .field499948_swapDiv') ||
-      findRow(["选择批次"])?.querySelector("td:nth-child(2)");
+    const root = batchRoot();
     if (!root) {
       warnings.push("选择批次未找到控件");
       return false;
@@ -364,9 +455,7 @@ export function buildScoreStampApplicationFillScript(payload = {}) {
       clickElement(root.querySelector(".ant-select-selection__choice__remove"));
       await sleep(300);
     }
-    const button = root.querySelector("button.ant-btn-icon-only") ||
-      root.closest("td")?.querySelector("button.ant-btn-icon-only") ||
-      findRow(["选择批次"])?.querySelector("button.ant-btn-icon-only");
+    const button = findBatchSearchButton(root);
     if (!button) {
       warnings.push("选择批次未找到搜索按钮");
       return false;
@@ -399,7 +488,14 @@ export function buildScoreStampApplicationFillScript(payload = {}) {
       searchedQuery = query;
       setControlValue(searchInput, query);
       if (searchButton) clickElement(searchButton);
-      else searchInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      else {
+        const view = searchInput?.ownerDocument?.defaultView || window;
+        const KeyboardCtor = view.KeyboardEvent || window.KeyboardEvent;
+        const event = KeyboardCtor
+          ? new KeyboardCtor("keydown", { key: "Enter", bubbles: true, cancelable: true })
+          : makeDomEvent(searchInput, "keydown", { bubbles: true, cancelable: true });
+        if (event) searchInput.dispatchEvent(event);
+      }
       bestRow = null;
       bestScore = 0;
       for (let i = 0; i < 18; i += 1) {
@@ -454,7 +550,16 @@ export function buildScoreStampApplicationFillScript(payload = {}) {
       ].every((selector) => document.querySelector(selector));
       const requiredTextReady = ["成绩专用章使用申请表", "选择批次", "用印事由", "印章类型", "材料类型", "特殊情况申报", "盖章位置"]
         .every((label) => body.includes(label));
-      if (requiredNodesReady && requiredTextReady) return true;
+      const interactiveControlsReady = Boolean(
+        batchRoot() &&
+        findBatchSearchButton() &&
+        textControlReady(["用印事由"]) &&
+        optionInputsReady(["印章类型"], payload.stampTypes) &&
+        optionInputsReady(["材料类型"], payload.materialTypes) &&
+        optionInputsReady(["特殊情况申报"], payload.specialDeclarations) &&
+        optionInputsReady(["盖章位置"], payload.sealPositions)
+      );
+      if (requiredNodesReady && requiredTextReady && interactiveControlsReady) return true;
       await sleep(500);
     }
     return false;
@@ -487,14 +592,14 @@ export function buildScoreStampApplicationFillScript(payload = {}) {
   setText(["补充盖章要求"], payload.supplement, "补充盖章要求");
   if (payload.archiveFileName) warnings.push(\`将自动上传加密压缩包附件：\${payload.archiveFileName}，解压密码：\${payload.archivePassword || "1234"}\`);
   else if (payload.pdfFileName) warnings.push(\`请先将成绩单 PDF 加密压缩后上传附件：\${payload.pdfFileName}\`);
-  let notice = document.querySelector("#codexScoreStampNotice");
-  if (!notice) {
+  let notice = document.querySelector?.("#codexScoreStampNotice");
+  if (!notice && document.createElement && document.body?.appendChild) {
     notice = document.createElement("div");
     notice.id = "codexScoreStampNotice";
     notice.style.cssText = "position:fixed;z-index:2147483647;right:24px;bottom:24px;max-width:420px;padding:12px 14px;border-radius:8px;background:#0f766e;color:#fff;font-size:13px;line-height:1.5;box-shadow:0 12px 30px rgba(15,23,42,.22);";
     document.body.appendChild(notice);
   }
-  notice.textContent = \`已自动填写成绩盖章申请，正在准备上传加密压缩包附件；请核对后再提交。\`;
+  if (notice) notice.textContent = \`已自动填写成绩盖章申请，正在准备上传加密压缩包附件；请核对后再提交。\`;
   return JSON.stringify({ ok: requiredResults.every(Boolean), filled, warnings, url: location.href });
   } catch (error) {
     warnings.push(error?.message || String(error || "未知错误"));
@@ -545,28 +650,135 @@ export function buildScoreStampApplicationSaveScript() {
   try {
     const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
     const clean = (value) => String(value ?? "").replace(/\\u00a0/g, " ").replace(/[\\t\\r\\n ]+/g, " ").trim();
+    const compact = (value) => clean(value).replace(/\\s+/g, "");
     const visible = (element) => Boolean(element && element.getClientRects && element.getClientRects().length);
+    const makeDomEvent = (element, eventName, init = {}) => {
+      const view = element?.ownerDocument?.defaultView || window;
+      const EventCtor = view.Event || window.Event;
+      if (EventCtor) return new EventCtor(eventName, init);
+      if (!element?.ownerDocument?.createEvent) return null;
+      const event = element.ownerDocument.createEvent("Event");
+      event.initEvent(eventName, Boolean(init.bubbles), Boolean(init.cancelable));
+      return event;
+    };
     const clickElement = (element) => {
       if (!element) return false;
-      element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
-      element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
-      element.click();
-      return true;
+      const view = element?.ownerDocument?.defaultView || window;
+      const MouseCtor = view.MouseEvent || window.MouseEvent;
+      const mouseEvent = (name) => MouseCtor
+        ? new MouseCtor(name, { bubbles: true, cancelable: true, view })
+        : makeDomEvent(element, name, { bubbles: true, cancelable: true });
+      const down = mouseEvent("mousedown");
+      const up = mouseEvent("mouseup");
+      if (down) element.dispatchEvent(down);
+      if (up) element.dispatchEvent(up);
+      try {
+        if (typeof element.click === "function") {
+          element.click();
+          return true;
+        }
+      } catch {}
+      try {
+        const nativeClick = view.HTMLElement?.prototype?.click || view.Element?.prototype?.click;
+        if (nativeClick) {
+          nativeClick.call(element);
+          return true;
+        }
+      } catch {}
+      const click = mouseEvent("click");
+      if (click) {
+        element.dispatchEvent(click);
+        return true;
+      }
+      return false;
     };
-    const controls = Array.from(document.querySelectorAll("button,a,input[type=button],input[type=submit],span,div"))
-      .filter(visible)
-      .map((element) => {
-        const text = clean(element.innerText || element.value || element.title || element.getAttribute("aria-label"));
-        const clickable = element.closest("button,a") || element;
-        return { element, clickable, text };
-      })
-      .filter(({ clickable, text }) => text === "保存" && !clickable.disabled && clickable.getAttribute("aria-disabled") !== "true");
-    const target = controls.find(({ clickable }) => clickable.tagName === "BUTTON") || controls[0];
+    const savedDraftDetected = () => {
+      const bodyText = clean(document.body?.innerText || document.body?.textContent || "");
+      const url = String(location.href || "");
+      return (
+        bodyText.includes("成绩专用章使用申请") &&
+        (
+          (/listDoing|listDone|listRequest/.test(url) &&
+            (bodyText.includes("待办事宜") || bodyText.includes("流程标题") || bodyText.includes("创建日期"))) ||
+          (url.includes("requestid=") &&
+            (bodyText.includes("流程:处理") || bodyText.includes("流转意见") || bodyText.includes("上传附件")))
+        )
+      );
+    };
+    if (savedDraftDetected()) {
+      return JSON.stringify({
+        ok: true,
+        saved: true,
+        alreadySaved: true,
+        buttonText: "",
+        warnings: ["OA 已进入待办列表，按已保存处理"],
+        url: location.href,
+      });
+    }
+    const documents = [document];
+    for (const frame of Array.from(document.querySelectorAll("iframe"))) {
+      try {
+        if (frame.contentDocument) documents.push(frame.contentDocument);
+      } catch {}
+    }
+    const textValues = (element) => [
+      element.innerText,
+      element.textContent,
+      element.value,
+      element.title,
+      element.getAttribute?.("title"),
+      element.getAttribute?.("aria-label"),
+      element.getAttribute?.("data-btnname"),
+    ].map(clean).filter(Boolean);
+    const saveControls = [];
+    for (const doc of documents) {
+      const controls = Array.from(doc.querySelectorAll('button,a,[role="button"],input[type=button],input[type=submit],span,div'))
+        .filter(visible)
+        .map((element) => {
+          const clickable = element.closest("button,a,[role='button']") || element;
+          const values = [...textValues(element), ...textValues(clickable)];
+          const compactValues = values.map(compact);
+          const text = values.find(Boolean) || "";
+          const rect = clickable.getBoundingClientRect();
+          return { element, clickable, text, compactValues, rect };
+        })
+        .filter(({ clickable, compactValues }) => (
+          compactValues.some((value) => value === "保存") &&
+          !compactValues.some((value) => value === "提交" || value.includes("保存并提交") || value.includes("提交")) &&
+          !clickable.disabled &&
+          clickable.getAttribute("aria-disabled") !== "true"
+        ));
+      saveControls.push(...controls);
+    }
+    const target = saveControls
+      .sort((left, right) => {
+        const leftButton = left.clickable.tagName === "BUTTON" ? 1 : 0;
+        const rightButton = right.clickable.tagName === "BUTTON" ? 1 : 0;
+        if (leftButton !== rightButton) return rightButton - leftButton;
+        const leftTop = Number.isFinite(left.rect?.top) ? left.rect.top : 9999;
+        const rightTop = Number.isFinite(right.rect?.top) ? right.rect.top : 9999;
+        if (Math.abs(leftTop - rightTop) > 4) return leftTop - rightTop;
+        const leftRight = Number.isFinite(left.rect?.right) ? left.rect.right : 0;
+        const rightRight = Number.isFinite(right.rect?.right) ? right.rect.right : 0;
+        return rightRight - leftRight;
+      })[0];
     if (!target) {
       return JSON.stringify({ ok: false, saved: false, warnings: ["未找到可点击的保存按钮"], url: location.href });
     }
-    clickElement(target.clickable);
+    if (!clickElement(target.clickable)) {
+      return JSON.stringify({ ok: false, saved: false, warnings: ["已找到保存按钮，但当前浏览器环境未能触发点击"], url: location.href });
+    }
     await sleep(1800);
+    if (savedDraftDetected()) {
+      return JSON.stringify({
+        ok: true,
+        saved: true,
+        alreadySaved: true,
+        buttonText: target.text,
+        warnings,
+        url: location.href,
+      });
+    }
     const notice = document.querySelector("#codexScoreStampNotice");
     if (notice) notice.textContent = "已自动填写成绩盖章申请，并已上传加密压缩包附件和点击保存；请核对后再提交。";
     return JSON.stringify({
