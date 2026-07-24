@@ -9,6 +9,17 @@ import {
 
 const config = {
   examName: "项目招聘考试",
+  businessRequirement: {
+    project_code: "F0000462",
+    customer_name: "甘肃人力资源服务股份有限公司",
+  },
+  fanweiSource: {
+    raw: {
+      fields: {
+        "客户名称（仅供参考）": "甘肃人力资源服务股份有限公司",
+      },
+    },
+  },
   startTimeDisplay: "2026-07-01 09:00",
   endTimeDisplay: "2026-07-01 11:00",
   mockStartTimeDisplay: "2026-06-30 15:00",
@@ -34,10 +45,10 @@ test("builds Tencent Docs rows through AD with configured defaults", () => {
   assert.equal(rows.length, 2);
   assert.equal(rows[0].length, 30);
   assert.equal(rows[0][0], "项目招聘考试");
-  assert.equal(rows[0][1], "F0020795");
+  assert.equal(rows[0][1], "F0000462");
   assert.equal(rows[0][2], "");
   assert.equal(rows[0][3], "正式");
-  assert.equal(rows[0][4], "蜀道集团");
+  assert.equal(rows[0][4], "甘肃人力资源服务股份有限公司");
   assert.equal(rows[0][5], "81");
   assert.equal(rows[0][6], "2026/07/01");
   assert.equal(rows[0][7], "2026/07/01");
@@ -295,6 +306,12 @@ test("builds one Tencent Docs row for every formal and trial session", () => {
 
   assert.equal(rows.length, 3);
   assert.deepEqual(rows.map((row) => row[0]), ["需求单1正式考试", "需求单1试考", "需求单2正式考试"]);
+  assert.deepEqual(rows.map((row) => row[1]), ["F0000462", "F0000462", "F0000462"]);
+  assert.deepEqual(rows.map((row) => row[4]), [
+    "甘肃人力资源服务股份有限公司",
+    "甘肃人力资源服务股份有限公司",
+    "甘肃人力资源服务股份有限公司",
+  ]);
   assert.deepEqual(rows.map((row) => row[15]), ["431603", "431604", "431605"]);
   assert.equal(rows[1][3], "试考-分散模式");
 });
@@ -309,9 +326,9 @@ test("copies Tencent Docs example rows before overriding task-specific fields", 
   const rows = buildTencentDocRows({ config, created, remoteRows });
 
   assert.equal(rows[0][0], "项目招聘考试");
-  assert.equal(rows[0][1], "F0020795");
+  assert.equal(rows[0][1], "F0000462");
   assert.equal(rows[0][2], "");
-  assert.equal(rows[0][4], "蜀道集团");
+  assert.equal(rows[0][4], "甘肃人力资源服务股份有限公司");
   assert.equal(rows[0][5], "81");
   assert.equal(rows[0][12], "是，作答60分钟可交卷");
   assert.equal(rows[0][13], "一个单元，60-120分钟");
@@ -321,12 +338,81 @@ test("copies Tencent Docs example rows before overriding task-specific fields", 
   assert.equal(rows[0][22], "纸质草稿纸");
   assert.notEqual(rows[0][29], "模板短信");
   assert.match(rows[0][29], /考试口令统一为：E107910/);
-  assert.equal(rows[1][1], "F0020795");
+  assert.equal(rows[1][1], "F0000462");
   assert.equal(rows[1][3], "试考-分散模式");
   assert.equal(rows[1][5], "62");
   assert.equal(rows[1][12], "是，作答10分钟可交卷");
   assert.equal(rows[1][13], "一个单元，10-90分钟");
   assert.equal(rows[1][15], "统一入口：E107910\n考试口令：428573");
+});
+
+test("B column falls back to the legacy top-level Fanwei project code", () => {
+  const [row] = buildTencentDocRows({
+    config: {
+      ...config,
+      businessRequirement: {},
+      projectCode: "F0000999",
+    },
+    created: [created[0]],
+  });
+
+  assert.equal(row[1], "F0000999");
+});
+
+test("B column stays blank instead of copying a project code from the example row", () => {
+  const [row] = buildTencentDocRows({
+    config: {
+      ...config,
+      businessRequirement: {},
+      projectCode: "",
+    },
+    created: [created[0]],
+    remoteRows: [
+      ["考试名称"],
+      ["示例-正式", "F0020795"],
+    ],
+  });
+
+  assert.equal(row[1], "");
+});
+
+test("E column falls back to Shudao Group when the Fanwei customer name is unavailable", () => {
+  const [row] = buildTencentDocRows({
+    config: {
+      ...config,
+      fanweiSource: {
+        raw: {
+          fields: {
+            "客户名称（仅供参考）": "",
+            "客户名称": "不应写入的其他客户名称",
+          },
+        },
+      },
+    },
+    created: [created[0]],
+  });
+
+  assert.equal(row[4], "蜀道集团");
+});
+
+test("F column stays blank when no candidates have been imported", () => {
+  const [row] = buildTencentDocRows({
+    config: {
+      ...config,
+      candidateCount: 38,
+    },
+    created: [{
+      ...created[0],
+      candidate_count: 0,
+      candidateCount: 0,
+    }],
+    remoteRows: [
+      ["考试名称"],
+      ["示例-正式", "F0020795", "", "正式", "蜀道集团", "138"],
+    ],
+  });
+
+  assert.equal(row[5], "");
 });
 
 test("appends to blank rows and writes font plus centered alignment", () => {

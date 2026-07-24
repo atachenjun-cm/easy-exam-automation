@@ -59,6 +59,18 @@ test("marks a task successful only when all existing sessions succeed", () => {
   assert.equal(tasks[0].status, "success");
 });
 
+test("keeps every formal and trial session for a multi-requirement project", () => {
+  const tasks = aggregateExamSessions([
+    { ...sessions[0], requirementIndex: 0 },
+    { ...sessions[1], requirementIndex: 0 },
+    { ...sessions[0], requirementIndex: 1, session_id: "1003", name: "考试甲第二场" },
+    { ...sessions[1], requirementIndex: 1, session_id: "1004", name: "考试甲第二场-试考" },
+  ]);
+
+  assert.deepEqual(tasks[0].formalSessions.map((session) => session.session_id), ["1001", "1003"]);
+  assert.deepEqual(tasks[0].trialSessions.map((session) => session.session_id), ["1002", "1004"]);
+});
+
 test("orders exam tasks by latest formal exam start time first", () => {
   const tasks = aggregateExamSessions([
     {
@@ -209,6 +221,34 @@ test("detects exam tasks ended by formal exam time", () => {
   assert.equal(isExamTaskEnded(endedTask, new Date("2026-07-06T12:00:00+08:00")), true);
   assert.equal(isExamTaskEnded(activeTask, new Date("2026-07-06T12:00:00+08:00")), false);
   assert.equal(isExamTaskEnded(missingTimeTask, new Date("2026-07-06T12:00:00+08:00")), false);
+});
+
+test("keeps a multi-requirement project active while any formal session has not ended", () => {
+  const task = aggregateExamSessions([
+    {
+      taskId: "task-multi",
+      projectName: "多场考试",
+      sessionType: "formal",
+      requirementIndex: 0,
+      session_id: "8001",
+      start: "2026-07-01 09:00",
+      end: "2026-07-01 11:00",
+      status: "success",
+    },
+    {
+      taskId: "task-multi",
+      projectName: "多场考试",
+      sessionType: "formal",
+      requirementIndex: 1,
+      session_id: "8002",
+      start: "2026-07-10 09:00",
+      end: "2026-07-10 11:00",
+      status: "success",
+    },
+  ])[0];
+
+  assert.equal(isExamTaskEnded(task, new Date("2026-07-06T12:00:00+08:00")), false);
+  assert.equal(isExamTaskEnded(task, new Date("2026-07-11T12:00:00+08:00")), true);
 });
 
 test("searches all task and session identifiers", () => {

@@ -91,25 +91,27 @@ export function buildFanweiProjectConfig({ fanwei = {}, model = {}, parsed = {},
   const inputRequirements = Array.isArray(requirements) && requirements.length
     ? requirements
     : [{ fields: model.requirementFields || {}, config: parsed.config || {}, previewRows: parsed.previewRows || [], filename, uploadId }];
-  const examRequirements = inputRequirements.map((requirement, index) => {
-    const previous = previousRequirements[index] || {};
+  const appendedRequirements = inputRequirements.map((requirement, index) => {
+    const requirementIndex = previousRequirements.length + index;
     return {
-      id: text(requirement.id || previous.id || `requirement-${index + 1}`),
-      order: index + 1,
-      version: Number(previous.version || 0) + 1,
+      id: text(requirement.id || `requirement-${requirementIndex + 1}`),
+      order: requirementIndex + 1,
+      version: Number(requirement.version || 0) + 1,
       confirmedAt: now,
       fields: { ...(requirement.fields || {}) },
       config: { ...(requirement.config || {}) },
       previewRows: Array.isArray(requirement.previewRows) ? requirement.previewRows : [],
       warnings: Array.isArray(requirement.warnings) ? requirement.warnings : [],
       metrics: requirement.metrics && typeof requirement.metrics === "object" ? { ...requirement.metrics } : {},
-      filename: text(requirement.filename || indexedRequirementFilename(filename, index)),
+      filename: text(indexedRequirementFilename(filename || requirement.filename, requirementIndex)),
       uploadId: text(requirement.uploadId || (index === 0 ? uploadId : "")),
-      supplements: { ...(previous.supplements || {}), ...(requirement.supplements || {}) },
+      supplements: { ...(requirement.supplements || {}) },
     };
   });
+  const examRequirements = [...previousRequirements, ...appendedRequirements];
   const examRequirement = examRequirements[0];
   return {
+    ...previousConfig,
     projectCard: {
       createdAt: previousConfig.projectCard?.createdAt || now,
       updatedAt: now,

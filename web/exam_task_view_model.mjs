@@ -102,12 +102,25 @@ export function resolveUnifiedExamCode(taskOrSession = {}) {
 }
 
 export function isExamTaskEnded(task, now = new Date()) {
-  const formalSession = task?.formalSession || (task?.sessions || []).find((session) => session.sessionType === "formal") || null;
-  if (!formalSession) return false;
-  const endTime = parseExamTime(formalSession.end);
-  const startTime = parseExamTime(formalSession.start);
-  const comparisonTime = Number.isFinite(endTime) ? endTime : startTime;
-  return Number.isFinite(comparisonTime) && comparisonTime < now.getTime();
+  const formalSessions = Array.isArray(task?.formalSessions)
+    ? task.formalSessions
+    : (task?.sessions || []).filter((session) => session.sessionType === "formal");
+  if (!formalSessions.length) return false;
+  return formalSessions.every((session) => {
+    const endTime = parseExamTime(session.end);
+    const startTime = parseExamTime(session.start);
+    const comparisonTime = Number.isFinite(endTime) ? endTime : startTime;
+    return Number.isFinite(comparisonTime) && comparisonTime < now.getTime();
+  });
+}
+
+function sessionRequirementOrder(left, right) {
+  return Number(left?.requirementIndex || 0) - Number(right?.requirementIndex || 0);
+}
+
+function latestSessionTime(sessions = []) {
+  const times = sessions.map((session) => parseExamTime(session?.start)).filter(Number.isFinite);
+  return times.length ? Math.max(...times) : Number.POSITIVE_INFINITY;
 }
 
 export function aggregateExamSessions(sessions = []) {
@@ -129,11 +142,15 @@ export function aggregateExamSessions(sessions = []) {
   }
   return [...tasks.values()]
     .map((task, index) => {
-      const formalSession = task.sessions.find((session) => session.sessionType === "formal") || null;
+      const formalSessions = task.sessions.filter((session) => session.sessionType === "formal").sort(sessionRequirementOrder);
+      const trialSessions = task.sessions.filter((session) => session.sessionType === "trial").sort(sessionRequirementOrder);
+      const formalSession = formalSessions[0] || null;
       return {
         ...task,
         formalSession,
-        trialSession: task.sessions.find((session) => session.sessionType === "trial") || null,
+        formalSessions,
+        trialSession: trialSessions[0] || null,
+        trialSessions,
         status: aggregateStatus(task.sessions),
         progress: resolveTaskProgress(task.sessions),
         unifiedExamCode: resolveUnifiedExamCode(task) || task.sessions.map(resolveUnifiedExamCode).find(Boolean) || "",
@@ -141,8 +158,8 @@ export function aggregateExamSessions(sessions = []) {
       };
     })
     .sort((left, right) => {
-      const leftTime = parseExamTime(left.formalSession?.start);
-      const rightTime = parseExamTime(right.formalSession?.start);
+      const leftTime = latestSessionTime(left.formalSessions);
+      const rightTime = latestSessionTime(right.formalSessions);
       if (!Number.isFinite(leftTime) && !Number.isFinite(rightTime)) return left.sortIndex - right.sortIndex;
       if (!Number.isFinite(leftTime)) return 1;
       if (!Number.isFinite(rightTime)) return -1;

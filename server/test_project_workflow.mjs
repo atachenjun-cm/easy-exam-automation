@@ -79,6 +79,50 @@ test("stores every copied EasyExam requirement while keeping the first as the le
   assert.equal(result.examRequirement, result.examRequirements[0]);
 });
 
+test("appends later requirements to the same Fanwei project without replacing existing snapshots", () => {
+  const existing = buildFanweiProjectConfig({
+    fanwei,
+    model,
+    filename: "泛微_R0042182_需求单.xlsx",
+    uploadId: "upload-1",
+    requirements: [
+      {
+        fields: { "考试名称": "原正式考试", "考试日期时间": "2026/7/20 09:30-2026/7/20 11:30" },
+        config: { examName: "原正式考试", apiKeyProfileId: "profile-original" },
+      },
+    ],
+    now: "2026-07-19T02:00:00.000Z",
+  });
+  const originalRequirement = existing.examRequirements[0];
+
+  const appended = buildFanweiProjectConfig({
+    fanwei,
+    model: { requirementFields: { "考试名称": "新增测试", "考试日期时间": "2026/7/24 09:30-2026/7/24 11:30" } },
+    filename: "泛微_R0042182_需求单.xlsx",
+    uploadId: "upload-2",
+    requirements: [
+      {
+        fields: { "考试名称": "新增测试", "考试日期时间": "2026/7/24 09:30-2026/7/24 11:30" },
+        config: { examName: "新增测试", apiKeyProfileId: "profile-original" },
+        filename: "泛微_R0042182_需求单.xlsx",
+        uploadId: "upload-2",
+      },
+    ],
+    previousConfig: { ...existing, apiKeyProfileId: "profile-original", courses: [{ course_code: "K001" }] },
+    now: "2026-07-23T01:10:49.000Z",
+  });
+
+  assert.equal(appended.examRequirements.length, 2);
+  assert.deepEqual(appended.examRequirements[0], originalRequirement);
+  assert.equal(appended.examRequirements[1].id, "requirement-2");
+  assert.equal(appended.examRequirements[1].fields["考试名称"], "新增测试");
+  assert.equal(appended.examRequirements[1].filename, "泛微_R0042182_需求单_需求单2.xlsx");
+  assert.equal(appended.examRequirements[1].uploadId, "upload-2");
+  assert.equal(appended.examRequirement, appended.examRequirements[0]);
+  assert.equal(appended.apiKeyProfileId, "profile-original");
+  assert.deepEqual(appended.courses, [{ course_code: "K001" }]);
+});
+
 test("personnel and archive drafts keep their source boundaries", () => {
   const config = buildFanweiProjectConfig({ fanwei, model, parsed: { config: {} } });
   const task = {

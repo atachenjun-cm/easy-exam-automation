@@ -72,6 +72,7 @@ function writePackage({ platform, runtimePath, origin, packageDir }) {
     "fanwei_local_helper_cli.mjs",
     "fanwei_local_helper.mjs",
     "fanwei_auto_read.mjs",
+    "score_stamp_application.mjs",
   ]) {
     copyFile(path.join(rootDir, "server", moduleName), path.join(packageDir, "server", moduleName));
   }

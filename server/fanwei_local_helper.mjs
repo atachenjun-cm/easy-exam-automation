@@ -1,12 +1,15 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync as fsExistsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
 import {
   buildWindowsChromeLaunchArgs,
+  createChromeDevToolsTab,
+  evaluateChromeDevToolsExpression,
   fetchChromeDevToolsTabs,
   findMacChromeExecutable,
   findWindowsChromeExecutable,
@@ -14,10 +17,19 @@ import {
   isFanweiPageUrl,
   isRetryableChromeDevToolsError,
   runChromeDevToolsFanweiRead,
+  uploadFilesToChromeDevToolsFileInput,
 } from "./fanwei_auto_read.mjs";
+import {
+  buildScoreStampAttachmentPrepareScript,
+  buildScoreStampApplicationFillScript,
+  buildScoreStampApplicationSaveScript,
+} from "./score_stamp_application.mjs";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
-const KNOWN_PATHS = new Set(["/health", "/chrome/ensure", "/fanwei/read"]);
+const KNOWN_PATHS = new Set(["/health", "/chrome/ensure", "/fanwei/read", "/score-stamp/start"]);
+const DEFAULT_JSON_BODY_LIMIT_BYTES = 64 * 1024;
+const SCORE_STAMP_JSON_BODY_LIMIT_BYTES = 160 * 1024 * 1024;
+const SCORE_STAMP_ARCHIVE_LIMIT_BYTES = 100 * 1024 * 1024;
 
 class HelperError extends Error {
   constructor(code, message, status = 500) {
@@ -62,13 +74,13 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function readJsonBody(req) {
+async function readJsonBody(req, { maxBytes = DEFAULT_JSON_BODY_LIMIT_BYTES } = {}) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
     size += buffer.length;
-    if (size > 64 * 1024) {
+    if (size > maxBytes) {
       throw new HelperError("body_too_large", "请求内容过大。", 413);
     }
     chunks.push(buffer);
@@ -86,6 +98,28 @@ function hasFanweiTab(tabs, chromePort) {
     isFanweiPageUrl(tab?.url) &&
     isAllowedChromeDevToolsWebSocketUrl(tab?.webSocketDebuggerUrl, chromePort),
   );
+}
+
+function parseChromeJsonValue(value, fallback = {}) {
+  if (value && typeof value === "object") return value;
+  const text = String(value ?? "").trim();
+  if (!text) return fallback;
+  return JSON.parse(text);
+}
+
+function isChromeNavigationRetryableError(error) {
+  const message = error?.message || String(error || "");
+  return /Execution context was destroyed|Cannot find context|Cannot find default execution context|Inspected target navigated|Target closed|WebSocket 在操作完成前已关闭/.test(message);
+}
+
+function safeArchiveFileName(value = "") {
+  const baseName = path.basename(String(value || "成绩盖章附件.zip").replace(/\\/g, "/"));
+  return baseName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").trim() || "成绩盖章附件.zip";
+}
+
+function scoreStampError(error) {
+  if (error instanceof HelperError) return error;
+  return new HelperError("score_stamp_failed", error?.message || String(error), 502);
 }
 
 export function createFanweiLocalHelperServer({
@@ -196,6 +230,171 @@ export function createFanweiLocalHelperServer({
     return await ensurePromise;
   }
 
+  async function resolveCreatedChromeTab(tab, workflowUrl) {
+    if (isAllowedChromeDevToolsWebSocketUrl(tab?.webSocketDebuggerUrl, chromePort)) return tab;
+    const tabs = await fetchChromeDevToolsTabs({ port: chromePort, fetchImpl, timeoutMs: 5000 });
+    const expectedWorkflowId = new URL(workflowUrl).hash.match(/workflowid=([^&]+)/)?.[1] || "105021";
+    return (Array.isArray(tabs) ? tabs : []).find((item) =>
+      tab?.id &&
+      item.id === tab.id &&
+      isAllowedChromeDevToolsWebSocketUrl(item?.webSocketDebuggerUrl, chromePort)
+    ) || (Array.isArray(tabs) ? tabs : []).find((item) =>
+      String(item?.url || "").includes(`workflowid=${expectedWorkflowId}`) &&
+      isAllowedChromeDevToolsWebSocketUrl(item?.webSocketDebuggerUrl, chromePort)
+    );
+  }
+
+  async function withScoreStampChromeRetry({ tab, workflowUrl, operation, attempts = 4, delayMs = 1000 } = {}) {
+    let currentTab = tab;
+    let lastError = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await operation(currentTab);
+      } catch (error) {
+        lastError = error;
+        if (!isChromeNavigationRetryableError(error) || attempt === attempts - 1) throw error;
+        await sleep(delayMs);
+        currentTab = await resolveCreatedChromeTab(currentTab, workflowUrl) || currentTab;
+      }
+    }
+    throw lastError || new Error("Chrome DevTools 操作失败");
+  }
+
+  async function runScoreStampApplication(payload) {
+    await ensureChromeOnce();
+    const stampPayload = payload?.payload && typeof payload.payload === "object" ? payload.payload : {};
+    const workflowUrl = String(stampPayload.workflowUrl || "").trim();
+    if (!workflowUrl) {
+      throw new HelperError("score_stamp_payload_invalid", "缺少 OA 盖章申请地址。", 400);
+    }
+    let workflowHost = "";
+    try {
+      workflowHost = new URL(workflowUrl).hostname;
+    } catch {
+      throw new HelperError("score_stamp_payload_invalid", "OA 盖章申请地址格式不正确。", 400);
+    }
+    if (workflowHost !== "oa.ata.net.cn" && !workflowHost.endsWith(".oa.ata.net.cn")) {
+      throw new HelperError("score_stamp_payload_invalid", "OA 盖章申请地址不受信任。", 400);
+    }
+    const archiveBase64 = String(payload?.archiveBase64 || "").replace(/\s+/g, "");
+    if (!archiveBase64) {
+      throw new HelperError("score_stamp_archive_required", "缺少需要上传的盖章附件压缩包。", 400);
+    }
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(archiveBase64)) {
+      throw new HelperError("score_stamp_archive_invalid", "盖章附件内容不是有效的 base64 数据。", 400);
+    }
+    const archiveBuffer = Buffer.from(archiveBase64, "base64");
+    if (!archiveBuffer.length) {
+      throw new HelperError("score_stamp_archive_required", "缺少需要上传的盖章附件压缩包。", 400);
+    }
+    if (archiveBuffer.length > SCORE_STAMP_ARCHIVE_LIMIT_BYTES) {
+      throw new HelperError("score_stamp_archive_too_large", "盖章附件超过 100MB，无法通过本机助手上传。", 413);
+    }
+    const archiveFileName = safeArchiveFileName(payload?.archiveFileName || stampPayload.archiveFileName);
+    const tempDir = path.join(helperRuntimeDir, "score-stamp", randomUUID());
+    await mkdir(tempDir, { recursive: true });
+    const archiveFilePath = path.join(tempDir, archiveFileName);
+    try {
+      await writeFile(archiveFilePath, archiveBuffer);
+      const createdTab = await createChromeDevToolsTab({
+        url: workflowUrl,
+        port: chromePort,
+        fetchImpl,
+        timeoutMs: 10000,
+      });
+      const tab = await resolveCreatedChromeTab(createdTab, workflowUrl);
+      if (!tab?.webSocketDebuggerUrl) {
+        throw new Error("已打开 OA 页面，但未取得可自动填写的 Chrome DevTools 标签页。");
+      }
+      const raw = await withScoreStampChromeRetry({
+        tab,
+        workflowUrl,
+        operation: (currentTab) => evaluateChromeDevToolsExpression({
+          tab: currentTab,
+          expression: buildScoreStampApplicationFillScript({ ...stampPayload, archiveFileName }),
+          timeoutMs: 45000,
+          port: chromePort,
+          webSocketFactory,
+        }),
+      });
+      const pageResult = parseChromeJsonValue(raw);
+      if (!pageResult.ok) {
+        const detail = (pageResult.warnings || []).join("；") ||
+          (pageResult.url ? `页面地址：${pageResult.url}` : "") ||
+          `返回：${JSON.stringify(pageResult).slice(0, 240)}`;
+        throw new Error(`OA 成绩盖章申请页预填失败：${detail}`);
+      }
+      const uploadResult = await withScoreStampChromeRetry({
+        tab,
+        workflowUrl,
+        operation: (currentTab) => uploadFilesToChromeDevToolsFileInput({
+          tab: currentTab,
+          filePaths: [archiveFilePath],
+          selector: 'input[type="file"][data-codex-score-stamp-upload="1"]',
+          prepareExpression: buildScoreStampAttachmentPrepareScript(),
+          timeoutMs: 30000,
+          port: chromePort,
+          webSocketFactory,
+        }),
+      });
+      if (!uploadResult.ok || !uploadResult.uploaded) {
+        throw new Error("OA 成绩盖章申请页未找到可上传附件的文件控件，请检查页面附件区域。");
+      }
+      let saveResult = {};
+      try {
+        const saveRaw = await withScoreStampChromeRetry({
+          tab,
+          workflowUrl,
+          attempts: 1,
+          operation: (currentTab) => evaluateChromeDevToolsExpression({
+            tab: currentTab,
+            expression: buildScoreStampApplicationSaveScript(),
+            timeoutMs: 15000,
+            port: chromePort,
+            webSocketFactory,
+          }),
+        });
+        saveResult = parseChromeJsonValue(saveRaw);
+      } catch (error) {
+        if (!isChromeNavigationRetryableError(error)) throw error;
+        saveResult = {
+          ok: true,
+          saved: true,
+          navigatedAfterSave: true,
+          warnings: ["OA 保存后页面已跳转，按已保存处理"],
+          errorMessage: error instanceof Error ? error.message : String(error),
+        };
+      }
+      if (!saveResult.ok || !saveResult.saved) {
+        const detail = (saveResult.warnings || []).join("；") ||
+          (saveResult.url ? `页面地址：${saveResult.url}` : "") ||
+          `返回：${JSON.stringify(saveResult).slice(0, 240)}`;
+        throw new Error(`OA 成绩盖章申请页保存失败：${detail}`);
+      }
+      return {
+        status: "opened",
+        attemptedAt: new Date().toISOString(),
+        workflowUrl,
+        pageUrl: pageResult.url || "",
+        pdfFileName: stampPayload.pdfFileName || "",
+        archiveFileName,
+        archivePassword: stampPayload.archivePassword || "",
+        filled: Array.isArray(pageResult.filled) ? pageResult.filled : [],
+        uploadedFileNames: Array.isArray(uploadResult.fileNames) && uploadResult.fileNames.length
+          ? uploadResult.fileNames
+          : [archiveFileName],
+        uploadHiddenValue: uploadResult.hiddenValue || "",
+        saved: Boolean(saveResult.saved),
+        alreadySaved: Boolean(saveResult.alreadySaved),
+        navigatedAfterSave: Boolean(saveResult.navigatedAfterSave),
+        saveButtonText: saveResult.buttonText || "",
+        warnings: Array.isArray(pageResult.warnings) ? pageResult.warnings : [],
+      };
+    } finally {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
   function corsHeaders(origin) {
     return {
       "Access-Control-Allow-Origin": origin,
@@ -237,7 +436,9 @@ export function createFanweiLocalHelperServer({
 
   const server = http.createServer(async (req, res) => {
     const origin = String(req.headers.origin || "");
-    if (!isAllowedHelperOrigin(origin, origins)) {
+    const url = new URL(req.url || "/", loopbackBaseUrl(host, port));
+    const directHealthCheck = !origin && req.method === "GET" && url.pathname === "/health";
+    if (!directHealthCheck && !isAllowedHelperOrigin(origin, origins)) {
       sendJson(res, 403, {
         ok: false,
         error: { code: "origin_forbidden", message: "请求来源未获授权。" },
@@ -245,7 +446,6 @@ export function createFanweiLocalHelperServer({
       return;
     }
 
-    const url = new URL(req.url || "/", loopbackBaseUrl(host, port));
     if (!KNOWN_PATHS.has(url.pathname)) {
       sendJson(res, 404, {
         ok: false,
@@ -319,6 +519,18 @@ export function createFanweiLocalHelperServer({
           );
         }
         sendJson(res, 200, { ok: true, data }, origin);
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/score-stamp/start") {
+        const payload = await readJsonBody(req, { maxBytes: SCORE_STAMP_JSON_BODY_LIMIT_BYTES });
+        let stampApplication;
+        try {
+          stampApplication = await runScoreStampApplication(payload);
+        } catch (error) {
+          throw scoreStampError(error);
+        }
+        sendJson(res, 200, { ok: true, stampApplication }, origin);
         return;
       }
 

@@ -6,7 +6,11 @@ INSTALL_DIR="$HOME/Library/Application Support/YikaoFanweiHelper"
 LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$HOME/Library/LaunchAgents/com.ata.yikao-fanwei-helper.plist"
 LABEL="com.ata.yikao-fanwei-helper"
-CONSOLE_URL="http://172.16.13.214:8765/fanwei-test"
+CONFIG_SOURCE="$SOURCE_DIR/config.env"
+CONSOLE_ORIGINS="$(grep -E '^YIKAO_CONSOLE_ORIGINS=' "$CONFIG_SOURCE" 2>/dev/null | head -n 1 | cut -d= -f2- || true)"
+CONSOLE_ORIGIN="${CONSOLE_ORIGINS%%[ ,]*}"
+CONSOLE_ORIGIN="${CONSOLE_ORIGIN:-http://172.16.13.214:8765}"
+CONSOLE_URL="${CONSOLE_ORIGIN%/}/fanwei-test"
 
 echo "[1/4] 正在安装易考泛微本机助手..."
 mkdir -p "$INSTALL_DIR" "$LAUNCH_AGENT_DIR"
@@ -17,18 +21,26 @@ cp "$SOURCE_DIR/node" "$INSTALL_DIR/node"
 cp "$SOURCE_DIR/com.ata.yikao-fanwei-helper.plist.template" "$INSTALL_DIR/"
 chmod 700 "$INSTALL_DIR/node"
 
-cat >"$INSTALL_DIR/config.env" <<EOF
+if [ -f "$CONFIG_SOURCE" ]; then
+  grep -v '^YIKAO_HELPER_RUNTIME_DIR=' "$CONFIG_SOURCE" >"$INSTALL_DIR/config.env"
+else
+  cat >"$INSTALL_DIR/config.env" <<EOF
 YIKAO_HELPER_HOST=127.0.0.1
 YIKAO_HELPER_PORT=18765
 YIKAO_HELPER_CHROME_PORT=19222
-YIKAO_CONSOLE_ORIGINS=http://172.16.13.214:8765
+YIKAO_CONSOLE_ORIGINS=$CONSOLE_ORIGIN
+EOF
+fi
+cat >>"$INSTALL_DIR/config.env" <<EOF
 YIKAO_HELPER_RUNTIME_DIR=$INSTALL_DIR
 EOF
 chmod 600 "$INSTALL_DIR/config.env"
 
 echo "[2/4] 正在注册当前用户启动项..."
 ESCAPED_INSTALL_DIR=${INSTALL_DIR//&/\\&}
-sed "s|__HELPER_DIR__|$ESCAPED_INSTALL_DIR|g" \
+ESCAPED_CONSOLE_ORIGINS=${CONSOLE_ORIGINS//&/\\&}
+sed -e "s|__HELPER_DIR__|$ESCAPED_INSTALL_DIR|g" \
+  -e "s|__CONSOLE_ORIGINS__|$ESCAPED_CONSOLE_ORIGINS|g" \
   "$SOURCE_DIR/com.ata.yikao-fanwei-helper.plist.template" >"$PLIST_PATH"
 chmod 600 "$PLIST_PATH"
 

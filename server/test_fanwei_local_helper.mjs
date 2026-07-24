@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm, stat, symlink } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -14,9 +14,15 @@ import {
   isAllowedHelperOrigin,
   normalizeAllowedOrigins,
 } from "./fanwei_local_helper.mjs";
-import { helperConfigFromEnv } from "./fanwei_local_helper_cli.mjs";
+import { helperConfigFromEnv, mergeHelperConfigEnv } from "./fanwei_local_helper_cli.mjs";
 
 const allowedOrigin = "http://172.16.13.214:8765";
+
+test("score stamp save click is not retried after OA navigates", async () => {
+  const source = await readFile(new URL("./fanwei_local_helper.mjs", import.meta.url), "utf8");
+  assert.match(source, /buildScoreStampApplicationSaveScript\(\)/);
+  assert.match(source, /attempts:\s*1/);
+});
 
 async function unusedLoopbackPort() {
   const server = net.createServer();
@@ -156,6 +162,25 @@ test("helperConfigFromEnv applies safe local defaults and requires configured or
     () => helperConfigFromEnv({}),
     /YIKAO_CONSOLE_ORIGINS.*至少一个有效 origin/i,
   );
+});
+
+test("helper CLI config file overrides stale LaunchAgent environment values", async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "fanwei-helper-env-"));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  await writeFile(path.join(tempRoot, "config.env"), [
+    "YIKAO_HELPER_HOST=127.0.0.1",
+    "YIKAO_HELPER_PORT=18765",
+    "YIKAO_HELPER_CHROME_PORT=19222",
+    "YIKAO_CONSOLE_ORIGINS=http://127.0.0.1:8765,http://172.16.13.214:8765",
+    "",
+  ].join("\n"));
+
+  const merged = await mergeHelperConfigEnv({
+    YIKAO_HELPER_RUNTIME_DIR: tempRoot,
+    YIKAO_CONSOLE_ORIGINS: "http://old.example.test:8765",
+  });
+
+  assert.equal(merged.YIKAO_CONSOLE_ORIGINS, "http://127.0.0.1:8765,http://172.16.13.214:8765");
 });
 
 test("helperConfigFromEnv trims and normalizes explicit settings", () => {
@@ -471,6 +496,25 @@ test("GET /health reports platform and Chrome/Fanwei status with strict CORS", a
   });
 });
 
+test("GET /health can be opened directly for local helper diagnostics", async (t) => {
+  const { server, baseUrl } = await startHelper({
+    fetchImpl: async () => jsonResponse([]),
+  });
+  t.after(() => stopHelper(server));
+
+  const response = await helperFetch(baseUrl, "/health", { origin: null });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("access-control-allow-origin"), null);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await response.json(), {
+    available: true,
+    platform: "darwin",
+    chromeConnected: true,
+    fanweiTabFound: false,
+  });
+});
+
 test("GET /health aborts a stalled Chrome DevTools request", async (t) => {
   let requestSignal;
   const { server, baseUrl } = await startHelper({
@@ -551,7 +595,7 @@ test("missing and unknown origins are forbidden before Chrome dependencies run",
   });
   t.after(() => stopHelper(server));
 
-  const missing = await helperFetch(baseUrl, "/health", { origin: null });
+  const missing = await helperFetch(baseUrl, "/chrome/ensure", { method: "POST", origin: null, body: {} });
   const unknown = await helperFetch(baseUrl, "/chrome/ensure", {
     method: "POST",
     origin: "http://attacker.example",
@@ -853,6 +897,99 @@ test("POST /fanwei/read validates serialNo and reads through Chrome DevTools", a
   assert.match((await empty.json()).error.message, /流水号/);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true, data: fanweiPayload });
+});
+
+test("POST /score-stamp/start opens OA, uploads the archive, and saves through the local Chrome", async (t) => {
+  const workflowUrl = "https://oa.ata.net.cn/spa/workflow/static4form/index.html#/main/workflow/req?workflowid=105021";
+  const expressions = [];
+  const methods = [];
+  const uploadedFiles = [];
+  const { server, baseUrl } = await startHelper({
+    chromePort: 19222,
+    fetchImpl: async (url, options = {}) => {
+      if (url === "http://127.0.0.1:19222/json") return jsonResponse([]);
+      if (String(url).startsWith("http://127.0.0.1:19222/json/new?")) {
+        assert.equal(options.method, "PUT");
+        assert.match(decodeURIComponent(String(url)), /workflowid=105021/);
+        return jsonResponse({
+          id: "stamp",
+          url: workflowUrl,
+          webSocketDebuggerUrl: "ws://localhost:19222/devtools/page/stamp",
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    },
+    webSocketFactory: (url) => {
+      assert.equal(url, "ws://127.0.0.1:19222/devtools/page/stamp");
+      const handlers = {};
+      return {
+        send(message) {
+          const parsed = JSON.parse(message);
+          methods.push(parsed.method);
+          if (parsed.params?.expression) expressions.push(parsed.params.expression);
+          let result = {};
+          if (parsed.method === "Runtime.evaluate") {
+            let value = JSON.stringify({ ok: true });
+            if (String(parsed.params.expression).includes("const payload =")) {
+              value = JSON.stringify({ ok: true, url: workflowUrl, filled: ["选择批次"], warnings: [] });
+            } else if (String(parsed.params.expression).includes("expectedFileNames")) {
+              value = JSON.stringify({ ok: true, fileNames: ["stamp.zip"], uploaded: 1, hiddenValue: "attachment-id" });
+            } else if (String(parsed.params.expression).includes("savedDraftDetected")) {
+              value = JSON.stringify({ ok: true, saved: true, buttonText: "保存" });
+            }
+            result = { result: { value } };
+          } else if (parsed.method === "DOM.getDocument") {
+            result = { root: { nodeId: 1 } };
+          } else if (parsed.method === "DOM.querySelector") {
+            result = { nodeId: 2 };
+          } else if (parsed.method === "DOM.setFileInputFiles") {
+            uploadedFiles.push(...(parsed.params.files || []));
+            result = {};
+          }
+          queueMicrotask(() => handlers.message?.(JSON.stringify({ id: parsed.id, result })));
+        },
+        close() {},
+        on(event, handler) {
+          handlers[event] = handler;
+          if (event === "open") queueMicrotask(handler);
+        },
+      };
+    },
+  });
+  t.after(() => stopHelper(server));
+
+  const response = await helperFetch(baseUrl, "/score-stamp/start", {
+    method: "POST",
+    body: {
+      payload: {
+        workflowUrl,
+        title: "成绩专用章使用申请",
+        batchKeyword: "蜀道养护",
+        reason: "成绩盖章",
+        stampTypes: ["电子章"],
+        materialTypes: ["正式发布的考试成绩单、成绩册"],
+        specialDeclarations: ["无特殊申报"],
+        sealPositions: ["落款章"],
+        pdfFileName: "成绩单.pdf",
+        archiveFileName: "../stamp.zip",
+        archivePassword: "1234",
+      },
+      archiveFileName: "../stamp.zip",
+      archiveBase64: Buffer.from("fake zip bytes").toString("base64"),
+    },
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.stampApplication.status, "opened");
+  assert.equal(payload.stampApplication.saved, true);
+  assert.deepEqual(payload.stampApplication.uploadedFileNames, ["stamp.zip"]);
+  assert.ok(uploadedFiles.length >= 1);
+  assert.equal(path.basename(uploadedFiles[0]), "stamp.zip");
+  assert.ok(methods.includes("DOM.setFileInputFiles"));
+  assert.ok(expressions.some((expression) => expression.includes("data-codex-score-stamp-upload")));
+  assert.ok(expressions.some((expression) => expression.includes("savedDraftDetected")));
 });
 
 test("POST /fanwei/read returns a structured Chinese error when no Fanwei tab is open", async (t) => {

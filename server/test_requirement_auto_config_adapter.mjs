@@ -62,6 +62,18 @@ test("warns when per-requirement paper names do not align with subjects", () => 
   assert.ok(result.warnings.includes("试卷名称数量与科目数量不一致，请按科目顺序逐项填写。"));
 });
 
+test("recognizes the Fanwei video recording option", () => {
+  const result = buildAutoConfigFromRequirement({
+    exam_name: "视频录制测试",
+    formal_exam_time_range: "2026-07-05 09:30 到 2026-07-05 11:30",
+    video_monitor_required: "需要",
+    video_record_required: "开启录制",
+  });
+
+  assert.equal(result.config.videoMonitor, true);
+  assert.equal(result.config.videoRecord, true);
+});
+
 test("treats blank rich waiting prompt and pledge HTML as cleared fields", () => {
   const result = buildAutoConfigFromRequirement({
     exam_name: "空富文本测试",

@@ -1,9 +1,16 @@
-const DEFAULT_PAPER_BIND_FAILURE_COOLDOWN_MS = 60 * 60 * 1000;
-
 function parseTimeMs(value) {
   if (!value) return 0;
   const time = new Date(value).getTime();
   return Number.isFinite(time) ? time : 0;
+}
+
+function millisecondsUntilNextHour(now = new Date()) {
+  const current = new Date(now);
+  if (!Number.isFinite(current.getTime())) return 60 * 60 * 1000;
+  const nextHour = new Date(current);
+  nextHour.setMinutes(0, 0, 0);
+  nextHour.setHours(nextHour.getHours() + 1);
+  return Math.max(1, nextHour.getTime() - current.getTime());
 }
 
 function latestPaperBindCheckTimeMs(state = {}) {
@@ -15,21 +22,18 @@ function latestPaperBindCheckTimeMs(state = {}) {
   return Math.max(0, ...times);
 }
 
-function shouldSkipRecentFailedPaperBindCheck(
-  state = {},
-  now = new Date(),
-  cooldownMs = DEFAULT_PAPER_BIND_FAILURE_COOLDOWN_MS,
-) {
+function shouldSkipFailedPaperBindCheckInCurrentHour(state = {}, now = new Date()) {
   if (state.status !== "failed") return false;
-  const cooldown = Number(cooldownMs);
-  if (!Number.isFinite(cooldown) || cooldown <= 0) return false;
   const lastCheckTime = latestPaperBindCheckTimeMs(state);
   if (!lastCheckTime) return false;
-  return now.getTime() - lastCheckTime < cooldown;
+  const currentHour = new Date(now);
+  if (!Number.isFinite(currentHour.getTime())) return false;
+  currentHour.setMinutes(0, 0, 0);
+  return lastCheckTime >= currentHour.getTime() && lastCheckTime <= new Date(now).getTime();
 }
 
 export {
-  DEFAULT_PAPER_BIND_FAILURE_COOLDOWN_MS,
   latestPaperBindCheckTimeMs,
-  shouldSkipRecentFailedPaperBindCheck,
+  millisecondsUntilNextHour,
+  shouldSkipFailedPaperBindCheckInCurrentHour,
 };

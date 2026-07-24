@@ -1,4 +1,4 @@
-const TRUE_VALUES = new Set(["是", "需要", "开启", "启用", "true", "yes", "y", "1"]);
+const TRUE_VALUES = new Set(["是", "需要", "开启", "开启录制", "启用", "true", "yes", "y", "1"]);
 const FALSE_VALUES = new Set(["否", "不需要", "无需", "关闭", "禁用", "false", "no", "n", "0"]);
 
 export function buildAutoConfigFromRequirement(requirement = {}, options = {}) {

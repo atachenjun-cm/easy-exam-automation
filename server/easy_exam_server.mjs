@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import { createReadStream } from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { randomInt, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -11,7 +12,10 @@ import {
   createSessionsThenConfigureCourses,
 } from "./course_session_binding.mjs";
 import { bindPapersToFormalSession, detectSessionPaperBindings } from "./paper_binding.mjs";
-import { shouldSkipRecentFailedPaperBindCheck } from "./paper_bind_scheduler.mjs";
+import {
+  millisecondsUntilNextHour,
+  shouldSkipFailedPaperBindCheckInCurrentHour,
+} from "./paper_bind_scheduler.mjs";
 import { fetchPaperUnitInfo } from "./paper_unit_info.mjs";
 import { bindDefaultTrialPaperToSession } from "./trial_default_paper.mjs";
 import {
@@ -63,6 +67,7 @@ import {
 } from "./operation_console_env.mjs";
 import { runOperationBatchCreation } from "./operation_batch_runner.mjs";
 import { deleteTaskSessionsFromTenant } from "./session_deletion.mjs";
+import { enableSessionVideoRecording } from "./session_video_recording.mjs";
 import { calculateRoomSizes } from "./room_assignment.mjs";
 import {
   apiKeyHint,
@@ -190,9 +195,7 @@ function resolvePythonBin() {
   return "python3";
 }
 const pythonBin = resolvePythonBin();
-const PAPER_BIND_SCHEDULER_INTERVAL_MS = Number(process.env.PAPER_BIND_SCHEDULER_INTERVAL_MS || 60 * 60 * 1000);
 const PAPER_BIND_SCHEDULER_WINDOW_MS = 24 * 60 * 60 * 1000;
-const PAPER_BIND_FAILURE_COOLDOWN_MS = Number(process.env.PAPER_BIND_FAILURE_COOLDOWN_MS || 60 * 60 * 1000);
 const fanweiBridge = createFanweiBridgeStore();
 
 async function loadEnvFile() {
@@ -708,6 +711,16 @@ async function runYikaoApiCreationJob({ job, login }) {
           "创建考试场次",
         );
         const sessionId = extractSessionId(result);
+        if (item.kind === "main" && item.payload.save_video === true) {
+          emitLog(`[API 创建] 正式考试开启视频录制：PUT /tenant/api/session/${sessionId}/`);
+          await enableSessionVideoRecording({
+            apiBase,
+            login,
+            sessionId,
+            requestJson: readTenantJsonWithLogin,
+          });
+          emitLog(`[API 创建] 正式考试视频录制已开启，session_id=${sessionId}`);
+        }
         const createdSession = {
           kind: item.kind,
           name: item.payload.name,
@@ -1375,9 +1388,11 @@ async function createFanweiRequirementImportFromPayload(payload, req, options = 
   const user = getAuthUserFromRequest(auth, req);
   const ownerEmail = options.ownerEmail || user?.email || "";
   const existingTask = await findFanweiProject(model.fields["运控流水号"] || payload.serialNo, auth.enabled ? ownerEmail : "");
+  const appendedRequirementStartIndex = taskExamRequirements(existingTask || {}).length;
   await fs.writeFile(payloadPath, JSON.stringify(model, null, 2), "utf8");
   await runPythonJson([fanweiWorkbookScript, examRequestTemplatePath, payloadPath, uploadPath]);
-  let examRequirements = [];
+  let appendedExamRequirements = [];
+  let allExamRequirements = [];
   const imported = await createImportFromWorkbook({
     importId,
     uploadPath,
@@ -1389,7 +1404,7 @@ async function createFanweiRequirementImportFromPayload(payload, req, options = 
     buildTaskConfig: ({ parsed, uploadId, existingTasks }) => {
       const otherProjectTasks = (existingTasks || []).filter((task) => task?.taskId !== existingTask?.taskId);
       const projectRequirementConfigs = [];
-      examRequirements = requirementFieldsList.map((fields, index) => {
+      appendedExamRequirements = requirementFieldsList.map((fields, index) => {
         const generated = buildAutoConfigFromRequirement(
           autoConfigRequirementFromFields(fields, parsed.config || {}),
           { customerName: parsed.config?.customerName || "" },
@@ -1397,7 +1412,7 @@ async function createFanweiRequirementImportFromPayload(payload, req, options = 
         let config = {
           ...(index === 0 ? parsed.config : {}),
           ...generated.config,
-          apiKeyProfileId: parsed.config?.apiKeyProfileId || generated.config?.apiKeyProfileId || "",
+          apiKeyProfileId: existingTask?.config?.apiKeyProfileId || parsed.config?.apiKeyProfileId || generated.config?.apiKeyProfileId || "",
         };
         config = assignCourseCodesForExamConfig(config, otherProjectTasks, projectRequirementConfigs);
         projectRequirementConfigs.push(config);
@@ -1419,18 +1434,28 @@ async function createFanweiRequirementImportFromPayload(payload, req, options = 
           uploadId: index === 0 ? uploadId : "",
         };
       });
-      return buildFanweiProjectConfig({
+      const projectConfig = buildFanweiProjectConfig({
         fanwei,
         model,
         parsed,
         filename: baseName,
         uploadId,
-        requirements: examRequirements,
+        requirements: appendedExamRequirements,
         previousConfig: existingTask?.config || {},
       });
+      allExamRequirements = projectConfig.examRequirements;
+      return projectConfig;
     },
   });
-  return { ...imported, fanwei: model, examRequirements, workbookPath: uploadPath, projectReused: Boolean(existingTask) };
+  return {
+    ...imported,
+    fanwei: model,
+    examRequirements: allExamRequirements,
+    appendedRequirementStartIndex,
+    appendedRequirementCount: appendedExamRequirements.length,
+    workbookPath: uploadPath,
+    projectReused: Boolean(existingTask),
+  };
 }
 
 async function handleFanweiRequirementImport(req, res) {
@@ -2379,7 +2404,140 @@ async function handleExamRequestTemplate(req, res) {
   createReadStream(examRequestTemplatePath).pipe(res);
 }
 
-async function handleFanweiHelperInstaller(url, res) {
+const fanweiHelperServerFileNames = [
+  "fanwei_local_helper_cli.mjs",
+  "fanwei_local_helper.mjs",
+  "fanwei_auto_read.mjs",
+  "score_stamp_application.mjs",
+];
+
+function normalizeHttpOrigin(value = "") {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    if (!["http:", "https:"].includes(parsed.protocol)) return "";
+    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) return "";
+    return parsed.origin;
+  } catch {
+    return "";
+  }
+}
+
+function requestOrigin(req) {
+  const host = String(req.headers.host || "")
+    .split(",")[0]
+    .trim();
+  if (!host || /[\\/\s]/.test(host)) return "";
+  const proto = req.socket?.encrypted ? "https" : "http";
+  return normalizeHttpOrigin(`${proto}://${host}`);
+}
+
+function helperPackageConfig(origin = "") {
+  const allowedOrigins = [];
+  for (const candidate of [
+    origin,
+    "http://127.0.0.1:8765",
+    "http://localhost:8765",
+  ]) {
+    const normalized = normalizeHttpOrigin(candidate);
+    if (normalized && !allowedOrigins.includes(normalized)) allowedOrigins.push(normalized);
+  }
+  const origins = allowedOrigins.join(",");
+  return [
+    "YIKAO_HELPER_HOST=127.0.0.1",
+    "YIKAO_HELPER_PORT=18765",
+    "YIKAO_HELPER_CHROME_PORT=19222",
+    `YIKAO_CONSOLE_ORIGINS=${origins}`,
+    "",
+  ].join("\n");
+}
+
+async function runFanweiHelperArchiveCommand(command, args, { cwd, errorMessage }) {
+  const child = spawn(command, args, {
+    cwd,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+  const exitCode = await new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", resolve);
+  });
+  if (exitCode !== 0) {
+    throw new Error(stderr.trim() || errorMessage);
+  }
+}
+
+async function createFanweiHelperPackageZip({ cwd, outputPath, packageName }) {
+  await runFanweiHelperArchiveCommand("zip", ["-qry", outputPath, packageName], {
+    cwd,
+    errorMessage: "泛微本机助手安装包生成失败",
+  });
+}
+
+async function extractFanweiHelperPackageZip(packagePath, tempRoot) {
+  await runFanweiHelperArchiveCommand("unzip", ["-q", packagePath, "-d", tempRoot], {
+    cwd: tempRoot,
+    errorMessage: "泛微本机助手预置包解压失败",
+  });
+}
+
+function fanweiHelperDeployFileNames(packageName) {
+  if (packageName.endsWith("-win-x64")) {
+    return ["install-windows.bat", "start-windows.bat"];
+  }
+  if (packageName.includes("-darwin-")) {
+    return ["install-macos.command", "com.ata.yikao-fanwei-helper.plist.template"];
+  }
+  throw new Error(`无法识别泛微本机助手平台：${packageName}`);
+}
+
+async function overlayLatestFanweiHelperFiles(stagedPackageDir, packageName) {
+  const serverDir = path.join(stagedPackageDir, "server");
+  await fs.mkdir(serverDir, { recursive: true });
+  for (const fileName of fanweiHelperServerFileNames) {
+    await fs.copyFile(path.join(rootDir, "server", fileName), path.join(serverDir, fileName));
+  }
+
+  const deployDir = path.join(rootDir, "deploy", "fanwei-helper");
+  for (const fileName of fanweiHelperDeployFileNames(packageName)) {
+    const destination = path.join(stagedPackageDir, fileName);
+    await fs.copyFile(path.join(deployDir, fileName), destination);
+    if (fileName === "install-macos.command") await fs.chmod(destination, 0o755);
+  }
+}
+
+async function dynamicFanweiHelperPackagePath(packagePath, origin) {
+  const packageName = path.basename(packagePath, ".zip");
+  const sourcePackageDir = path.join(path.dirname(packagePath), packageName);
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "yikao-helper-download-"));
+  try {
+    const stagedPackageDir = path.join(tempRoot, packageName);
+    try {
+      await fs.access(sourcePackageDir);
+      await fs.cp(sourcePackageDir, stagedPackageDir, { recursive: true });
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      await extractFanweiHelperPackageZip(packagePath, tempRoot);
+      await fs.access(stagedPackageDir);
+    }
+
+    const runtimeName = packageName.endsWith("-win-x64") ? "node.exe" : "node";
+    await fs.access(path.join(stagedPackageDir, runtimeName));
+    await overlayLatestFanweiHelperFiles(stagedPackageDir, packageName);
+    await fs.writeFile(path.join(stagedPackageDir, "config.env"), helperPackageConfig(origin), { mode: 0o600 });
+    const outputPath = path.join(tempRoot, `${packageName}.zip`);
+    await createFanweiHelperPackageZip({ cwd: tempRoot, outputPath, packageName });
+    return {
+      packagePath: outputPath,
+      cleanup: () => fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {}),
+    };
+  } catch (error) {
+    await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function handleFanweiHelperInstaller(req, url, res) {
   const platform = String(url.searchParams.get("platform") || "").toLowerCase();
   const packageNames = {
     windows: "yikao-fanwei-helper-win-x64.zip",
@@ -2403,14 +2561,32 @@ async function handleFanweiHelperInstaller(url, res) {
     return json(res, 503, { error: `泛微本机助手安装包（${platform}）尚未生成，请联系管理员。` });
   }
 
-  const stat = await fs.stat(packagePath);
+  let downloadPackage;
+  try {
+    downloadPackage = await dynamicFanweiHelperPackagePath(packagePath, requestOrigin(req));
+  } catch (error) {
+    console.error(`泛微本机助手动态安装包生成失败：${error?.message || error}`);
+    return json(res, 503, { error: "泛微本机助手安装包生成失败，请联系管理员。" });
+  }
+
+  const stat = await fs.stat(downloadPackage.packagePath);
   res.writeHead(200, {
     "Content-Type": "application/zip",
     "Content-Disposition": `attachment; filename="${fileName}"`,
     "Content-Length": stat.size,
     "Cache-Control": "private, no-store",
   });
-  createReadStream(packagePath).pipe(res);
+  if (downloadPackage.cleanup) {
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      downloadPackage.cleanup();
+    };
+    res.once("finish", cleanup);
+    res.once("close", cleanup);
+  }
+  createReadStream(downloadPackage.packagePath).pipe(res);
 }
 
 async function handleMonitorAccountsExcel(req, res) {
@@ -3858,10 +4034,12 @@ async function handleCreateJob(req, res) {
     return badRequest(res, "缺少 uploadId 或 taskId");
   }
   let importRecord = null;
+  let taskForJob = null;
   let requirementIndex = 0;
   if (payload.taskId) {
     const task = await runTaskState("get", { taskId: payload.taskId });
     if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+    taskForJob = task;
     const requirements = taskExamRequirements(task);
     if (requirements.length) {
       requirementIndex = Number(payload.requirementIndex ?? 0);
@@ -3896,8 +4074,8 @@ async function handleCreateJob(req, res) {
     return badRequest(res, "需求单缺少考试名称或考试时间，请重新导入并检查表格。");
   }
 
-  const storedLogin = getYikaoLoginForRequest(req);
-  const login = auth.enabled ? storedLogin : { ...storedLogin, ...(payload.login || {}) };
+  const storedLogin = taskForJob ? getYikaoLoginForTask(taskForJob) : getYikaoLoginForRequest(req);
+  const login = taskForJob || auth.enabled ? storedLogin : { ...storedLogin, ...(payload.login || {}) };
   if (!login.url || !login.username || !login.password) {
     return badRequest(res, "请先填写并保存后台登录配置。");
   }
@@ -4757,6 +4935,46 @@ function scoreStampApplicationStatusMessage(stampApplication = {}) {
   return "";
 }
 
+function publicScoreStampApplicationPayload(payload = {}) {
+  const { archiveFilePath: _archiveFilePath, pdfFilePath: _pdfFilePath, ...publicPayload } = payload || {};
+  return publicPayload;
+}
+
+function shortText(value = "", limit = 500) {
+  return String(value ?? "").slice(0, limit);
+}
+
+function shortTextArray(value = [], limit = 24, itemLimit = 160) {
+  return (Array.isArray(value) ? value : [])
+    .map((item) => shortText(item, itemLimit).trim())
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function normalizeScoreStampApplicationResult(value = {}) {
+  const status = ["opened", "skipped", "failed"].includes(value?.status) ? value.status : "";
+  if (!status) return null;
+  return {
+    status,
+    attemptedAt: shortText(value.attemptedAt || new Date().toISOString(), 80),
+    workflowUrl: shortText(value.workflowUrl, 600),
+    pageUrl: shortText(value.pageUrl, 600),
+    pdfFileName: shortText(value.pdfFileName, 240),
+    archiveFileName: shortText(value.archiveFileName, 240),
+    archivePassword: shortText(value.archivePassword, 120),
+    filled: shortTextArray(value.filled),
+    uploadedFileNames: shortTextArray(value.uploadedFileNames, 12, 240),
+    uploadHiddenValue: shortText(value.uploadHiddenValue, 500),
+    saved: Boolean(value.saved),
+    alreadySaved: Boolean(value.alreadySaved),
+    navigatedAfterSave: Boolean(value.navigatedAfterSave),
+    saveButtonText: shortText(value.saveButtonText, 80),
+    warnings: shortTextArray(value.warnings, 24, 300),
+    message: shortText(value.message, 500),
+    errorMessage: shortText(value.errorMessage, 1000),
+  };
+}
+
 function parseChromeJsonValue(value, fallback = {}) {
   if (value && typeof value === "object") return value;
   const textValue = String(value ?? "").trim();
@@ -4933,16 +5151,29 @@ async function startScoreStampApplication(task, scoreResult, req) {
   if (!uploadResult.ok || !uploadResult.uploaded) {
     throw new Error("OA 成绩盖章申请页未找到可上传附件的文件控件，请检查页面附件区域。");
   }
-  const saveRaw = await withScoreStampChromeRetry({
-    tab,
-    workflowUrl: payload.workflowUrl,
-    operation: (currentTab) => evaluateChromeDevToolsExpression({
-      tab: currentTab,
-      expression: buildScoreStampApplicationSaveScript(),
-      timeoutMs: 15000,
-    }),
-  });
-  const saveResult = parseChromeJsonValue(saveRaw);
+  let saveResult = {};
+  try {
+    const saveRaw = await withScoreStampChromeRetry({
+      tab,
+      workflowUrl: payload.workflowUrl,
+      attempts: 1,
+      operation: (currentTab) => evaluateChromeDevToolsExpression({
+        tab: currentTab,
+        expression: buildScoreStampApplicationSaveScript(),
+        timeoutMs: 15000,
+      }),
+    });
+    saveResult = parseChromeJsonValue(saveRaw);
+  } catch (error) {
+    if (!isChromeNavigationRetryableError(error)) throw error;
+    saveResult = {
+      ok: true,
+      saved: true,
+      navigatedAfterSave: true,
+      warnings: ["OA 保存后页面已跳转，按已保存处理"],
+      errorMessage: error instanceof Error ? error.message : String(error),
+    };
+  }
   if (!saveResult.ok || !saveResult.saved) {
     const detail = (saveResult.warnings || []).join("；") ||
       (saveResult.url ? `页面地址：${saveResult.url}` : "") ||
@@ -4963,6 +5194,8 @@ async function startScoreStampApplication(task, scoreResult, req) {
       : [payload.archiveFileName].filter(Boolean),
     uploadHiddenValue: uploadResult.hiddenValue || "",
     saved: Boolean(saveResult.saved),
+    alreadySaved: Boolean(saveResult.alreadySaved),
+    navigatedAfterSave: Boolean(saveResult.navigatedAfterSave),
     saveButtonText: saveResult.buttonText || "",
     warnings: Array.isArray(pageResult.warnings) ? pageResult.warnings : [],
   };
@@ -5119,10 +5352,7 @@ async function handleScoreProcess(taskId, req, res) {
     };
     Object.assign(scoreResult, await ensurePasswordProtectedScoreArchive(scoreResult));
     logs.push(`[盖章申请] 已生成加密压缩包：${scoreResult.stampArchiveFileName}，默认密码：${scoreResult.stampArchivePassword}`);
-    const stampApplication = await tryStartScoreStampApplication(task, scoreResult, req);
-    scoreResult.stampApplication = stampApplication;
-    const stampMessage = scoreStampApplicationStatusMessage(stampApplication);
-    if (stampMessage) logs.push(`[盖章申请] ${stampMessage}`);
+    logs.push("[盖章申请] 已准备 OA 盖章申请资料，将通过当前电脑的本机助手自动打开本机 Chrome");
     const updated = await updateTaskStep(taskId, "score_process", "success", {
       message: logs.join("\n"),
       result: scoreResult,
@@ -5275,6 +5505,82 @@ async function handleScoreStampArchiveDownload(taskId, req, res) {
     "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(preparedResult.stampArchiveFileName || scoreStampArchiveFileName(preparedResult.pdfFileName))}`,
   });
   createReadStream(archivePath).pipe(res);
+}
+
+async function handleScoreStampApplicationPrepare(taskId, req, res) {
+  const task = await runTaskState("get", { taskId });
+  if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  const step = (task.steps || []).find((item) => item.stepKey === "score_process");
+  const result = step?.result || {};
+  if (step?.status !== "success") {
+    return badRequest(res, "请先完成成绩处理并生成成绩单 PDF");
+  }
+  if (process.env.SCORE_STAMP_AUTO_DISABLED === "1") {
+    const stampApplication = {
+      status: "skipped",
+      attemptedAt: new Date().toISOString(),
+      message: "已按环境配置跳过 OA 成绩盖章申请自动发起",
+    };
+    const mergedResult = { ...result, stampApplication };
+    const updated = await updateTaskStep(taskId, "score_process", "success", {
+      message: `[盖章申请] ${scoreStampApplicationStatusMessage(stampApplication)}`,
+      result: mergedResult,
+    });
+    return json(res, 200, { ok: true, task: updated, stampApplication, skipped: true });
+  }
+  let preparedResult;
+  try {
+    preparedResult = await ensurePasswordProtectedScoreArchive(result);
+  } catch (error) {
+    return json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+  }
+  const payload = buildScoreStampApplicationPayload({
+    task,
+    scoreResult: preparedResult,
+    user: getAuthUserFromRequest(auth, req) || {},
+  });
+  if (preparedResult.stampArchivePath !== result.stampArchivePath) {
+    await updateTaskStep(taskId, "score_process", "success", {
+      message: `[盖章申请] 已生成加密压缩包：${preparedResult.stampArchiveFileName}，默认密码：${preparedResult.stampArchivePassword}`,
+      result: preparedResult,
+    });
+  }
+  return json(res, 200, {
+    ok: true,
+    taskId,
+    payload: publicScoreStampApplicationPayload(payload),
+    archiveDownloadUrl: `/api/tasks/${encodeURIComponent(taskId)}/scores/stamp-archive/download`,
+    archiveFileName: preparedResult.stampArchiveFileName || scoreStampArchiveFileName(preparedResult.pdfFileName),
+  });
+}
+
+async function handleScoreStampApplicationResult(taskId, req, res) {
+  const task = await runTaskState("get", { taskId });
+  if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  const step = (task.steps || []).find((item) => item.stepKey === "score_process");
+  const result = step?.result || {};
+  if (step?.status !== "success") {
+    return badRequest(res, "请先完成成绩处理并生成成绩单 PDF");
+  }
+  const payload = parseJsonSafe(await readBody(req)) || {};
+  const stampApplication = normalizeScoreStampApplicationResult(payload.stampApplication || payload);
+  if (!stampApplication) {
+    return badRequest(res, "缺少有效的盖章申请执行结果");
+  }
+  let preparedResult;
+  try {
+    preparedResult = await ensurePasswordProtectedScoreArchive(result);
+  } catch {
+    preparedResult = result;
+  }
+  const mergedResult = { ...preparedResult, stampApplication };
+  const message = `[盖章申请] ${scoreStampApplicationStatusMessage(stampApplication)}`;
+  const updated = await updateTaskStep(taskId, "score_process", "success", {
+    message,
+    result: mergedResult,
+  });
+  const statusCode = stampApplication.status === "opened" || stampApplication.status === "skipped" ? 200 : 500;
+  return json(res, statusCode, { ok: statusCode === 200, task: updated, stampApplication, error: stampApplication.errorMessage });
 }
 
 async function handleScoreStampApplication(taskId, req, res) {
@@ -5533,6 +5839,18 @@ async function handleContentTaskRemark(taskId, req, res) {
   return json(res, 200, { ok: true, task: updated });
 }
 
+async function handleScoreStampBatchName(taskId, req, res) {
+  const task = await runTaskState("get", { taskId });
+  if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  const payload = parseJsonSafe(await readBody(req)) || {};
+  const scoreStampBatchName = String(payload.batchName || "").trim().slice(0, 240);
+  const updated = await runTaskState("update_config", {
+    taskId,
+    config: { scoreStampBatchName },
+  });
+  return json(res, 200, { ok: true, task: updated, scoreStampBatchName });
+}
+
 async function handleOperationConsoleEnvironment(req, res) {
   const environment = await checkOperationConsoleAutomationEnvironment({ cwd: rootDir });
   return json(res, 200, { ok: true, environment });
@@ -5650,7 +5968,7 @@ function parseTaskStartTime(task = {}, requirementIndex = 0) {
 function shouldAttemptScheduledPaperBind(task = {}, requirementIndex = 0, now = new Date()) {
   const current = paperFormBindState(task, requirementIndex);
   if (current.status === "success" || current.status === "running") return false;
-  if (shouldSkipRecentFailedPaperBindCheck(current, now, PAPER_BIND_FAILURE_COOLDOWN_MS)) return false;
+  if (shouldSkipFailedPaperBindCheckInCurrentHour(current, now)) return false;
   const formalSession = taskFormalSession(task, requirementIndex);
   if (!formalSession?.session_id) return false;
   const courses = normalizeCourseRecords(taskRequirementConfig(task, requirementIndex));
@@ -5808,6 +6126,19 @@ async function runScheduledPaperBindingOnce(now = new Date()) {
   }
   if (results.length) console.log(`[试卷绑定定时] 本轮处理 ${results.length} 个任务：${JSON.stringify(results)}`);
   return results;
+}
+
+function scheduleNextPaperBindingCheck() {
+  const timer = setTimeout(async () => {
+    try {
+      await runScheduledPaperBindingOnce(new Date());
+    } catch (error) {
+      console.warn(`[试卷绑定定时] 整点检查失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      scheduleNextPaperBindingCheck();
+    }
+  }, millisecondsUntilNextHour(new Date()));
+  timer.unref();
 }
 
 async function handleTaskStepRetry(taskId, stepKey, req, res) {
@@ -6051,7 +6382,7 @@ async function requestHandler(req, res) {
       return await handleFanweiBridgeResult(req, res);
     }
     if (req.method === "GET" && url.pathname === "/api/fanwei/helper-installer") {
-      return await handleFanweiHelperInstaller(url, res);
+      return await handleFanweiHelperInstaller(req, url, res);
     }
     if (req.method === "GET" && url.pathname === "/api/templates/exam-request") {
       return await handleExamRequestTemplate(req, res);
@@ -6114,6 +6445,10 @@ async function requestHandler(req, res) {
     if (req.method === "PATCH" && contentTaskRemarksMatch) {
       return await handleContentTaskRemark(decodeURIComponent(contentTaskRemarksMatch[1]), req, res);
     }
+    const scoreStampBatchNameMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/score-stamp-batch-name$/);
+    if (req.method === "PATCH" && scoreStampBatchNameMatch) {
+      return await handleScoreStampBatchName(decodeURIComponent(scoreStampBatchNameMatch[1]), req, res);
+    }
     const sharedSheetFillMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/shared-sheet\/fill$/);
     if (req.method === "POST" && sharedSheetFillMatch) {
       return await handleProjectSharedSheetFill(decodeURIComponent(sharedSheetFillMatch[1]), req, res);
@@ -6133,6 +6468,14 @@ async function requestHandler(req, res) {
     const scoreStampArchiveDownloadMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/scores\/stamp-archive\/download$/);
     if (req.method === "GET" && scoreStampArchiveDownloadMatch) {
       return await handleScoreStampArchiveDownload(decodeURIComponent(scoreStampArchiveDownloadMatch[1]), req, res);
+    }
+    const scoreStampApplicationPrepareMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/scores\/stamp-application\/prepare$/);
+    if (req.method === "POST" && scoreStampApplicationPrepareMatch) {
+      return await handleScoreStampApplicationPrepare(decodeURIComponent(scoreStampApplicationPrepareMatch[1]), req, res);
+    }
+    const scoreStampApplicationResultMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/scores\/stamp-application\/result$/);
+    if (req.method === "POST" && scoreStampApplicationResultMatch) {
+      return await handleScoreStampApplicationResult(decodeURIComponent(scoreStampApplicationResultMatch[1]), req, res);
     }
     const scoreStampApplicationMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/scores\/stamp-application$/);
     if (req.method === "POST" && scoreStampApplicationMatch) {
@@ -6225,10 +6568,7 @@ server.listen(port, host, () => {
 });
 
 if (process.env.PAPER_BIND_SCHEDULER_DISABLED !== "1") {
-  setInterval(runScheduledPaperBindingOnce, PAPER_BIND_SCHEDULER_INTERVAL_MS).unref();
-  runScheduledPaperBindingOnce().catch((error) => {
-    console.warn(`[试卷绑定定时] 启动检查失败：${error instanceof Error ? error.message : String(error)}`);
-  });
+  scheduleNextPaperBindingCheck();
 }
 
 export {

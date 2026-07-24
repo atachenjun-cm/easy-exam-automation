@@ -20,7 +20,7 @@
     <key>YIKAO_HELPER_CHROME_PORT</key>
     <string>19222</string>
     <key>YIKAO_CONSOLE_ORIGINS</key>
-    <string>http://172.16.13.214:8765</string>
+    <string>__CONSOLE_ORIGINS__</string>
     <key>YIKAO_HELPER_RUNTIME_DIR</key>
     <string>__HELPER_DIR__</string>
   </dict>
