@@ -6,14 +6,23 @@ export function calculateRoomSizes(totalEntries, targetSize = 30) {
     return [];
   }
 
-  const roomCount = Math.max(1, Math.round(totalEntries / targetSize));
-  const sizes = [];
-  let remaining = totalEntries;
-  for (let index = 0; index < roomCount; index += 1) {
-    const remainingRooms = roomCount - index;
-    const num = remainingRooms === 1 ? remaining : Math.min(targetSize, remaining - (remainingRooms - 1));
-    sizes.push(num);
-    remaining -= num;
-  }
-  return sizes;
+  const lowerRoomCount = Math.max(1, Math.floor(totalEntries / targetSize));
+  const upperRoomCount = lowerRoomCount + 1;
+  const maxDeviation = (roomCount) => {
+    const smallestRoom = Math.floor(totalEntries / roomCount);
+    const largestRoom = Math.ceil(totalEntries / roomCount);
+    return Math.max(
+      Math.abs(smallestRoom - targetSize),
+      Math.abs(largestRoom - targetSize),
+    );
+  };
+  const roomCount = maxDeviation(upperRoomCount) < maxDeviation(lowerRoomCount)
+    ? upperRoomCount
+    : lowerRoomCount;
+  const baseSize = Math.floor(totalEntries / roomCount);
+  const largerRoomCount = totalEntries % roomCount;
+  return Array.from(
+    { length: roomCount },
+    (_, index) => baseSize + (index < largerRoomCount ? 1 : 0),
+  );
 }

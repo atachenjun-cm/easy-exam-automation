@@ -5058,7 +5058,8 @@
       }
 
       :root[data-theme="dark"] .project-source-icon.examRequirement {
-        background: rgba(255, 255, 255, 0.88);
+        border-color: rgba(10, 132, 255, 0.36);
+        background: rgba(10, 132, 255, 0.14);
       }
 
       :root[data-theme="dark"] .operation-detail-modal .account-editor-body {
@@ -12532,7 +12533,7 @@
         }
         candidateLog(`[自动分班] entries_num = ${preview.entries_num}`);
         candidateLog(`[自动分班] 当前班级数 = ${preview.rooms_count ?? 0}`);
-        candidateLog(`[自动分班] 默认每班约 ${targetSize} 人，允许最后一个班超过 ${targetSize}`);
+        candidateLog(`[自动分班] 各班人数尽量接近 ${targetSize} 人；同样接近时优先使用更少班级`);
         candidateLog(`[自动分班] 计算结果：${preview.rooms.map((room) => `${room.name} ${room.num} 人`).join("，")}`, "success");
 
         async function submitRooms(overwrite = false) {

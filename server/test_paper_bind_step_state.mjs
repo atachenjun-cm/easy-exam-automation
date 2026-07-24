@@ -3,7 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { shouldSkipRecentFailedPaperBindCheck } from "./paper_bind_scheduler.mjs";
+import {
+  millisecondsUntilNextHour,
+  shouldSkipFailedPaperBindCheckInCurrentHour,
+} from "./paper_bind_scheduler.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const serverSource = fs.readFileSync(path.join(rootDir, "server/easy_exam_server.mjs"), "utf8");
@@ -29,11 +32,17 @@ test("trial paper bind is a retryable task step", () => {
   assert.ok(serverSource.includes('updateTaskStep(taskId, stepKey, "waiting_manual"'));
 });
 
-test("paper binding scheduler runs hourly before the formal exam starts", () => {
-  assert.ok(serverSource.includes("PAPER_BIND_SCHEDULER_INTERVAL_MS"));
+test("paper binding scheduler runs at the next whole hour before the formal exam starts", () => {
   assert.ok(serverSource.includes("shouldAttemptScheduledPaperBind"));
   assert.ok(serverSource.includes("runScheduledPaperBindingOnce"));
-  assert.ok(serverSource.includes("setInterval(runScheduledPaperBindingOnce"));
+  assert.ok(serverSource.includes("scheduleNextPaperBindingCheck"));
+  assert.ok(serverSource.includes("millisecondsUntilNextHour(new Date())"));
+  assert.equal(serverSource.includes("setInterval(runScheduledPaperBindingOnce"), false);
+});
+
+test("paper binding scheduler calculates the delay to the next whole hour", () => {
+  assert.equal(millisecondsUntilNextHour(new Date("2026-07-23T08:43:38.352Z")), 981648);
+  assert.equal(millisecondsUntilNextHour(new Date("2026-07-23T09:00:00.000Z")), 60 * 60 * 1000);
 });
 
 test("paper binding state and execution are isolated by requirement", () => {
@@ -45,24 +54,24 @@ test("paper binding state and execution are isolated by requirement", () => {
   assert.ok(serverSource.includes("runPaperFormBindForTask(task, login, { scheduled: true, requirementIndex })"));
 });
 
-test("paper binding scheduler skips recently failed automatic checks", () => {
+test("paper binding scheduler skips a repeated failed check in the same hour", () => {
   const now = new Date("2026-07-07T10:20:00Z");
   const state = {
     status: "failed",
     completedAt: "2026-07-07T10:10:00Z",
   };
 
-  assert.equal(shouldSkipRecentFailedPaperBindCheck(state, now), true);
+  assert.equal(shouldSkipFailedPaperBindCheckInCurrentHour(state, now), true);
 });
 
-test("paper binding scheduler retries failed checks after cooldown", () => {
-  const now = new Date("2026-07-07T11:15:00Z");
+test("paper binding scheduler retries a failed check on the next whole hour", () => {
+  const now = new Date("2026-07-07T11:00:00Z");
   const state = {
     status: "failed",
-    completedAt: "2026-07-07T10:10:00Z",
+    completedAt: "2026-07-07T10:59:59.900Z",
   };
 
-  assert.equal(shouldSkipRecentFailedPaperBindCheck(state, now), false);
+  assert.equal(shouldSkipFailedPaperBindCheckInCurrentHour(state, now), false);
 });
 
 test("paper binding scheduler uses the latest log time when completion time is absent", () => {
@@ -75,7 +84,7 @@ test("paper binding scheduler uses the latest log time when completion time is a
     ],
   };
 
-  assert.equal(shouldSkipRecentFailedPaperBindCheck(state, now), true);
+  assert.equal(shouldSkipFailedPaperBindCheckInCurrentHour(state, now), true);
 });
 
 test("paper binding scheduler does not cool down manual pending checks", () => {
@@ -85,7 +94,7 @@ test("paper binding scheduler does not cool down manual pending checks", () => {
     completedAt: "2026-07-07T10:10:00Z",
   };
 
-  assert.equal(shouldSkipRecentFailedPaperBindCheck(state, now), false);
+  assert.equal(shouldSkipFailedPaperBindCheckInCurrentHour(state, now), false);
 });
 
 test("paper binding detail renders bound form codes and manual action", () => {

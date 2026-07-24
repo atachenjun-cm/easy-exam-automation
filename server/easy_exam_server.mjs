@@ -12,7 +12,10 @@ import {
   createSessionsThenConfigureCourses,
 } from "./course_session_binding.mjs";
 import { bindPapersToFormalSession, detectSessionPaperBindings } from "./paper_binding.mjs";
-import { shouldSkipRecentFailedPaperBindCheck } from "./paper_bind_scheduler.mjs";
+import {
+  millisecondsUntilNextHour,
+  shouldSkipFailedPaperBindCheckInCurrentHour,
+} from "./paper_bind_scheduler.mjs";
 import { fetchPaperUnitInfo } from "./paper_unit_info.mjs";
 import { bindDefaultTrialPaperToSession } from "./trial_default_paper.mjs";
 import {
@@ -192,9 +195,7 @@ function resolvePythonBin() {
   return "python3";
 }
 const pythonBin = resolvePythonBin();
-const PAPER_BIND_SCHEDULER_INTERVAL_MS = Number(process.env.PAPER_BIND_SCHEDULER_INTERVAL_MS || 60 * 60 * 1000);
 const PAPER_BIND_SCHEDULER_WINDOW_MS = 24 * 60 * 60 * 1000;
-const PAPER_BIND_FAILURE_COOLDOWN_MS = Number(process.env.PAPER_BIND_FAILURE_COOLDOWN_MS || 60 * 60 * 1000);
 const fanweiBridge = createFanweiBridgeStore();
 
 async function loadEnvFile() {
@@ -5953,7 +5954,7 @@ function parseTaskStartTime(task = {}, requirementIndex = 0) {
 function shouldAttemptScheduledPaperBind(task = {}, requirementIndex = 0, now = new Date()) {
   const current = paperFormBindState(task, requirementIndex);
   if (current.status === "success" || current.status === "running") return false;
-  if (shouldSkipRecentFailedPaperBindCheck(current, now, PAPER_BIND_FAILURE_COOLDOWN_MS)) return false;
+  if (shouldSkipFailedPaperBindCheckInCurrentHour(current, now)) return false;
   const formalSession = taskFormalSession(task, requirementIndex);
   if (!formalSession?.session_id) return false;
   const courses = normalizeCourseRecords(taskRequirementConfig(task, requirementIndex));
@@ -6111,6 +6112,19 @@ async function runScheduledPaperBindingOnce(now = new Date()) {
   }
   if (results.length) console.log(`[试卷绑定定时] 本轮处理 ${results.length} 个任务：${JSON.stringify(results)}`);
   return results;
+}
+
+function scheduleNextPaperBindingCheck() {
+  const timer = setTimeout(async () => {
+    try {
+      await runScheduledPaperBindingOnce(new Date());
+    } catch (error) {
+      console.warn(`[试卷绑定定时] 整点检查失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      scheduleNextPaperBindingCheck();
+    }
+  }, millisecondsUntilNextHour(new Date()));
+  timer.unref();
 }
 
 async function handleTaskStepRetry(taskId, stepKey, req, res) {
@@ -6540,10 +6554,7 @@ server.listen(port, host, () => {
 });
 
 if (process.env.PAPER_BIND_SCHEDULER_DISABLED !== "1") {
-  setInterval(runScheduledPaperBindingOnce, PAPER_BIND_SCHEDULER_INTERVAL_MS).unref();
-  runScheduledPaperBindingOnce().catch((error) => {
-    console.warn(`[试卷绑定定时] 启动检查失败：${error instanceof Error ? error.message : String(error)}`);
-  });
+  scheduleNextPaperBindingCheck();
 }
 
 export {

@@ -227,14 +227,19 @@ function sessionRow(config, session, template = [], hasTrial = false) {
   const examKindText = text(config.examKindText) || (isTrial ? "试考-分散模式" : "正式");
   const duration = isTrial ? 90 : minutesBetween(start, end);
   const deviceText = clientExam ? "客户端" : "网页端";
-  const candidateCount = text(session.candidate_count || session.candidateCount || config.candidateCount);
+  const importedCandidateCount = Number(session.candidate_count ?? session.candidateCount ?? 0);
+  const candidateCount = Number.isFinite(importedCandidateCount) && importedCandidateCount > 0
+    ? String(importedCandidateCount)
+    : "";
+  const projectCode = text(config.businessRequirement?.project_code || config.projectCode);
+  const customerName = text(config.fanweiSource?.raw?.fields?.["客户名称（仅供参考）"]) || "蜀道集团";
 
   const row = applyTemplate([
     text(session.name || (isTrial ? config.mockExamName : config.examName)),
-    "F0020795",
+    projectCode,
     "",
     examKindText,
-    "蜀道集团",
+    customerName,
     candidateCount,
     text(config.startDateColumn) || datePart(start),
     text(config.endDateColumn) || datePart(end),
@@ -261,7 +266,9 @@ function sessionRow(config, session, template = [], hasTrial = false) {
     text(config.specialRequirementText) || "声音监控",
     text(config.notificationContent) || notificationText(config, session, hasTrial),
   ], template);
+  row[1] = projectCode;
   row[2] = "";
+  row[5] = candidateCount;
   return row;
 }
 
