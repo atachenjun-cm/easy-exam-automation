@@ -1388,9 +1388,11 @@ async function createFanweiRequirementImportFromPayload(payload, req, options = 
   const user = getAuthUserFromRequest(auth, req);
   const ownerEmail = options.ownerEmail || user?.email || "";
   const existingTask = await findFanweiProject(model.fields["运控流水号"] || payload.serialNo, auth.enabled ? ownerEmail : "");
+  const appendedRequirementStartIndex = taskExamRequirements(existingTask || {}).length;
   await fs.writeFile(payloadPath, JSON.stringify(model, null, 2), "utf8");
   await runPythonJson([fanweiWorkbookScript, examRequestTemplatePath, payloadPath, uploadPath]);
-  let examRequirements = [];
+  let appendedExamRequirements = [];
+  let allExamRequirements = [];
   const imported = await createImportFromWorkbook({
     importId,
     uploadPath,
@@ -1402,7 +1404,7 @@ async function createFanweiRequirementImportFromPayload(payload, req, options = 
     buildTaskConfig: ({ parsed, uploadId, existingTasks }) => {
       const otherProjectTasks = (existingTasks || []).filter((task) => task?.taskId !== existingTask?.taskId);
       const projectRequirementConfigs = [];
-      examRequirements = requirementFieldsList.map((fields, index) => {
+      appendedExamRequirements = requirementFieldsList.map((fields, index) => {
         const generated = buildAutoConfigFromRequirement(
           autoConfigRequirementFromFields(fields, parsed.config || {}),
           { customerName: parsed.config?.customerName || "" },
@@ -1410,7 +1412,7 @@ async function createFanweiRequirementImportFromPayload(payload, req, options = 
         let config = {
           ...(index === 0 ? parsed.config : {}),
           ...generated.config,
-          apiKeyProfileId: parsed.config?.apiKeyProfileId || generated.config?.apiKeyProfileId || "",
+          apiKeyProfileId: existingTask?.config?.apiKeyProfileId || parsed.config?.apiKeyProfileId || generated.config?.apiKeyProfileId || "",
         };
         config = assignCourseCodesForExamConfig(config, otherProjectTasks, projectRequirementConfigs);
         projectRequirementConfigs.push(config);
@@ -1432,18 +1434,28 @@ async function createFanweiRequirementImportFromPayload(payload, req, options = 
           uploadId: index === 0 ? uploadId : "",
         };
       });
-      return buildFanweiProjectConfig({
+      const projectConfig = buildFanweiProjectConfig({
         fanwei,
         model,
         parsed,
         filename: baseName,
         uploadId,
-        requirements: examRequirements,
+        requirements: appendedExamRequirements,
         previousConfig: existingTask?.config || {},
       });
+      allExamRequirements = projectConfig.examRequirements;
+      return projectConfig;
     },
   });
-  return { ...imported, fanwei: model, examRequirements, workbookPath: uploadPath, projectReused: Boolean(existingTask) };
+  return {
+    ...imported,
+    fanwei: model,
+    examRequirements: allExamRequirements,
+    appendedRequirementStartIndex,
+    appendedRequirementCount: appendedExamRequirements.length,
+    workbookPath: uploadPath,
+    projectReused: Boolean(existingTask),
+  };
 }
 
 async function handleFanweiRequirementImport(req, res) {
@@ -4022,10 +4034,12 @@ async function handleCreateJob(req, res) {
     return badRequest(res, "缺少 uploadId 或 taskId");
   }
   let importRecord = null;
+  let taskForJob = null;
   let requirementIndex = 0;
   if (payload.taskId) {
     const task = await runTaskState("get", { taskId: payload.taskId });
     if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+    taskForJob = task;
     const requirements = taskExamRequirements(task);
     if (requirements.length) {
       requirementIndex = Number(payload.requirementIndex ?? 0);
@@ -4060,8 +4074,8 @@ async function handleCreateJob(req, res) {
     return badRequest(res, "需求单缺少考试名称或考试时间，请重新导入并检查表格。");
   }
 
-  const storedLogin = getYikaoLoginForRequest(req);
-  const login = auth.enabled ? storedLogin : { ...storedLogin, ...(payload.login || {}) };
+  const storedLogin = taskForJob ? getYikaoLoginForTask(taskForJob) : getYikaoLoginForRequest(req);
+  const login = taskForJob || auth.enabled ? storedLogin : { ...storedLogin, ...(payload.login || {}) };
   if (!login.url || !login.username || !login.password) {
     return badRequest(res, "请先填写并保存后台登录配置。");
   }

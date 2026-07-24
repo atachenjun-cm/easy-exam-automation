@@ -567,6 +567,9 @@ test("exam list is task-aggregated and exam detail owns dual session cards", () 
   assert.ok(html.includes("<th>配置进度</th>"));
   assert.ok(html.includes("<th>考试口令</th>"));
   assert.ok(html.includes("function projectNameCell(task)"));
+  assert.ok(html.includes("function sessionSummaries(sessions, label)"));
+  assert.ok(html.includes('sessionSummaries(task.formalSessions, "正式考试")'));
+  assert.ok(html.includes('sessionSummaries(task.trialSessions, "试考")'));
   assert.ok(html.includes("统一口令 ${safeText(unifiedCode)}"));
   assert.ok(html.includes('<td>${projectNameCell(task)}</td>'));
   assert.ok(html.includes(".exam-unified-code { color: var(--text);"));
@@ -575,8 +578,8 @@ test("exam list is task-aggregated and exam detail owns dual session cards", () 
   assert.ok(html.includes('<div class="exam-session-time">${formatSessionTime(session)}</div>'));
   assert.ok(html.includes('title="考生数"><svg viewBox="0 0 24 24" aria-hidden="true"'));
   assert.ok(html.includes('title="班级数"><svg viewBox="0 0 24 24" aria-hidden="true"'));
-  assert.ok(html.includes('<td>${sessionSummary(task.formalSession, "正式考试")}</td>'));
-  assert.ok(html.includes('<td>${sessionSummary(task.trialSession, "试考")}</td>'));
+  assert.equal(html.includes('<td>${sessionSummary(task.formalSession, "正式考试")}</td>'), false);
+  assert.equal(html.includes('<td>${sessionSummary(task.trialSession, "试考")}</td>'), false);
   assert.ok(html.includes('class="exam-link-button task-detail-btn" data-task-id="${safeText(task.taskId)}" type="button">查看详情</button>'));
   assert.ok(html.includes(".exam-link-button"));
   assert.equal(html.includes('data-action="refresh" type="button" title="刷新" aria-label="刷新"'), false);
@@ -1285,6 +1288,7 @@ test("dark theme adapts project source workflow and dialog cards", () => {
   assert.match(html, /:root\[data-theme="dark"\] \.operation-detail-modal \.account-editor-body\s*\{[^}]*background:\s*rgba\(17, 22, 31, 0\.28\)/s);
   assert.match(html, /:root\[data-theme="dark"\] button\.project-source-item:hover,[\s\S]*\.operation-workflow-step:hover\s*\{[^}]*background:\s*var\(--panel-soft\)/s);
   assert.match(html, /:root\[data-theme="dark"\] \.operation-workflow-step\[aria-selected="true"\]\s*\{[^}]*background:\s*rgba\(10, 132, 255, 0\.14\)/s);
+  assert.match(html, /:root\[data-theme="dark"\] \.project-source-icon\.examRequirement\s*\{[^}]*border-color:\s*rgba\(10, 132, 255, 0\.36\)[^}]*background:\s*rgba\(10, 132, 255, 0\.14\)/s);
   assert.match(html, /:root\[data-theme="dark"\] \.operation-param-item,[\s\S]*\.operation-task-note\s*\{[^}]*background:\s*var\(--project-glass-raised\)/s);
   assert.match(html, /:root\[data-theme="dark"\] \.workflow-source-badge\.easy_exam_requirement\s*\{[^}]*color:\s*var\(--green\)/s);
 });
@@ -2456,7 +2460,9 @@ test("fanwei read preview stays transient until user generates the requirement",
     "async function enterFanweiAutoConfig(data, serialNo)",
   );
   assert.ok(acceptFunction.includes("renderFanweiModel"));
-  assert.ok(acceptFunction.includes("installAutoConfigRequirements(data.examRequirements"));
+  assert.ok(acceptFunction.includes("installAutoConfigRequirements("));
+  assert.ok(acceptFunction.includes("data.examRequirements || []"));
+  assert.ok(acceptFunction.includes("appendedStartIndex"));
   assert.equal(acceptFunction.includes('router.navigate("/auto-config")'), false);
   assert.ok(acceptFunction.includes("份需求单"));
 
@@ -2667,7 +2673,8 @@ test("auto configuration restores the persisted EasyExam requirement by project 
   assert.ok(html.includes("async function loadAutoConfigProject()"));
   assert.ok(html.includes('new URLSearchParams(window.location.search).get("projectId")'));
   assert.ok(html.includes("const requirements = projectExamRequirements(task)"));
-  assert.ok(html.includes("installAutoConfigRequirements(requirements, data)"));
+  assert.ok(html.includes("installAutoConfigRequirements(requirements, data, initialRequirementIndex)"));
+  assert.ok(html.includes("pendingRequirementIndex"));
   assert.ok(html.includes("AutoConfigPage({ documentObject: document, loadProject: loadAutoConfigProject })"));
   assert.ok(html.includes("requirementIndex: uiState.autoConfigRequirementIndex"));
   assert.ok(html.includes("startAutoConfigRequirement(nextIndex)"));

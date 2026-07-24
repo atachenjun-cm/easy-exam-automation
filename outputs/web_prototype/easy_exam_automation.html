@@ -4279,6 +4279,8 @@
       .exam-name-button { border: 0; padding: 0; background: transparent; color: var(--blue); font: inherit; font-weight: 700; cursor: pointer; text-align: left; }
       .exam-name-button:hover { text-decoration: underline; }
       .exam-unified-code { color: var(--text); font-size: 12px; font-weight: 800; white-space: nowrap; }
+      .exam-session-stack { display: grid; gap: 12px; }
+      .exam-session-stack .exam-session-summary + .exam-session-summary { padding-top: 12px; border-top: 1px solid var(--line); }
       .exam-session-summary { min-width: 220px; line-height: 1.55; }
       .exam-session-summary strong { display: block; color: var(--text); font-weight: 800; }
       .exam-session-time { margin-top: 4px; color: var(--text); font-weight: 800; white-space: nowrap; }
@@ -7425,16 +7427,24 @@
           </svg>`;
         }
 
-        function sessionSummary(session, label) {
+        function sessionSummary(session, label, showRequirement = false) {
           if (!session) return `<div class="exam-session-summary exam-session-empty">${label}：尚未创建</div>`;
+          const requirementLabel = showRequirement ? `需求单 ${Number(session.requirementIndex || 0) + 1} · ` : "";
           return `<div class="exam-session-summary">
-            <strong>${safeText(session.name || label)}（ID:${safeText(session.session_id || "--")}）</strong>
+            <strong>${safeText(requirementLabel)}${safeText(session.name || label)}（ID:${safeText(session.session_id || "--")}）</strong>
             <div class="exam-session-time">${formatSessionTime(session)}</div>
             <div class="exam-session-counts">
               <span class="exam-session-count" title="考生数"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" fill="currentColor"/><path d="M4.5 21a7.5 7.5 0 0 1 15 0" fill="currentColor"/></svg>${Number(session.candidateCount || 0)}</span>
               <span class="exam-session-count class-count-icon" title="班级数"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 11a3.8 3.8 0 1 0 0-7.6 3.8 3.8 0 0 0 0 7.6Z" fill="currentColor"/><path d="M5.8 21a6.2 6.2 0 0 1 12.4 0" fill="currentColor"/><path d="M5.4 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" fill="currentColor" opacity=".75"/><path d="M.8 21a4.9 4.9 0 0 1 7.5-4.1" fill="currentColor" opacity=".75"/><path d="M18.6 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" fill="currentColor" opacity=".75"/><path d="M15.7 16.9A4.9 4.9 0 0 1 23.2 21" fill="currentColor" opacity=".75"/></svg>${Number(session.roomCount || 0)}</span>
             </div>
           </div>`;
+        }
+
+        function sessionSummaries(sessions, label) {
+          const items = Array.isArray(sessions) ? sessions : [];
+          if (!items.length) return sessionSummary(null, label);
+          const showRequirement = items.length > 1 || items.some((session) => Number(session.requirementIndex || 0) > 0);
+          return `<div class="exam-session-stack">${items.map((session) => sessionSummary(session, label, showRequirement)).join("")}</div>`;
         }
 
         function projectNameCell(task) {
@@ -7454,8 +7464,8 @@
           ? exams.map((task) => `
               <tr class="exam-list-row">
                 <td>${projectNameCell(task)}</td>
-                <td>${sessionSummary(task.formalSession, "正式考试")}</td>
-                <td>${sessionSummary(task.trialSession, "试考")}</td>
+                <td>${sessionSummaries(task.formalSessions, "正式考试")}</td>
+                <td>${sessionSummaries(task.trialSessions, "试考")}</td>
                 <td>${safeText(task.sourceAccount || "未记录")}</td>
                 <td>${rowStatus(task)}</td>
                 <td><div class="view-actions exam-row-actions"><button class="exam-link-button task-detail-btn" data-task-id="${safeText(task.taskId)}" type="button">查看详情</button></div></td>
@@ -13281,7 +13291,7 @@
         }
       }
 
-      function installAutoConfigRequirements(requirements = [], baseData = {}) {
+      function installAutoConfigRequirements(requirements = [], baseData = {}, initialRequirementIndex = 0) {
         const snapshots = Array.isArray(requirements) && requirements.length
           ? requirements
           : [{
@@ -13295,7 +13305,7 @@
         uiState.autoConfigRequirements = snapshots;
         uiState.autoConfigRequirementIndex = 0;
         uiState.autoConfigBase = { ...baseData };
-        selectAutoConfigRequirement(0);
+        selectAutoConfigRequirement(initialRequirementIndex);
       }
 
       function selectAutoConfigRequirement(requirementIndex) {
@@ -13664,10 +13674,18 @@
       async function acceptFanweiImport(data, serialNo) {
         renderFanweiModel(data.fanwei || {});
         uiState.taskId = data.taskId || "";
-        installAutoConfigRequirements(data.examRequirements || [], { ...data, filename: data.filename || "泛微需求单.xlsx" });
+        const appendedStartIndex = Math.max(Number(data.appendedRequirementStartIndex || 0), 0);
+        installAutoConfigRequirements(
+          data.examRequirements || [],
+          { ...data, filename: data.filename || "泛微需求单.xlsx" },
+          appendedStartIndex,
+        );
         fanweiProjectCardBtn.disabled = false;
         fanweiImportBtn.disabled = false;
-        fanweiImportState.textContent = `已生成 ${uiState.autoConfigRequirements.length} 份需求单（易考）。可保存项目卡片，或直接进入自动配置。`;
+        const appendedCount = Math.max(Number(data.appendedRequirementCount || 0), 1);
+        fanweiImportState.textContent = data.projectReused
+          ? `已在原项目新增 ${appendedCount} 份需求单，当前为需求单 ${appendedStartIndex + 1}。`
+          : `已生成 ${uiState.autoConfigRequirements.length} 份需求单（易考）。可保存项目卡片，或直接进入自动配置。`;
       }
 
       async function enterFanweiAutoConfig(data, serialNo) {
@@ -14038,7 +14056,7 @@
         if (!response.ok) throw new Error(data.error || "项目卡片生成失败");
         await acceptFanweiImport(data, serialNo);
         fanweiImportState.textContent = data.projectReused
-          ? `已更新流水号 ${serialNo} 对应的项目卡片，正在打开详情。`
+          ? `已向流水号 ${serialNo} 对应的原项目新增需求单，正在打开详情。`
           : `项目卡片已生成，正在打开详情。`;
         await router.navigate(`/projects/${encodeURIComponent(data.taskId)}`);
       }
@@ -14048,7 +14066,12 @@
         if (!projectId) return;
         const task = await fetchJson(`/api/tasks/${encodeURIComponent(projectId)}?_=${Date.now()}`);
         const requirements = projectExamRequirements(task);
-        const requirement = requirements[0] || {};
+        const createdFormalIndexes = new Set((task.sessions || [])
+          .filter((session) => session.sessionType === "formal" && String(session.session_id || "").trim())
+          .map((session) => Number(session.requirementIndex || 0)));
+        const pendingRequirementIndex = requirements.findIndex((_, index) => !createdFormalIndexes.has(index));
+        const initialRequirementIndex = pendingRequirementIndex >= 0 ? pendingRequirementIndex : 0;
+        const requirement = requirements[initialRequirementIndex] || {};
         if (!requirements.length || !requirement.config || !Object.keys(requirement.config).length) {
           throw new Error("当前项目没有可恢复的易考需求单，请回到项目卡重新生成需求单。");
         }
@@ -14066,7 +14089,7 @@
           },
         };
         uiState.taskId = task.taskId;
-        installAutoConfigRequirements(requirements, data);
+        installAutoConfigRequirements(requirements, data, initialRequirementIndex);
         addLog(`已从项目卡恢复 ${requirements.length} 份易考需求单，项目编号：${task.taskId}`, "success");
       }
 

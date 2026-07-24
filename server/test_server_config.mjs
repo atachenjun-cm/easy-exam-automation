@@ -179,8 +179,11 @@ test("Fanwei project cards persist dual snapshots and reuse the same serial card
   assert.ok(serverSource.includes("existingTaskId: existingTask?.taskId || \"\""));
   assert.ok(serverSource.includes("projectReused: Boolean(existingTask)"));
   assert.ok(serverSource.includes("payload.requirementFieldsList"));
-  assert.ok(serverSource.includes("examRequirements = requirementFieldsList.map"));
+  assert.ok(serverSource.includes("appendedExamRequirements = requirementFieldsList.map"));
   assert.ok(serverSource.includes("editableRequirementFieldsRecord(fields)"));
+  assert.ok(serverSource.includes("appendedRequirementStartIndex"));
+  assert.ok(serverSource.includes("allExamRequirements"));
+  assert.ok(serverSource.includes("previousConfig: existingTask?.config || {}"));
 });
 
 test("project workflow route returns sourced batch personnel content and archive state", () => {
@@ -231,6 +234,7 @@ test("auto configuration jobs can resume from a persisted project requirement", 
   assert.ok(serverSource.includes("requirementIndex: Number(importRecord.requirementIndex || 0)"));
   assert.ok(serverSource.includes("requirementIndex: job.requirementIndex"));
   assert.ok(serverSource.includes("requirementIndex: Number(session.requirementIndex || 0)"));
+  assert.ok(handler.includes("getYikaoLoginForTask(taskForJob)"));
 });
 
 test("deleting a console user removes that user's EasyExam account settings", () => {
@@ -239,8 +243,8 @@ test("deleting a console user removes that user's EasyExam account settings", ()
 });
 
 test("authenticated automation jobs use saved user settings instead of request overrides", () => {
-  assert.ok(serverSource.includes("const storedLogin = getYikaoLoginForRequest(req);"));
-  assert.ok(serverSource.includes("const login = auth.enabled ? storedLogin : { ...storedLogin, ...(payload.login || {}) };"));
+  assert.ok(serverSource.includes("const storedLogin = taskForJob ? getYikaoLoginForTask(taskForJob) : getYikaoLoginForRequest(req);"));
+  assert.ok(serverSource.includes("const login = taskForJob || auth.enabled ? storedLogin : { ...storedLogin, ...(payload.login || {}) };"));
 });
 
 test("tasks pin their creation API key profile and task operations reuse it", () => {
