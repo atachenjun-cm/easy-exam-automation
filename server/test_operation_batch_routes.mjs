@@ -170,7 +170,7 @@ test("operation batch create route surfaces initialization failure as update_fai
   assert.match(source, /operationBatchCode: error\.operationBatchCode/);
 });
 
-test("rejects reducing Easy Exam requirements after batch creation", async () => {
+test("appends Easy Exam requirements after batch creation without replacing existing schedules", async () => {
   const runtimeDir = mkdtempSync(path.join(os.tmpdir(), "easy-exam-operation-batch-routes-"));
   const taskId = "batch-schedule-delete-task";
   seedTask(runtimeDir, {
@@ -195,22 +195,25 @@ test("rejects reducing Easy Exam requirements after batch creation", async () =>
       body: JSON.stringify(fanweiImportPayload({
         serialNo: "R0031682",
         requirementFieldsList: [
-          { "考试名称": "日程1", "考试日期时间": "2026/08/22 09:00 - 2026/08/22 11:00" },
+          { "考试名称": "日程3", "考试日期时间": "2026/08/24 09:00 - 2026/08/24 11:00" },
         ],
       })),
     });
-    assert.equal(response.status, 409);
-    assert.deepEqual(await response.json(), {
-      error: "批次创建后不允许删除已对应运控日程的易考需求单。",
-      errorCode: "OPERATION_BATCH_SCHEDULE_DELETE_FORBIDDEN",
-    });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.appendedRequirementStartIndex, 2);
+    assert.equal(body.appendedRequirementCount, 1);
+    assert.deepEqual(
+      body.examRequirements.map((requirement) => requirement.fields["考试名称"]),
+      ["日程1", "日程2", "日程3"],
+    );
   } finally {
     await stopServer(child);
     rmSync(runtimeDir, { recursive: true, force: true });
   }
 });
 
-test("rejects reducing Easy Exam requirements when only the nested batch code is valid", async () => {
+test("appends Easy Exam requirements when only the nested batch code is valid", async () => {
   const runtimeDir = mkdtempSync(path.join(os.tmpdir(), "easy-exam-operation-batch-routes-"));
   const taskId = "nested-batch-schedule-delete-task";
   seedTask(runtimeDir, {
@@ -236,11 +239,14 @@ test("rejects reducing Easy Exam requirements when only the nested batch code is
       body: JSON.stringify(fanweiImportPayload({
         serialNo: "R0031683",
         requirementFieldsList: [
-          { "考试名称": "日程1", "考试日期时间": "2026/08/22 09:00 - 2026/08/22 11:00" },
+          { "考试名称": "日程3", "考试日期时间": "2026/08/24 09:00 - 2026/08/24 11:00" },
         ],
       })),
     });
-    assert.equal(response.status, 409);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.appendedRequirementStartIndex, 2);
+    assert.equal(body.examRequirements.length, 3);
   } finally {
     await stopServer(child);
     rmSync(runtimeDir, { recursive: true, force: true });

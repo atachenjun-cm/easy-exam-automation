@@ -1,5 +1,5 @@
 export const PROTECTED_BASE_COMMIT =
-  "d4fb619512e5e8227a6c397c7c19b05c2b1daddd";
+  "27e65133bfbbb81fd50817a54f2e28c56277389c";
 
 export const PROTECTED_EXACT_FILES = [
   "server/fanwei_auto_read.mjs",
@@ -41,25 +41,6 @@ export const PROTECTED_SENTINELS = {
   ],
 };
 
-const TASK4_FANWEI_IMPORT_GUARD_CHANGE = {
-  name: "Task 4 synced schedule deletion guard",
-  current: `  const existingOperationBatchCode = [
-    existingTask?.config?.operationBatchCode,
-    existingTask?.config?.operationBatch?.code,
-  ].find((code) => operationBatchCodeIsValid(code)) || "";
-  const existingRequirementCount = Array.isArray(existingTask?.config?.examRequirements)
-    ? existingTask.config.examRequirements.length
-    : 0;
-  if (operationBatchCodeIsValid(existingOperationBatchCode) && requirementFieldsList.length < existingRequirementCount) {
-    const error = new Error("批次创建后不允许删除已对应运控日程的易考需求单。");
-    error.status = 409;
-    error.errorCode = "OPERATION_BATCH_SCHEDULE_DELETE_FORBIDDEN";
-    throw error;
-  }
-`,
-  baseline: "",
-};
-
 const TASK4_FANWEI_IMPORT_ERROR_MAPPING_CHANGE = {
   name: "Task 4 Fanwei import conflict error mapping",
   current: `  try {
@@ -91,12 +72,7 @@ export const PROTECTED_SHARED_REGIONS = {
     { name: "auto-config job state", kind: "js-block", startAnchor: "function createJob(importRecord, login) {" },
     { name: "auto-config progress events", kind: "js-block", startAnchor: "function pushEvent(job, evt) {" },
     { name: "Fanwei preview handler", kind: "js-block", startAnchor: "async function handleFanweiRequirementPreview(req, res) {" },
-    {
-      name: "Fanwei import task creation",
-      kind: "allowlisted-js-block",
-      startAnchor: "async function createFanweiRequirementImportFromPayload(payload, req, options = {}) {",
-      allowedChanges: [TASK4_FANWEI_IMPORT_GUARD_CHANGE],
-    },
+    { name: "Fanwei import task creation", kind: "js-block", startAnchor: "async function createFanweiRequirementImportFromPayload(payload, req, options = {}) {" },
     {
       name: "Fanwei import handler",
       kind: "allowlisted-js-block",
