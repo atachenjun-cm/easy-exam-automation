@@ -19,12 +19,95 @@ test("content email reads the same configured requirement database as the requir
 test("server wires operation collaboration and content email endpoints", () => {
   assert.match(serverSource, /from "\.\/operation_batch\.mjs"/);
   assert.match(serverSource, /from "\.\/operation_batch_runner\.mjs"/);
+  assert.match(serverSource, /runOperationBatchReconciliation/);
   assert.match(serverSource, /from "\.\/operation_console_env\.mjs"/);
   assert.match(serverSource, /from "\.\/content_requirement_email\.mjs"/);
   assert.match(serverSource, /\/api\/email\/settings/);
   assert.match(serverSource, /\/api\/operation-console\/environment/);
   assert.match(serverSource, /operation-batch\\\/create/);
+  assert.match(serverSource, /operation-batch\\\/reconcile/);
   assert.match(serverSource, /content-requirement-email/);
+});
+
+test("server wires exact personnel task routes to one environment-bound service", () => {
+  assert.match(serverSource, /from "\.\/operation_personnel_task_service\.mjs"/);
+  assert.match(serverSource, /from "\.\/operation_personnel_task_runner\.mjs"/);
+  assert.match(
+    serverSource,
+    /environment: process\.env\.OPERATION_CONSOLE_ENVIRONMENT \|\| ""/,
+  );
+  assert.match(serverSource, /coordinator: operationBatchCoordinator/);
+  assert.match(serverSource, /updateTaskConfig: \(taskId, config\) => runTaskState\("update_config"/);
+  assert.match(serverSource, /readRequirement: \(requestId\) => requestId/);
+  for (const route of [
+    "operation-personnel-task$/",
+    "operation-personnel-task\\/preview$/",
+    "operation-personnel-task\\/send$/",
+    "operation-personnel-task\\/attempts\\/([^/]+)$/",
+    "operation-personnel-task\\/recheck$/",
+  ]) {
+    assert.ok(serverSource.includes(route), `missing exact personnel route: ${route}`);
+  }
+  const sendHandler = serverSource.slice(
+    serverSource.indexOf("async function handleOperationPersonnelTaskSend"),
+    serverSource.indexOf("const operationPersonnelCheckpointOrder"),
+  );
+  assert.ok(sendHandler.includes("return json(res, 202"));
+  assert.equal(sendHandler.includes("payload.environment"), false);
+  const recheckHandler = serverSource.slice(
+    serverSource.indexOf("async function handleOperationPersonnelTaskRecheck"),
+    serverSource.indexOf("async function operationBatchLockConflictResponse"),
+  );
+  assert.ok(recheckHandler.includes("operationPersonnelTaskRecheckResponse(result)"));
+  assert.equal(recheckHandler.includes("json(res, 200, result)"), false);
+  const checkpointOrder = serverSource.slice(
+    serverSource.indexOf("const operationPersonnelCheckpointOrder"),
+    serverSource.indexOf("function operationPersonnelAttemptResponse"),
+  );
+  assert.ok(checkpointOrder.includes('"verify_exam_schedules"'));
+  assert.equal(checkpointOrder.includes('"sync_exam_schedules"'), false);
+});
+
+test("server wires operation batch update state preview start and attempt routes", () => {
+  assert.match(serverSource, /from "\.\/operation_batch_update_service\.mjs"/);
+  assert.match(serverSource, /createOperationBatchUpdateService/);
+  assert.match(serverSource, /createOperationBatchUpdateApi/);
+  assert.match(serverSource, /inspectOperationBatchManagedSnapshot/);
+  assert.match(serverSource, /runOperationBatchManagedUpdate/);
+  assert.match(serverSource, /coordinator: operationBatchCoordinator/);
+  assert.match(
+    serverSource,
+    /updateTaskConfig: \(taskId, config\) => runTaskState\("update_config", \{ taskId, config \}\)/,
+  );
+  for (const route of [
+    "operation-batch\\/update-state$/",
+    "operation-batch\\/update-preview$/",
+    "operation-batch\\/update$/",
+    "operation-batch\\/update-attempts\\/([^/]+)$/",
+  ]) {
+    assert.ok(serverSource.includes(route), `missing exact operation batch update route: ${route}`);
+  }
+  const serviceWiring = serverSource.slice(
+    serverSource.indexOf("function getOperationBatchUpdateApi"),
+    serverSource.indexOf("function getOperationPersonnelTaskService"),
+  );
+  assert.ok(serviceWiring.includes(
+    "assertAutomationEnabled: assertOperationBatchUpdateAutomationEnabled",
+  ));
+  const attemptHandler = serverSource.slice(
+    serverSource.indexOf("async function handleOperationBatchUpdateAttempt"),
+    serverSource.indexOf("async function operationBatchLockConflictResponse"),
+  );
+  assert.equal(attemptHandler.includes("assertOperationBatchUpdateAutomationEnabled"), false);
+});
+
+test("task state subprocess decodes UTF-8 across stdout chunk boundaries", () => {
+  const runTaskStateBlock = serverSource.slice(
+    serverSource.indexOf("async function runTaskState"),
+    serverSource.indexOf("async function runRequirementState"),
+  );
+  assert.ok(runTaskStateBlock.includes('child.stdout.setEncoding("utf8")'));
+  assert.ok(runTaskStateBlock.includes('child.stderr.setEncoding("utf8")'));
 });
 
 test("global email and operation environment mutations require administrators", () => {
@@ -52,15 +135,61 @@ test("global email and operation environment mutations require administrators", 
   assert.ok(requireAdminBlock.includes('role: "admin"'));
 });
 
-test("operation batch creation uses a per-task guard released in finally", () => {
+test("operation batch create reconcile manual and delete execute through the fresh-task coordinator", () => {
+  assert.ok(serverSource.includes('from "./operation_batch_coordinator.mjs"'));
+  const handlers = [
+    serverSource.slice(
+      serverSource.indexOf("async function handleTaskHide"),
+      serverSource.indexOf("function operationBatchDraftOverridesFromTask"),
+    ),
+    serverSource.slice(
+      serverSource.indexOf("async function handleOperationBatchCreate"),
+      serverSource.indexOf("async function handleOperationBatchReconcile"),
+    ),
+    serverSource.slice(
+      serverSource.indexOf("async function handleOperationBatchReconcile"),
+      serverSource.indexOf("async function handleOperationBatchResult"),
+    ),
+    serverSource.slice(
+      serverSource.indexOf("async function handleOperationBatchResult"),
+      serverSource.indexOf("async function readEmailSettings"),
+    ),
+  ];
+  for (const handler of handlers) {
+    assert.ok(handler.includes("withFreshOperationBatchTask"));
+    assert.equal(/runTaskState\("get", \{ taskId \}\) \|\|/.test(handler), false);
+  }
+});
+
+test("operation batch draft POST reads before locking and merges only from the fresh task", () => {
   const handler = serverSource.slice(
+    serverSource.indexOf("async function handleOperationBatchDraft"),
     serverSource.indexOf("async function handleOperationBatchCreate"),
-    serverSource.indexOf("async function handleOperationBatchResult"),
   );
-  assert.ok(serverSource.includes("const operationBatchCreationInFlight = new Set()"));
-  assert.ok(handler.includes("acquireOperationBatchCreation(operationBatchCreationInFlight, taskId)"));
-  assert.ok(handler.includes("finally"));
-  assert.ok(handler.includes("releaseOperationBatchCreation(operationBatchCreationInFlight, taskId)"));
+  const getBranchIndex = handler.indexOf('if (req.method !== "POST")');
+  const bodyIndex = handler.indexOf("await readBody(req)");
+  const coordinatorIndex = handler.indexOf("withFreshOperationBatchTask");
+
+  assert.ok(getBranchIndex >= 0);
+  assert.ok(bodyIndex > getBranchIndex);
+  assert.ok(coordinatorIndex > bodyIndex);
+  assert.ok(handler.includes("operationBatchCoordinator.acquireTask(taskId)"));
+  assert.ok(handler.includes("buildOperationBatchDraft(freshTask, payload)"));
+  assert.ok(handler.includes("const current = freshTask.config?.operationBatch || {}"));
+  assert.equal(handler.slice(coordinatorIndex).includes("task.config?.operationBatch"), false);
+});
+
+test("manual operation batch result reads its request body before acquiring the task lock", () => {
+  const handler = serverSource.slice(
+    serverSource.indexOf("async function handleOperationBatchResult"),
+    serverSource.indexOf("async function readEmailSettings"),
+  );
+  const bodyIndex = handler.indexOf("await readBody(req)");
+  const coordinatorIndex = handler.indexOf("withFreshOperationBatchTask");
+
+  assert.ok(bodyIndex >= 0);
+  assert.ok(coordinatorIndex > bodyIndex);
+  assert.equal(handler.slice(coordinatorIndex).includes("await readBody(req)"), false);
 });
 
 test("server listen host can be configured for LAN deployment", () => {
@@ -187,12 +316,21 @@ test("Fanwei project cards persist dual snapshots and reuse the same serial card
 });
 
 test("project workflow route returns sourced batch personnel content and archive state", () => {
-  assert.ok(serverSource.includes("async function handleProjectWorkflow(taskId, req, res)"));
-  assert.ok(serverSource.includes("buildProjectWorkflow(task, batchDraft)"));
+  const handler = serverSource.slice(
+    serverSource.indexOf("async function handleProjectWorkflow(taskId, req, res)"),
+    serverSource.indexOf("function editableStringRecord"),
+  );
+  assert.ok(handler.includes("buildOperationBatchDraft(task, operationBatchDraftOverridesFromTask(task))"));
+  assert.ok(handler.includes("buildProjectWorkflow(task, batchDraft)"));
+  assert.ok(handler.includes("task: withOperationBatchNameEditorDefaults(task)"));
   assert.ok(serverSource.includes("/operation-workflow$/"));
 });
 
 test("project source snapshots can be edited and rebuild downstream workflow data", () => {
+  const sourceSnapshotHandler = serverSource.slice(
+    serverSource.indexOf("async function handleProjectSourceSnapshotUpdate"),
+    serverSource.indexOf("async function handleFanweiBridgeToken"),
+  );
   assert.ok(serverSource.includes("async function handleProjectSourceSnapshotUpdate(taskId, req, res)"));
   assert.ok(serverSource.includes("/source-snapshot$/"));
   assert.ok(serverSource.includes("normalizeFanweiBusinessRequirement(raw, { requirementFields })"));
@@ -218,6 +356,10 @@ test("project source snapshots can be edited and rebuild downstream workflow dat
   assert.ok(serverSource.includes("sourceKey: fanweiSource.serialNo"));
   assert.ok(serverSource.includes('projectName: source === "fanwei"'));
   assert.ok(serverSource.includes('runTaskState("update_config", {'));
+  assert.equal(
+    (sourceSnapshotHandler.match(/reviewStatus: "auto_confirmed"/g) || []).length,
+    2,
+  );
 });
 
 test("auto configuration jobs can resume from a persisted project requirement", () => {
@@ -450,6 +592,13 @@ test("candidate import and auto rooms write back task detail state", () => {
     serverSource.indexOf("async function handleTaskHide"),
   );
   assert.ok(detailHandler.includes("syncTaskDetailSessionState(req, task)"));
+  const responseEnrichment = [
+    "return json(res, 200, {",
+    "    ...withOperationBatchNameEditorDefaults(enrichedTask),",
+    "    sessionChangeFeatureEnabled,",
+    "  });",
+  ].join("\n");
+  assert.ok(detailHandler.includes(responseEnrichment));
 });
 
 test("task progress updates stay isolated by requirement index", () => {

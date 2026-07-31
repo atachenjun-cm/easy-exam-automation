@@ -1,3 +1,5 @@
+import { OPERATION_BATCH_RECONCILIATION_REQUIRED } from "./operation_batch_runner.mjs";
+
 function text(value) {
   return String(value ?? "").trim();
 }
@@ -32,15 +34,6 @@ function scheduleDates(business = {}) {
   const range = text(business.formal_exam_time_range);
   const matches = [...range.matchAll(/\d{4}[-/]\d{1,2}[-/]\d{1,2}/g)].map((item) => item[0].replaceAll("/", "-"));
   return { start: matches[0] || "", end: matches[matches.length - 1] || matches[0] || "" };
-}
-
-function batchNameFromBusiness(business = {}) {
-  const projectName = text(business.project_name || business.exam_name);
-  const { start } = scheduleDates(business);
-  if (!projectName) return "";
-  if (!start) return projectName;
-  const match = start.match(/^(\d{4})-(\d{1,2})-/);
-  return match ? `${projectName}_${match[1]}年${Number(match[2])}月` : projectName;
 }
 
 function centralVenueNotRequired(value) {
@@ -93,7 +86,7 @@ export function buildOperationBatchDraft(task = {}, overrides = {}) {
     businessDirection: field(business.business_direction, "business_requirement", "业务方向"),
     businessDepartment: field(businessDepartment.value, businessDepartment.source, "业务部归属"),
     businessOwner: field(business.applicant, "business_requirement", "业务负责人"),
-    batchName: field(batchNameFromBusiness(business), "default_rule", "批次名称"),
+    batchName: field(business.batch_name, "business_requirement", "批次名称"),
     projectDepartment: field("项目实施五部", "default_rule", "项目部归属"),
     examStartDate: field(dates.start, "business_requirement", "考试开始日期"),
     examEndDate: field(dates.end, "business_requirement", "考试结束日期"),
@@ -110,7 +103,7 @@ export function buildOperationBatchDraft(task = {}, overrides = {}) {
     remark: field("", "manual", "备注"),
   };
   for (const [key, value] of Object.entries(overrides.fields || {})) {
-    if (!fields[key]) continue;
+    if (key === "batchName" || !fields[key]) continue;
     fields[key] = { ...fields[key], value: text(value), source: "manual" };
   }
   fields.operationTaskSerial.required = true;
@@ -141,10 +134,11 @@ export function buildOperationBatchDraft(task = {}, overrides = {}) {
 export function applyOperationBatchResult(task = {}, result = {}) {
   const code = text(result.operationBatchCode || result.code);
   if (!code) throw new Error("缺少运营批次代码");
+  if (!operationBatchCodeIsValid(code)) throw new Error("运营批次代码格式不合法");
   const current = task.config?.operationBatch || {};
   const events = Array.isArray(current.events) ? current.events.slice() : [];
   events.push({
-    type: "operation_batch_created",
+    type: text(result.eventType || "operation_batch_created"),
     code,
     status: text(result.status || "created_unpublished"),
     at: new Date().toISOString(),
@@ -157,10 +151,69 @@ export function applyOperationBatchResult(task = {}, result = {}) {
       batchGuid: text(result.batchGuid),
       detailUrl: text(result.detailUrl),
       status: text(result.status || "created_unpublished"),
+      errorCode: "",
       errorMessage: "",
       updatedAt: new Date().toISOString(),
       events,
     },
+  };
+}
+
+export function resolveOperationBatchResultWrite(task = {}, result = {}) {
+  const operationBatchCode = text(result.operationBatchCode || result.code);
+  if (!operationBatchCode) throw new Error("缺少运营批次代码");
+  if (!operationBatchCodeIsValid(operationBatchCode)) throw new Error("运营批次代码格式不合法");
+  const existingCodes = [
+    text(task.config?.operationBatchCode),
+    text(task.config?.operationBatch?.code),
+  ];
+  const existingOperationBatchCode = existingCodes.find(operationBatchCodeIsValid)
+    || firstNonEmpty(...existingCodes);
+  if (operationBatchCodeIsValid(existingOperationBatchCode)) {
+    return {
+      status: existingOperationBatchCode === operationBatchCode ? "idempotent" : "conflict",
+      operationBatchCode,
+      existingOperationBatchCode,
+    };
+  }
+  return {
+    status: "apply",
+    operationBatchCode,
+    patch: applyOperationBatchResult(task, result),
+  };
+}
+
+export function operationBatchCodeIsValid(value) {
+  return /^[A-Z]{3}\d{6}$/.test(text(value));
+}
+
+export function operationBatchNeedsReconciliation(task = {}) {
+  const current = task.config?.operationBatch || {};
+  const code = firstNonEmpty(task.config?.operationBatchCode, current.code);
+  if (operationBatchCodeIsValid(code)) return false;
+  if (code) return true;
+  return current.status === "creating"
+    || current.status === "reconciling"
+    || current.status === "reconciliation_required"
+    || current.errorCode === OPERATION_BATCH_RECONCILIATION_REQUIRED
+    || current.errorMessage === "创建完成，但未能从详情页读取批次代码";
+}
+
+export function operationBatchDraftForReconciliation(task = {}) {
+  const savedDraft = task.config?.operationBatch?.draft;
+  if (savedDraft && typeof savedDraft === "object" && !Array.isArray(savedDraft)) {
+    return savedDraft;
+  }
+  return buildOperationBatchDraft(task);
+}
+
+export function operationBatchFailureState(error, externalBatchConfirmed = false) {
+  const reconciliationRequired = externalBatchConfirmed
+    || error?.code === OPERATION_BATCH_RECONCILIATION_REQUIRED;
+  return {
+    status: reconciliationRequired ? "reconciliation_required" : "failed",
+    errorCode: reconciliationRequired ? OPERATION_BATCH_RECONCILIATION_REQUIRED : "",
+    errorMessage: error instanceof Error ? error.message : String(error),
   };
 }
 

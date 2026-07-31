@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { diffOperationPersonnelTaskDrafts } from "./operation_personnel_task.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const html = fs.readFileSync(path.join(rootDir, "outputs/web_prototype/easy_exam_automation.html"), "utf8");
@@ -607,7 +608,11 @@ test("requirement center remains present while exam views change", () => {
 test("project and system views expose the selective PR 5 collaboration controls", () => {
   assert.ok(html.includes('id="projectOperationBatchState"'));
   assert.ok(html.includes('id="operationBatchCreateBtn"'));
+  assert.ok(html.includes('id="operationBatchReconcileBtn"'));
   assert.ok(html.includes('id="operationBatchRecordBtn"'));
+  assert.ok(html.includes('reconciliation_required: "待同步"'));
+  assert.ok(html.includes('sent: "已发送"'));
+  assert.ok(html.includes('/operation-batch/reconcile'));
   assert.ok(html.includes('id="contentRequirementEmailRecipients"'));
   assert.ok(html.includes('id="contentRequirementEmailSendBtn"'));
   assert.ok(html.includes('id="emailSettingsPanel"'));
@@ -620,6 +625,1796 @@ test("project and system views expose the selective PR 5 collaboration controls"
   assert.ok(html.includes('id="examListView"'));
   assert.ok(html.includes('id="candidateImportPanel"'));
   assert.ok(html.includes('id="fanweiRequirementTable"'));
+});
+
+test("operation batch updates expose configuration-console states and exactly one confirmation", () => {
+  assert.ok(html.includes('waiting_schedule: "等待补全日程"'));
+  assert.ok(html.includes('update_available: "可修改"'));
+  assert.ok(html.includes('updating: "修改中"'));
+  assert.ok(html.includes('update_conflict: "修改冲突"'));
+  assert.ok(html.includes('update_failed: "修改失败"'));
+  assert.ok(html.includes('id="operationBatchUpdateBtn"'));
+  assert.ok(html.includes('id="operationBatchUpdateState"'));
+  assert.ok(html.includes('id="operationBatchUpdateConfirmDialog"'));
+  assert.ok(html.includes("/operation-batch/update-state"));
+  assert.ok(html.includes("/operation-batch/update-preview"));
+  assert.ok(html.includes("/operation-batch/update-attempts/"));
+
+  const dialog = sourceBetween(
+    '<dialog class="account-editor-modal operation-detail-modal" id="operationBatchUpdateConfirmDialog"',
+    "\n          </dialog>",
+  );
+  assert.equal((dialog.match(/id="operationBatchUpdateConfirmBtn"/g) || []).length, 1);
+  assert.ok(dialog.includes(">确认按以上内容修改批次</button>"));
+  assert.doesNotMatch(dialog, /<(?:input|textarea|select)\b|contenteditable=/);
+
+  const operationPanel = sourceBetween(
+    '<div class="operation-detail-panel" data-operation-detail="batch"',
+    '<div class="operation-detail-panel" data-operation-detail="personnel"',
+  );
+  assert.equal(operationPanel.includes("operationBatchUpdateConfirmBtn"), false);
+});
+
+test("operation batch update state helpers keep create states separate from update actions", () => {
+  const operationBatchUpdateStatus = compileInlineFunction(
+    "      function operationBatchUpdateStatus(state = {}) {",
+    "\n      function operationBatchUpdateStateFromWorkflow",
+  );
+  const operationBatchUpdateActionState = compileInlineFunction(
+    "      function operationBatchUpdateActionState(state = {}) {",
+    "\n      function operationBatchUpdateMissingCopy",
+    { operationBatchUpdateStatus },
+  );
+  const operationBatchUpdateMissingCopy = compileInlineFunction(
+    "      function operationBatchUpdateMissingCopy(missing = []) {",
+    "\n      function operationBatchUpdateAttemptCopy",
+  );
+  const operationBatchUpdateAttemptCopy = compileInlineFunction(
+    "      function operationBatchUpdateAttemptCopy(attempt = {}) {",
+    "\n      function operationBatchUpdateDisplayValue",
+  );
+  const operationBatchUpdateDisplayValue = compileInlineFunction(
+    "      function operationBatchUpdateDisplayValue(value) {",
+    "\n      function operationBatchUpdateCountdownTransition",
+  );
+  const operationBatchUpdateCountdownTransition = compileInlineFunction(
+    "      function operationBatchUpdateCountdownTransition(attempt = {}) {",
+    "\n      function renderOperationBatchUpdatePreview",
+  );
+
+  assert.equal(operationBatchUpdateStatus({
+    pageStatus: "created_unpublished",
+    state: { status: "waiting_schedule" },
+  }), "waiting_schedule");
+  assert.equal(operationBatchUpdateStatus({
+    pageStatus: "updating",
+    state: { status: "update_available" },
+  }), "updating");
+  assert.equal(operationBatchUpdateStatus({
+    pageStatus: "success",
+    state: { status: "update_available" },
+  }), "update_available");
+  assert.equal(operationBatchUpdateStatus({
+    pageStatus: "success",
+    state: { status: "waiting_schedule" },
+  }), "waiting_schedule");
+  assert.deepEqual(operationBatchUpdateActionState({
+    state: { status: "waiting_schedule" },
+  }), {
+    hidden: true,
+    disabled: true,
+    label: "修改批次信息",
+    readOnly: true,
+  });
+  assert.deepEqual(operationBatchUpdateActionState({
+    state: { status: "update_available" },
+  }), {
+    hidden: false,
+    disabled: false,
+    label: "修改批次信息",
+    readOnly: true,
+  });
+  assert.deepEqual(operationBatchUpdateActionState({
+    pageStatus: "updating",
+  }), {
+    hidden: false,
+    disabled: true,
+    label: "修改中",
+    readOnly: true,
+  });
+  for (const pageStatus of ["update_conflict", "update_failed"]) {
+    assert.deepEqual(operationBatchUpdateActionState({ pageStatus }), {
+      hidden: false,
+      disabled: false,
+      label: "重新预览并核对",
+      readOnly: true,
+    });
+  }
+  assert.equal(
+    operationBatchUpdateMissingCopy([
+      { requirementIndex: 0, fields: ["考试名称"] },
+      { requirementIndex: 1, fields: ["考试日期时间", "结束时间<script>"] },
+    ]),
+    "易考需求单 1：考试名称；易考需求单 2：考试日期时间、结束时间<script>",
+  );
+  assert.equal(
+    operationBatchUpdateAttemptCopy({
+      checkpoint: "applying",
+      remainingSeconds: 2,
+      countdownKind: "next_status_poll",
+    }),
+    "当前检查点：applying · 距离下次状态轮询：2 秒",
+  );
+  assert.equal(
+    operationBatchUpdateAttemptCopy({
+      checkpoint: "manual_review",
+      remainingSeconds: 0,
+      completed: true,
+    }),
+    "当前检查点：manual_review",
+  );
+
+  const operationBatchUpdateBtn = { hidden: true, disabled: true, textContent: "" };
+  const operationBatchUpdateStateText = {
+    hidden: true,
+    textContent: "",
+    innerHTML: "",
+  };
+  const safeText = (value) => String(value ?? "").replace(
+    /[&<>"']/g,
+    (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char],
+  );
+  const renderOperationBatchUpdatePreview = compileInlineFunction(
+    "      function renderOperationBatchUpdatePreview(preview = {}) {",
+    "\n      function operationBatchUpdateConfirmAllowed",
+    {
+      safeText,
+      operationBatchUpdateDisplayValue,
+    },
+  );
+  const renderOperationBatchUpdateState = compileInlineFunction(
+    "      function renderOperationBatchUpdateState(state = {}) {",
+    "\n      function invalidateOperationBatchUpdateRequests",
+    {
+      operationBatchUpdateStatus,
+      operationBatchUpdateActionState,
+      operationBatchUpdateMissingCopy,
+      operationBatchUpdateAttemptCopy,
+      operationBatchUpdateDisplayValue,
+      operationBatchUpdateBtn,
+      operationBatchUpdateStateText,
+      renderOperationBatchUpdatePreview,
+      safeText,
+    },
+  );
+
+  renderOperationBatchUpdateState({
+    pageStatus: "success",
+    state: { status: "update_available" },
+  });
+  assert.equal(operationBatchUpdateBtn.hidden, false);
+  assert.equal(operationBatchUpdateBtn.disabled, false);
+  assert.equal(operationBatchUpdateBtn.textContent, "修改批次信息");
+
+  renderOperationBatchUpdateState({
+    pageStatus: "update_available",
+    state: {
+      status: "update_available",
+      changes: [{
+        path: "examStartDate",
+        label: "概况考试开始日期",
+        before: "2026-08-22",
+        after: "2026-08-23",
+      }],
+    },
+  });
+  assert.match(operationBatchUpdateStateText.innerHTML, /2026-08-22 → 2026-08-23/);
+
+  renderOperationBatchUpdateState({
+    pageStatus: "success",
+    state: {
+      status: "waiting_schedule",
+      missing: [{ requirementIndex: 1, fields: ["考试日期时间"] }],
+    },
+  });
+  assert.equal(operationBatchUpdateBtn.hidden, true);
+  assert.equal(operationBatchUpdateStateText.hidden, false);
+  assert.ok(operationBatchUpdateStateText.innerHTML.includes("等待补全日程"));
+  assert.ok(operationBatchUpdateStateText.innerHTML.includes("易考需求单 2：考试日期时间"));
+
+  assert.deepEqual(operationBatchUpdateCountdownTransition({
+    completed: true,
+    remainingSeconds: 2,
+  }), {
+    attempt: { completed: true, remainingSeconds: 0 },
+    shouldSchedule: false,
+    shouldPoll: false,
+  });
+});
+
+test("operation batch preview renders only escaped server changes by overview and schedule", () => {
+  const operationBatchUpdateDisplayValue = compileInlineFunction(
+    "      function operationBatchUpdateDisplayValue(value) {",
+    "\n      function operationBatchUpdateCountdownTransition",
+  );
+  const renderOperationBatchUpdatePreview = compileInlineFunction(
+    "      function renderOperationBatchUpdatePreview(preview = {}) {",
+    "\n      function operationBatchUpdateConfirmAllowed",
+    {
+      safeText: (value) => String(value ?? "").replace(
+        /[&<>"']/g,
+        (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char],
+      ),
+      operationBatchUpdateDisplayValue,
+    },
+  );
+  const previewHtml = renderOperationBatchUpdatePreview({
+    desiredSnapshot: { batchName: "不应从快照补造<script>" },
+    changes: [
+      { path: "batchName", label: "批次名称", before: "旧批次", after: "新批次<script>" },
+      { path: "examStartDate", label: "考试开始日期", before: "2026-08-22", after: "2026-08-23" },
+      { path: "schedules[0].name", label: "日程 1 · 考试名称", before: "旧考试", after: "新考试", requirementIndex: 0 },
+      { path: "schedules[1]", label: "新增日程 2", before: "", after: "新考试 2026-08-24 09:00–11:00", requirementIndex: 1 },
+    ],
+  });
+
+  assert.ok(previewHtml.includes("批次概况"));
+  assert.ok(previewHtml.includes("日程 1"));
+  assert.ok(previewHtml.includes("新增日程 2"));
+  assert.ok(previewHtml.includes("新批次&lt;script&gt;"));
+  assert.equal(previewHtml.includes("新批次<script>"), false);
+  assert.equal(previewHtml.includes("不应从快照补造"), false);
+  assert.equal((previewHtml.match(/data-operation-batch-change=/g) || []).length, 4);
+
+  const appendedScheduleHtml = renderOperationBatchUpdatePreview({
+    changes: [
+      { path: "schedules[1].name", label: "日程2考试名称", before: "", after: "新增考试", requirementIndex: 1 },
+      { path: "schedules[1].start", label: "日程2开始时间", before: "", after: "2026-08-24T09:00:00", requirementIndex: 1 },
+      { path: "schedules[1].end", label: "日程2结束时间", before: "", after: "2026-08-24T11:00:00", requirementIndex: 1 },
+    ],
+  });
+  assert.ok(appendedScheduleHtml.includes("<h4>新增日程 2</h4>"));
+});
+
+test("operation batch conflict objects render exact stable values with safe escaping", () => {
+  const operationBatchUpdateStatus = compileInlineFunction(
+    "      function operationBatchUpdateStatus(state = {}) {",
+    "\n      function operationBatchUpdateStateFromWorkflow",
+  );
+  const operationBatchUpdateActionState = compileInlineFunction(
+    "      function operationBatchUpdateActionState(state = {}) {",
+    "\n      function operationBatchUpdateMissingCopy",
+    { operationBatchUpdateStatus },
+  );
+  const operationBatchUpdateMissingCopy = compileInlineFunction(
+    "      function operationBatchUpdateMissingCopy(missing = []) {",
+    "\n      function operationBatchUpdateAttemptCopy",
+  );
+  const operationBatchUpdateAttemptCopy = compileInlineFunction(
+    "      function operationBatchUpdateAttemptCopy(attempt = {}) {",
+    "\n      function operationBatchUpdateDisplayValue",
+  );
+  const operationBatchUpdateDisplayValue = compileInlineFunction(
+    "      function operationBatchUpdateDisplayValue(value) {",
+    "\n      function operationBatchUpdateCountdownTransition",
+  );
+  const operationBatchUpdateBtn = { hidden: true, disabled: true, textContent: "" };
+  const operationBatchUpdateStateText = { hidden: true, textContent: "", innerHTML: "" };
+  const safeText = (value) => String(value ?? "").replace(
+    /[&<>"']/g,
+    (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char],
+  );
+  const renderOperationBatchUpdateState = compileInlineFunction(
+    "      function renderOperationBatchUpdateState(state = {}) {",
+    "\n      function invalidateOperationBatchUpdateRequests",
+    {
+      operationBatchUpdateStatus,
+      operationBatchUpdateActionState,
+      operationBatchUpdateMissingCopy,
+      operationBatchUpdateAttemptCopy,
+      operationBatchUpdateDisplayValue,
+      operationBatchUpdateBtn,
+      operationBatchUpdateStateText,
+      safeText,
+    },
+  );
+  const extraSchedule = {
+    requirementIndex: 1,
+    name: "人工日程<script>alert(1)</script>",
+    start: "2026-08-24T09:00:00",
+    end: "2026-08-24T11:00:00",
+  };
+  const missingSchedule = {
+    requirementIndex: 2,
+    name: "缺失日程<img src=x onerror=alert(2)>",
+    start: "2026-08-25T09:00:00",
+    end: "2026-08-25T11:00:00",
+  };
+
+  assert.equal(
+    operationBatchUpdateDisplayValue(extraSchedule),
+    "requirementIndex=1；name=人工日程<script>alert(1)</script>；start=2026-08-24T09:00:00；end=2026-08-24T11:00:00",
+  );
+  assert.equal(
+    operationBatchUpdateDisplayValue({ z: 1, a: { y: 2, x: 3 } }),
+    '{"a":{"x":3,"y":2},"z":1}',
+  );
+
+  renderOperationBatchUpdateState({
+    pageStatus: "update_conflict",
+    errorMessage: "日程结构冲突<script>",
+    differingFields: [
+      { path: "schedules[1]", expected: "", actual: extraSchedule },
+      { path: "schedules[2]", expected: missingSchedule, actual: "" },
+    ],
+  });
+
+  assert.equal(operationBatchUpdateStateText.innerHTML.includes("[object Object]"), false);
+  assert.ok(operationBatchUpdateStateText.innerHTML.includes("requirementIndex=1"));
+  assert.ok(operationBatchUpdateStateText.innerHTML.includes("requirementIndex=2"));
+  assert.ok(operationBatchUpdateStateText.innerHTML.includes("人工日程&lt;script&gt;alert(1)&lt;/script&gt;"));
+  assert.ok(operationBatchUpdateStateText.innerHTML.includes("缺失日程&lt;img src=x onerror=alert(2)&gt;"));
+  assert.equal(operationBatchUpdateStateText.innerHTML.includes("<script>"), false);
+  assert.equal(operationBatchUpdateStateText.innerHTML.includes("<img"), false);
+});
+
+test("operation batch countdown reaches zero before polling and terminal attempts stop", () => {
+  const operationBatchUpdateCountdownTransition = compileInlineFunction(
+    "      function operationBatchUpdateCountdownTransition(attempt = {}) {",
+    "\n      function renderOperationBatchUpdatePreview",
+  );
+  let attempt = {
+    completed: false,
+    remainingSeconds: 2,
+    countdownKind: "next_status_poll",
+  };
+  const visible = [attempt.remainingSeconds];
+  const polls = [];
+
+  for (let tick = 0; tick < 2; tick += 1) {
+    const transition = operationBatchUpdateCountdownTransition(attempt);
+    attempt = transition.attempt;
+    visible.push(attempt.remainingSeconds);
+    polls.push(transition.shouldPoll);
+  }
+
+  assert.deepEqual(visible, [2, 1, 0]);
+  assert.deepEqual(polls, [false, true]);
+  assert.deepEqual(operationBatchUpdateCountdownTransition({
+    completed: true,
+    remainingSeconds: 9,
+  }), {
+    attempt: { completed: true, remainingSeconds: 0 },
+    shouldSchedule: false,
+    shouldPoll: false,
+  });
+
+  const schedulerSource = sourceBetween(
+    "      function scheduleOperationBatchUpdatePoll(taskId, attemptId, requestToken, attempt) {",
+    "\n      async function pollOperationBatchUpdateAttempt",
+  );
+  assert.ok(schedulerSource.includes("operationBatchUpdateRequestIsCurrent(taskId, requestToken)"));
+  assert.ok(schedulerSource.includes("operationBatchUpdateCountdownTransition(attempt)"));
+  assert.ok(schedulerSource.includes("renderOperationBatchUpdateAttempt(transition.attempt)"));
+  assert.ok(schedulerSource.includes("if (transition.shouldPoll)"));
+  assert.match(schedulerSource, /setTimeout\([\s\S]*?1000/);
+});
+
+test("operation batch confirmation is disabled without differences and posts only the preview token", () => {
+  const operationBatchUpdateConfirmAllowed = compileInlineFunction(
+    "      function operationBatchUpdateConfirmAllowed(preview = {}) {",
+    "\n      function operationBatchUpdateConfirmPayload",
+  );
+  const operationBatchUpdateConfirmPayload = compileInlineFunction(
+    "      function operationBatchUpdateConfirmPayload(preview = {}) {",
+    "\n      function operationBatchUpdateTerminalState",
+  );
+
+  assert.equal(operationBatchUpdateConfirmAllowed({
+    previewToken: "preview-token",
+    changes: [],
+  }), false);
+  assert.equal(operationBatchUpdateConfirmAllowed({
+    previewToken: "",
+    changes: [{ path: "batchName" }],
+  }), false);
+  assert.equal(operationBatchUpdateConfirmAllowed({
+    previewToken: "preview-token",
+    changes: [{ path: "batchName" }],
+  }), true);
+  assert.deepEqual(operationBatchUpdateConfirmPayload({
+    previewToken: "preview-token",
+    changes: [{ path: "batchName", after: "客户端伪造" }],
+    desiredSnapshot: { batchName: "客户端伪造" },
+  }), {
+    previewToken: "preview-token",
+  });
+
+  const confirmSource = sourceBetween(
+    "      async function confirmOperationBatchUpdate() {",
+    "\n      function renderOperationBatchUpdateAttempt",
+  );
+  assert.ok(confirmSource.includes("operationBatchUpdateConfirmPayload(preview)"));
+  assert.equal(confirmSource.includes("preview.changes"), false);
+  assert.equal(confirmSource.includes("desiredSnapshot"), false);
+});
+
+test("operation batch update dialog changes cancel to close only after completion", () => {
+  const operationBatchUpdateConfirmCancelBtn = { textContent: "" };
+  const renderOperationBatchUpdateDialogAction = compileInlineFunction(
+    "      function renderOperationBatchUpdateDialogAction(attempt = {}) {",
+    "\n      function renderOperationBatchUpdateAttempt",
+    { operationBatchUpdateConfirmCancelBtn },
+  );
+
+  renderOperationBatchUpdateDialogAction({ completed: false });
+  assert.equal(operationBatchUpdateConfirmCancelBtn.textContent, "取消");
+
+  renderOperationBatchUpdateDialogAction({ completed: true });
+  assert.equal(operationBatchUpdateConfirmCancelBtn.textContent, "关闭");
+
+  const previewSource = sourceBetween(
+    "      async function previewOperationBatchUpdate() {",
+    "\n      async function confirmOperationBatchUpdate",
+  );
+  assert.ok(previewSource.includes("renderOperationBatchUpdateDialogAction({ completed: false })"));
+
+  const attemptSource = sourceBetween(
+    "      function renderOperationBatchUpdateAttempt(attempt = {}) {",
+    "\n      function scheduleOperationBatchUpdatePoll",
+  );
+  assert.ok(attemptSource.includes("renderOperationBatchUpdateDialogAction(attempt)"));
+});
+
+test("operation batch terminal state preserves fresh context and exact conflict evidence", () => {
+  const operationBatchUpdateTerminalState = compileInlineFunction(
+    "      function operationBatchUpdateTerminalState(previous = {}, result = {}) {",
+    "\n      function renderOperationBatchUpdateState",
+  );
+  const task = {
+    taskId: "project-a",
+    config: { operationBatch: { status: "update_conflict" } },
+  };
+  const workflow = { steps: { batch: { status: "update_conflict" } } };
+  const differingFields = [{
+    path: "schedules[0].name",
+    expected: "期望考试",
+    actual: "人工修改<script>",
+  }];
+  const terminal = operationBatchUpdateTerminalState(
+    { pageStatus: "updating", errorMessage: "旧错误" },
+    {
+      completed: true,
+      status: "conflict",
+      checkpoint: "manual_review",
+      task,
+      workflow,
+      error: {
+        message: "保存结果未知，请人工核对",
+        differingFields,
+      },
+    },
+  );
+
+  assert.strictEqual(terminal.task, task);
+  assert.strictEqual(terminal.workflow, workflow);
+  assert.equal(terminal.pageStatus, "update_conflict");
+  assert.equal(terminal.errorMessage, "保存结果未知，请人工核对");
+  assert.deepEqual(terminal.differingFields, differingFields);
+  assert.equal(terminal.attempt.checkpoint, "manual_review");
+
+  const pollSource = sourceBetween(
+    "      async function pollOperationBatchUpdateAttempt(taskId, attemptId, requestToken) {",
+    "\n      function renderOperationPersonnelRequestError",
+  );
+  assert.ok(pollSource.includes("/operation-batch/update-attempts/"));
+  assert.ok(pollSource.includes("operationBatchUpdateTerminalState"));
+  assert.ok(pollSource.includes("applyOperationBatchUpdateFreshContext(result)"));
+  assert.ok(pollSource.includes("scheduleOperationBatchUpdatePoll(taskId, attemptId, requestToken, result)"));
+  assert.equal(pollSource.includes("result.remainingSeconds - 1"), false);
+});
+
+test("API task updates preserve response-only batch defaults only when the incoming property is missing", () => {
+  assert.ok(html.includes("      function mergeProjectTaskResponse(currentTask, incomingTask) {"));
+  const mergeProjectTaskResponse = compileInlineFunction(
+    "      function mergeProjectTaskResponse(currentTask, incomingTask) {",
+    "\n      function applyOperationBatchUpdateFreshContext",
+  );
+  const currentProject = {
+    taskId: "project-a",
+    config: {
+      fanweiSource: {
+        batchNameMode: "auto",
+        batchNameAutoValue: "湖北邮政社招_2026年8月",
+        raw: { fields: { "批次名称": "湖北邮政社招_2026年8月" } },
+      },
+    },
+  };
+  const taskViewState = { currentProject, currentProjectWorkflow: null };
+  const rendered = [];
+  const applyOperationBatchUpdateFreshContext = compileInlineFunction(
+    "      function applyOperationBatchUpdateFreshContext(result = {}) {",
+    "\n      async function loadOperationBatchUpdateState",
+    {
+      taskViewState,
+      mergeProjectTaskResponse,
+      isCurrentProject: (taskId) => taskId === "project-a",
+      renderOperationBatchFromTask: (task) => rendered.push(task),
+      renderProjectWorkflow: () => {},
+    },
+  );
+
+  assert.equal(applyOperationBatchUpdateFreshContext({
+    task: {
+      taskId: "project-a",
+      config: {
+        operationBatch: { status: "update_available" },
+        fanweiSource: { version: 2, raw: { fields: {} } },
+      },
+    },
+  }), true);
+  assert.equal(taskViewState.currentProject.config.operationBatch.status, "update_available");
+  assert.equal(taskViewState.currentProject.config.fanweiSource.raw.fields["批次名称"], "湖北邮政社招_2026年8月");
+  assert.equal(taskViewState.currentProject.config.fanweiSource.batchNameMode, "auto");
+  assert.equal(taskViewState.currentProject.config.fanweiSource.batchNameAutoValue, "湖北邮政社招_2026年8月");
+
+  const incomingEmpty = {
+    taskId: "project-a",
+    config: {
+      fanweiSource: {
+        batchNameMode: "auto",
+        batchNameAutoValue: "",
+        raw: { fields: { "批次名称": "" } },
+      },
+    },
+  };
+  assert.equal(applyOperationBatchUpdateFreshContext({ task: incomingEmpty }), true);
+  assert.strictEqual(taskViewState.currentProject, incomingEmpty);
+  assert.equal(taskViewState.currentProject.config.fanweiSource.raw.fields["批次名称"], "");
+  assert.equal(taskViewState.currentProject.config.fanweiSource.batchNameMode, "auto");
+  assert.equal(taskViewState.currentProject.config.fanweiSource.batchNameAutoValue, "");
+  assert.strictEqual(rendered.at(-1), incomingEmpty);
+
+  assert.equal(applyOperationBatchUpdateFreshContext({
+    task: {
+      taskId: "project-a",
+      config: {
+        operationBatch: { status: "waiting_for_changes" },
+        fanweiSource: { version: 3, raw: { fields: {} } },
+      },
+    },
+  }), true);
+  const preservedEmptyFields = taskViewState.currentProject.config.fanweiSource.raw.fields;
+  assert.equal(taskViewState.currentProject.config.operationBatch.status, "waiting_for_changes");
+  assert.equal(Object.hasOwn(preservedEmptyFields, "批次名称"), true);
+  assert.equal(preservedEmptyFields["批次名称"], "");
+  assert.equal(taskViewState.currentProject.config.fanweiSource.batchNameMode, "auto");
+  assert.equal(taskViewState.currentProject.config.fanweiSource.batchNameAutoValue, "");
+
+  const incomingManual = {
+    taskId: "project-a",
+    config: {
+      fanweiSource: {
+        batchNameMode: "manual",
+        batchNameAutoValue: "湖北邮政社招_2026年9月",
+        raw: { fields: { "批次名称": "服务端真实名称" } },
+      },
+    },
+  };
+  assert.equal(applyOperationBatchUpdateFreshContext({ task: incomingManual }), true);
+  assert.strictEqual(taskViewState.currentProject, incomingManual);
+  assert.equal(taskViewState.currentProject.config.fanweiSource.raw.fields["批次名称"], "服务端真实名称");
+  assert.equal(taskViewState.currentProject.config.fanweiSource.batchNameMode, "manual");
+  assert.strictEqual(rendered.at(-1), incomingManual);
+
+  assert.equal(
+    (html.match(/taskViewState\.currentProject = mergeProjectTaskResponse\(/g) || []).length,
+    10,
+  );
+  assert.equal(html.includes("taskViewState.currentProject = result.task || task"), false);
+  assert.equal(html.includes("taskViewState.currentProject = error.response.task"), false);
+});
+
+test("personnel operation panel exposes one confirmation and recovery controls", () => {
+  assert.ok(html.includes('id="operationPersonnelTaskState"'));
+  assert.ok(html.includes('id="operationPersonnelTaskActionBtn"'));
+  assert.ok(html.includes('id="operationPersonnelTaskRecheckBtn"'));
+  assert.ok(html.includes('id="operationPersonnelConfirmDialog"'));
+  assert.ok(html.includes('id="operationPersonnelProgress"'));
+  assert.equal(html.includes("人员任务接口待接入"), false);
+});
+
+test("personnel task labels and visible countdown follow server state", () => {
+  const operationPersonnelActionLabel = compileInlineFunction(
+    "      function operationPersonnelActionLabel(state = {}) {",
+    "\n      function operationPersonnelRemainingSeconds",
+  );
+  const operationPersonnelRemainingSeconds = compileInlineFunction(
+    "      function operationPersonnelRemainingSeconds(deadlineAt, now = Date.now()) {",
+    "\n      function operationPersonnelVerificationCopy",
+  );
+  const operationPersonnelVerificationCopy = compileInlineFunction(
+    "      function operationPersonnelVerificationCopy(attempt = {}) {",
+    "\n      function renderOperationPersonnelTaskState",
+    { operationPersonnelRemainingSeconds },
+  );
+
+  assert.equal(
+    operationPersonnelActionLabel({ status: "sent", canResend: false }),
+    "调整人员任务并重新发送",
+  );
+  assert.equal(
+    operationPersonnelActionLabel({ status: "changes_pending" }),
+    "检查变更并重新发送",
+  );
+  assert.equal(
+    operationPersonnelActionLabel({ status: "failed_resumable" }),
+    "继续未完成流程",
+  );
+  assert.equal(
+    operationPersonnelActionLabel({ status: "result_unknown" }),
+    "重新核对发送记录",
+  );
+  assert.equal(operationPersonnelActionLabel({ status: "unsupported" }), "当前人员任务类型不支持");
+  assert.equal(operationPersonnelActionLabel({ status: "waiting_batch" }), "等待运控批次");
+  assert.equal(operationPersonnelActionLabel({ status: "blocked_pending_change" }), "存在待审核需求变更");
+  assert.equal(operationPersonnelActionLabel({ status: "operation_conflict" }), "运控与平台不一致，请人工处理");
+  assert.equal(
+    operationPersonnelRemainingSeconds(
+      "2026-07-23T02:00:30.000Z",
+      Date.parse("2026-07-23T02:00:05.100Z"),
+    ),
+    25,
+  );
+  assert.equal(
+    operationPersonnelVerificationCopy({ verificationPhase: "initial", remainingSeconds: 24 }),
+    "正在等待运控发送记录（第一阶段），剩余 24 秒",
+  );
+  assert.equal(
+    operationPersonnelVerificationCopy({ verificationPhase: "reopened", remainingSeconds: 17 }),
+    "正在重新进入任务单核对发送记录（第二阶段），剩余 17 秒",
+  );
+});
+
+test("project workflow cards render every known status in understandable Chinese", () => {
+  const labelsSource = sourceBetween(
+    "      const projectWorkflowStatusLabels = {",
+    "\n      };",
+  );
+  const projectWorkflowStatusLabels = Function(
+    `return (${labelsSource.slice(labelsSource.indexOf("{"))}\n});`,
+  )();
+  const expectedLabels = {
+    ready: "可执行",
+    success: "已完成",
+    sent: "已发送",
+    needs_review: "待补充",
+    reconciliation_required: "待同步",
+    waiting_schedule: "等待补全日程",
+    update_available: "可修改",
+    updating: "修改中",
+    update_conflict: "修改冲突",
+    update_failed: "修改失败",
+    waiting_batch: "等待批次",
+    waiting_execution: "等待执行数据",
+    skipped: "无需执行",
+    failed_resumable: "待继续处理",
+    result_unknown: "待核对发送结果",
+    changes_pending: "有变更待处理",
+    unsupported: "暂不支持",
+    blocked_pending_change: "有需求变更待审核",
+    operation_conflict: "数据不一致需人工处理",
+  };
+  assert.deepEqual(projectWorkflowStatusLabels, expectedLabels);
+
+  const projectWorkflowSteps = { innerHTML: "" };
+  const projectWorkflowGates = { innerHTML: "" };
+  const renderProjectWorkflow = compileInlineFunction(
+    "      function renderProjectWorkflow(task = {}, workflow = {}, batchDraft = {}) {",
+    "\n      function projectRequirementFormalTime",
+    {
+      taskViewState: {},
+      renderProjectSources: () => {},
+      projectWorkflowSteps,
+      projectWorkflowStepMeta: [
+        ["batch", "建批次", "泛微", "创建批次"],
+        ["personnel", "人员任务", "泛微", "发送人员任务"],
+        ["content", "内容任务", "易考需求单", "发送内容任务"],
+        ["archive", "运控归档", "实际执行", "归档"],
+      ],
+      projectWorkflowSourceChangeNotice: () => "",
+      safeText: (value) => String(value ?? ""),
+      projectWorkflowStatusLabels,
+      projectWorkflowStatusLabel: (status) => projectWorkflowStatusLabels[status] || "状态待确认",
+      renderOperationBatchDraft: () => "",
+      projectOperationBatchDraft: { innerHTML: "" },
+      renderOperationPersonnelDraft: () => "",
+      projectPersonnelTaskDraft: { innerHTML: "" },
+      renderWorkflowDraft: () => "",
+      projectOperationArchiveDraft: { innerHTML: "" },
+      projectExamRequirements: () => [],
+      projectContentTaskDraft: { innerHTML: "" },
+      renderProjectContentExamList: () => "",
+      projectWorkflowGates,
+    },
+  );
+
+  renderProjectWorkflow({}, {
+    steps: {
+      batch: { status: "unknown_future_status" },
+      personnel: { status: "failed_resumable" },
+      content: { status: "result_unknown" },
+      archive: { status: "operation_conflict" },
+    },
+  });
+
+  for (const label of [
+    "状态待确认",
+    "待继续处理",
+    "待核对发送结果",
+    "数据不一致需人工处理",
+  ]) {
+    assert.match(projectWorkflowSteps.innerHTML, new RegExp(label));
+    assert.match(projectWorkflowGates.innerHTML, new RegExp(label));
+  }
+  const visibleText = `${projectWorkflowSteps.innerHTML}${projectWorkflowGates.innerHTML}`
+    .replace(/<[^>]*>/g, " ");
+  assert.doesNotMatch(
+    visibleText,
+    /unknown_future_status|failed_resumable|result_unknown|operation_conflict/,
+  );
+});
+
+test("personnel confirmation keeps environment and recipients read only with one final send action", () => {
+  const dialog = html.slice(
+    html.indexOf('id="operationPersonnelConfirmDialog"'),
+    html.indexOf('id="sourceDetailModal"'),
+  );
+  assert.ok(dialog.includes('id="operationPersonnelConfirmContent"'));
+  assert.ok(dialog.includes('id="operationPersonnelConfirmSendBtn"'));
+  assert.equal((dialog.match(/确认以上内容并校验发送/g) || []).length, 1);
+  assert.equal(dialog.includes('data-operation-personnel-environment-input'), false);
+  assert.equal(dialog.includes('data-operation-personnel-recipient-input'), false);
+
+  const renderer = sourceBetween(
+    "      function renderOperationPersonnelConfirmation(preview = {}) {",
+    "\n      function collectOperationPersonnelPreviewEdits",
+  );
+  for (const content of [
+    "运控环境",
+    "项目",
+    "批次",
+    "需求版本",
+    "阻断条件",
+    "本次将发布运控批次",
+    "运控修改前后",
+    "业务项目",
+    "修改前",
+    "修改后",
+    "来源",
+    "考试日程",
+    "固定收件人",
+    "固定抄送人",
+  ]) {
+    assert.ok(renderer.includes(content), `confirmation missing ${content}`);
+  }
+  assert.ok(renderer.includes('data-operation-personnel-change-summary'));
+  assert.equal(renderer.includes('data-operation-personnel-edit="environment"'), false);
+  assert.equal(renderer.includes('data-operation-personnel-edit="recipients"'), false);
+  assert.match(html, /\.operation-change-table\s*\{[^}]*border-collapse:\s*collapse/s);
+  assert.match(html, /:root\[data-theme="dark"\]\s+\.operation-change-table\s*\{[^}]*border-color:\s*var\(--line\)/s);
+});
+
+test("personnel confirmation edits stay local until final send", () => {
+  const changeHandler = sourceBetween(
+    '      operationPersonnelConfirmContent.addEventListener("change", (event) => {',
+    '\n      operationPersonnelConfirmSendBtn.addEventListener("click", () => {',
+  );
+
+  assert.doesNotMatch(changeHandler, /collectOperationPersonnelPreviewEdits|refreshOperationPersonnelPreviewFromDialog|previewOperationPersonnelTask|fetchJson/);
+  assert.match(changeHandler, /内容已修改，发送时将统一重新校验/);
+  assert.doesNotMatch(html, /function refreshOperationPersonnelPreviewFromDialog/);
+});
+
+test("personnel confirmation renders a Chinese grouped comparison with exactly five editable fields", () => {
+  const operationPersonnelConfirmContent = { innerHTML: "" };
+  const operationPersonnelConfirmSendBtn = { disabled: false };
+  const operationPersonnelProgress = { textContent: "" };
+  const operationPersonnelPreviewKind = compileInlineFunction(
+    "      function operationPersonnelPreviewKind(preview = {}) {",
+    "\n      function renderOperationPersonnelConfirmation",
+  );
+  const renderOperationPersonnelConfirmation = compileInlineFunction(
+    "      function renderOperationPersonnelConfirmation(preview = {}) {",
+    "\n      function collectOperationPersonnelPreviewEdits",
+    {
+      taskViewState: { currentProject: { taskId: "task-a", projectName: "示例考试" } },
+      operationPersonnelConfirmContent,
+      operationPersonnelConfirmSendBtn,
+      operationPersonnelProgress,
+      operationPersonnelPreviewKind,
+      safeText: (value) => String(value ?? ""),
+    },
+  );
+  const previewDto = {
+    previewToken: "preview-a",
+    operationChanges: [
+      {
+        path: "dates.start",
+        before: "ACTUAL_DATE",
+        after: "TARGET_DATE",
+      },
+      {
+        path: "batch.published",
+        before: false,
+        after: true,
+      },
+    ],
+    changes: {
+      fields: [{ path: "draft-only", before: "DRAFT_OLD", after: "DRAFT_NEW" }],
+      summary: "日期变化",
+    },
+    state: {
+      environment: "test",
+      activePreview: {
+        requirementVersion: '[{"id":"requirement-1","version":1},{"id":"requirement-2","version":4}]',
+      },
+      draft: {
+        batch: { code: "EZT260003" },
+        operationBatch: { batchName: "真实运控批次" },
+        previewOperationSnapshot: { batch: { published: false, batchName: "真实运控批次" } },
+        displaySchedules: [{
+          scheduleCode: 17,
+          name: "综合能力",
+          start: "2026-08-22 09:00",
+          end: "2026-08-22 11:00",
+        }],
+        personnel: {
+          serviceType: "ATA 监考－分散在线监考",
+          platform: "悦站",
+          monitorCount: 2,
+          monitorRatio: "1:50",
+          candidateBasis: 81,
+        },
+        dates: { start: "2026-07-23", end: "2026-08-19", nameListDue: "2026-08-19" },
+        operationTaskSheet: { conditions: [{ name: "人员配置", satisfied: true }] },
+        directoryMatch: { to: [{ group: "演练组", name: "张乐翔" }], cc: [] },
+        warnings: [],
+      },
+      lastSuccessfulFingerprint: "",
+    },
+  };
+  renderOperationPersonnelConfirmation(previewDto);
+  const html = operationPersonnelConfirmContent.innerHTML;
+  assert.match(operationPersonnelConfirmContent.innerHTML, /真实运控批次/);
+  assert.match(operationPersonnelConfirmContent.innerHTML, /需求单 1：版本 1；需求单 2：版本 4/);
+  for (const label of [
+    "人员落实开始日期",
+    "人员落实结束日期",
+    "人员名单提交日期",
+    "监考人数",
+    "监考比例",
+    "批次发布状态",
+    "考试日程",
+    "只读",
+  ]) {
+    assert.match(html, new RegExp(label));
+  }
+  assert.match(html, /来源：易考需求单/);
+  assert.match(html, /<th>日程代码<\/th>/);
+  assert.match(html, />17<\/td>/);
+  assert.match(html, /综合能力/);
+  assert.match(html, /ACTUAL_DATE/);
+  assert.match(html, /TARGET_DATE/);
+  assert.equal((html.match(/data-operation-personnel-edit=/g) || []).length, 5);
+  assert.equal((html.match(/type="date"/g) || []).length, 3);
+  assert.doesNotMatch(html, /dates\.start|dates\.end|personnel\.monitorCount|batch\.published/);
+  assert.doesNotMatch(html, /日程序号|requirementIndex|scheduleCodeMap/);
+  assert.doesNotMatch(html, /\[\{|&quot;(?:id|scheduleEntryId)&quot;/);
+  assert.equal((html.match(/<h4>人员配置<\/h4>/g) || []).length, 0);
+  assert.doesNotMatch(html, /DRAFT_OLD|DRAFT_NEW/);
+  assert.equal(operationPersonnelConfirmSendBtn.disabled, false);
+
+  previewDto.changes = diffOperationPersonnelTaskDrafts(
+    { personnel: { monitorCount: 2, monitorRatio: "1:50" } },
+    { personnel: { monitorCount: 3, monitorRatio: "1:60" } },
+  );
+  previewDto.state.lastSuccessfulFingerprint = "already-sent";
+  renderOperationPersonnelConfirmation(previewDto);
+  assert.match(operationPersonnelConfirmContent.innerHTML, /监考人数：2 → 3/);
+  assert.match(operationPersonnelConfirmContent.innerHTML, /监考比例：1:50 → 1:60/);
+  assert.doesNotMatch(operationPersonnelConfirmContent.innerHTML, /personnel\.|dates\.|managedSchedules|\[\{/);
+
+  previewDto.state.draft.warnings = [{ code: "MONITOR_RATIO_REQUIRED" }];
+  renderOperationPersonnelConfirmation(previewDto);
+  assert.equal(operationPersonnelConfirmSendBtn.disabled, true);
+});
+
+test("personnel resend renders and submits only the current preview summary", () => {
+  const operationPersonnelConfirmContent = { innerHTML: "" };
+  const operationPersonnelConfirmSendBtn = { disabled: false };
+  const operationPersonnelProgress = { textContent: "" };
+  const operationPersonnelPreviewKind = compileInlineFunction(
+    "      function operationPersonnelPreviewKind(preview = {}) {",
+    "\n      function renderOperationPersonnelConfirmation",
+  );
+  const renderOperationPersonnelConfirmation = compileInlineFunction(
+    "      function renderOperationPersonnelConfirmation(preview = {}) {",
+    "\n      function collectOperationPersonnelPreviewEdits",
+    {
+      taskViewState: { currentProject: { taskId: "task-a", projectName: "示例考试" } },
+      operationPersonnelConfirmContent,
+      operationPersonnelConfirmSendBtn,
+      operationPersonnelProgress,
+      operationPersonnelPreviewKind,
+      safeText: (value) => String(value ?? ""),
+    },
+  );
+  const operationPersonnelSendPayload = compileInlineFunction(
+    "      function operationPersonnelSendPayload(preview = {}, changeSummary = \"\", edits = {}) {",
+    "\n      function operationPersonnelRequestIsCurrent",
+  );
+  const preview = {
+    previewToken: "preview-a",
+    draftVersion: 7,
+    changes: { fields: [], summary: "本次人员日期调整" },
+    state: {
+      changeSummary: "上次监考人数调整",
+      activePreview: { kind: "resend", requirementVersion: 3 },
+      draft: {
+        batch: { code: "EZT260003" },
+        displaySchedules: [{
+          scheduleCode: 17,
+          name: "综合能力",
+          start: "2026-08-22 09:00",
+          end: "2026-08-22 11:00",
+        }],
+        personnel: {},
+        dates: {},
+        operationTaskSheet: { conditions: [] },
+        directoryMatch: { to: [], cc: [] },
+        warnings: [],
+      },
+    },
+  };
+
+  renderOperationPersonnelConfirmation(preview);
+  const renderedSummary = operationPersonnelConfirmContent.innerHTML
+    .match(/data-operation-personnel-change-summary>([^<]*)<\/textarea>/)?.[1];
+  assert.equal(renderedSummary, "本次人员日期调整");
+  assert.deepEqual(operationPersonnelSendPayload(preview, renderedSummary, {}), {
+    previewToken: "preview-a",
+    draftVersion: 7,
+    changeSummary: "本次人员日期调整",
+    edits: {},
+  });
+
+  preview.changes.summary = "";
+  renderOperationPersonnelConfirmation(preview);
+  assert.match(
+    operationPersonnelConfirmContent.innerHTML,
+    /data-operation-personnel-change-summary><\/textarea>/,
+  );
+  assert.doesNotMatch(operationPersonnelConfirmContent.innerHTML, /上次监考人数调整/);
+});
+
+test("personnel confirmation blocks a malformed truthy display schedule DTO without throwing", () => {
+  const operationPersonnelConfirmContent = { innerHTML: "" };
+  const operationPersonnelConfirmSendBtn = { disabled: false };
+  const operationPersonnelProgress = { textContent: "" };
+  const operationPersonnelPreviewKind = compileInlineFunction(
+    "      function operationPersonnelPreviewKind(preview = {}) {",
+    "\n      function renderOperationPersonnelConfirmation",
+  );
+  const renderOperationPersonnelConfirmation = compileInlineFunction(
+    "      function renderOperationPersonnelConfirmation(preview = {}) {",
+    "\n      function collectOperationPersonnelPreviewEdits",
+    {
+      taskViewState: { currentProject: { taskId: "task-a", projectName: "示例考试" } },
+      operationPersonnelConfirmContent,
+      operationPersonnelConfirmSendBtn,
+      operationPersonnelProgress,
+      operationPersonnelPreviewKind,
+      safeText: (value) => String(value ?? ""),
+    },
+  );
+
+  assert.doesNotThrow(() => renderOperationPersonnelConfirmation({
+    previewToken: "preview-a",
+    state: {
+      activePreview: { kind: "initial", requirementVersion: 3 },
+      draft: {
+        displaySchedules: { scheduleCode: 17 },
+        personnel: {},
+        dates: {},
+        operationTaskSheet: { conditions: [] },
+        directoryMatch: { to: [], cc: [] },
+        warnings: [],
+      },
+    },
+  }));
+  assert.match(
+    operationPersonnelConfirmContent.innerHTML,
+    /缺少真实日程代码，无法发送人员任务单/,
+  );
+  assert.equal(operationPersonnelConfirmSendBtn.disabled, true);
+});
+
+test("personnel confirmation summarizes schedule object changes without exposing paths or JSON", () => {
+  const operationPersonnelConfirmContent = { innerHTML: "" };
+  const operationPersonnelConfirmSendBtn = { disabled: false };
+  const operationPersonnelProgress = { textContent: "" };
+  const safeText = compileInlineFunction(
+    "      function safeText(value) {",
+    "\n      function formatTaskTime",
+  );
+  const operationPersonnelPreviewKind = compileInlineFunction(
+    "      function operationPersonnelPreviewKind(preview = {}) {",
+    "\n      function renderOperationPersonnelConfirmation",
+  );
+  const renderOperationPersonnelConfirmation = compileInlineFunction(
+    "      function renderOperationPersonnelConfirmation(preview = {}) {",
+    "\n      function collectOperationPersonnelPreviewEdits",
+    {
+      taskViewState: { currentProject: { taskId: "task-a", projectName: "示例考试" } },
+      operationPersonnelConfirmContent,
+      operationPersonnelConfirmSendBtn,
+      operationPersonnelProgress,
+      operationPersonnelPreviewKind,
+      safeText,
+    },
+  );
+  const schedule = {
+    scheduleEntryId: "internal-7",
+    requirementIndex: 7,
+    name: "综合<&\"'>",
+    start: "2026-08-22 09:00",
+    end: "2026-08-22 11:00",
+  };
+  const previewDto = {
+    previewToken: "preview-a",
+    operationChanges: [],
+    changes: {
+      schedules: {
+        added: [schedule],
+        changed: [],
+        deleted: [],
+      },
+      fields: [],
+      summary: "考试日程：新增 1 项",
+    },
+    state: {
+      activePreview: {},
+      draft: {
+        previewOperationSnapshot: { batch: { published: true } },
+        displaySchedules: [{
+          scheduleCode: 17,
+          name: schedule.name,
+          start: schedule.start,
+          end: schedule.end,
+        }],
+        personnel: {},
+        dates: {},
+        operationTaskSheet: { conditions: [] },
+        directoryMatch: { to: [], cc: [] },
+        warnings: [],
+      },
+    },
+  };
+
+  renderOperationPersonnelConfirmation(previewDto);
+  assert.match(operationPersonnelConfirmContent.innerHTML, /新增 1 个考试日程/);
+  assert.match(operationPersonnelConfirmContent.innerHTML, /综合&lt;&amp;&quot;&#39;&gt;/);
+  assert.doesNotMatch(operationPersonnelConfirmContent.innerHTML, /综合<&|scheduleEntryId|\[\{/);
+
+  previewDto.changes = {
+    schedules: {
+      added: [{ ...schedule, requirementIndex: 8, name: "新增日程" }],
+      changed: [{
+        before: { ...schedule, start: "2026-08-22 08:30" },
+        after: schedule,
+      }],
+      deleted: [{ ...schedule, requirementIndex: 6, name: "删除日程" }],
+    },
+    fields: [],
+    summary: "考试日程：新增 1 项；修改 1 项；删除 1 项",
+  };
+  renderOperationPersonnelConfirmation(previewDto);
+  assert.match(
+    operationPersonnelConfirmContent.innerHTML,
+    /新增 1 个考试日程；修改 2 个考试日程/,
+  );
+  assert.doesNotMatch(operationPersonnelConfirmContent.innerHTML, /scheduleEntryId|\[\{/);
+
+  previewDto.changes = {
+    schedules: { added: [], changed: [], deleted: [] },
+    fields: [{
+      path: "managedSchedules",
+      before: [{ ...schedule, start: "2026-08-22 08:30" }],
+      after: [schedule],
+    }],
+    summary: "批次受管日程：已更新",
+  };
+  renderOperationPersonnelConfirmation(previewDto);
+  assert.match(operationPersonnelConfirmContent.innerHTML, /修改 1 个考试日程/);
+  assert.doesNotMatch(operationPersonnelConfirmContent.innerHTML, /managedSchedules|scheduleEntryId|\[\{/);
+});
+
+test("personnel confirmation renders an adopted operation send record as a resend", () => {
+  const operationPersonnelConfirmContent = { innerHTML: "" };
+  const operationPersonnelConfirmSendBtn = { disabled: false };
+  const operationPersonnelProgress = { textContent: "" };
+  const operationPersonnelPreviewKind = compileInlineFunction(
+    "      function operationPersonnelPreviewKind(preview = {}) {",
+    "\n      function renderOperationPersonnelConfirmation",
+  );
+  const renderOperationPersonnelConfirmation = compileInlineFunction(
+    "      function renderOperationPersonnelConfirmation(preview = {}) {",
+    "\n      function collectOperationPersonnelPreviewEdits",
+    {
+      taskViewState: { currentProject: { taskId: "task-a", projectName: "示例考试" } },
+      operationPersonnelConfirmContent,
+      operationPersonnelConfirmSendBtn,
+      operationPersonnelProgress,
+      operationPersonnelPreviewKind,
+      safeText: (value) => String(value ?? ""),
+    },
+  );
+  const previewDto = {
+    previewToken: "preview-a",
+    operationChanges: [{
+      path: "dates.end",
+      before: "2026-08-18",
+      after: "2026-08-19",
+    }],
+    state: {
+      environment: "test",
+      activePreview: {
+        kind: "resend",
+        externalBaseline: true,
+        baselineSendRecord: {
+          type: "首次发送",
+          sentAt: "2026-07-23 10:09:34",
+        },
+      },
+      draft: {
+        batch: { code: "EZT260003" },
+        operationBatch: { batchName: "真实运控批次" },
+        previewOperationSnapshot: { batch: { published: false, batchName: "真实运控批次" } },
+        schedules: [],
+        personnel: {},
+        dates: {},
+        operationTaskSheet: { conditions: [] },
+        directoryMatch: { to: [], cc: [] },
+        warnings: [],
+      },
+      lastSuccessfulFingerprint: "",
+    },
+  };
+
+  assert.equal(operationPersonnelPreviewKind(previewDto), "resend");
+  renderOperationPersonnelConfirmation(previewDto);
+  assert.match(operationPersonnelConfirmContent.innerHTML, /已接管运控发送记录/);
+  assert.match(operationPersonnelConfirmContent.innerHTML, /首次发送/);
+  assert.match(operationPersonnelConfirmContent.innerHTML, /2026-07-23 10:09:34/);
+  assert.match(
+    operationPersonnelConfirmContent.innerHTML,
+    /data-operation-personnel-change-summary/,
+  );
+  assert.doesNotMatch(
+    operationPersonnelConfirmContent.innerHTML,
+    /data-operation-personnel-change-summary[^>]*hidden/,
+  );
+  assert.doesNotMatch(operationPersonnelConfirmContent.innerHTML, /本次将发布运控批次/);
+});
+
+test("unpublished personnel confirmation falls back to the fixed recipient rule", () => {
+  const operationPersonnelConfirmContent = { innerHTML: "" };
+  const operationPersonnelConfirmSendBtn = { disabled: false };
+  const operationPersonnelProgress = { textContent: "" };
+  const operationPersonnelPreviewKind = compileInlineFunction(
+    "      function operationPersonnelPreviewKind(preview = {}) {",
+    "\n      function renderOperationPersonnelConfirmation",
+  );
+  const renderOperationPersonnelConfirmation = compileInlineFunction(
+    "      function renderOperationPersonnelConfirmation(preview = {}) {",
+    "\n      function collectOperationPersonnelPreviewEdits",
+    {
+      taskViewState: { currentProject: { taskId: "task-a", projectName: "示例考试" } },
+      operationPersonnelConfirmContent,
+      operationPersonnelConfirmSendBtn,
+      operationPersonnelProgress,
+      operationPersonnelPreviewKind,
+      safeText: (value) => String(value ?? ""),
+    },
+  );
+
+  renderOperationPersonnelConfirmation({
+    previewToken: "preview-a",
+    state: {
+      environment: "test",
+      activePreview: { kind: "initial", requirementVersion: 3 },
+      draft: {
+        batch: { code: "EZT260003" },
+        operationBatch: { batchName: "湖北邮政_2026年8月" },
+        previewOperationSnapshot: { batch: { published: false } },
+        schedules: [],
+        personnel: {},
+        dates: {},
+        operationTaskSheet: {},
+        directoryMatch: { to: [], cc: [] },
+        recipients: {
+          toGroup: "演练组",
+          toNames: ["张乐翔"],
+          ccGroup: "",
+          ccCount: 0,
+        },
+        warnings: [],
+      },
+    },
+  });
+
+  assert.match(operationPersonnelConfirmContent.innerHTML, /演练组 \/ 张乐翔/);
+  assert.match(operationPersonnelConfirmContent.innerHTML, /本次将发布运控批次/);
+});
+
+test("personnel send payload contains the server preview binding, resend summary, and local edits", () => {
+  const operationPersonnelSendPayload = compileInlineFunction(
+    "      function operationPersonnelSendPayload(preview = {}, changeSummary = \"\", edits = {}) {",
+    "\n      function operationPersonnelRequestIsCurrent",
+  );
+  const preview = {
+    previewToken: "token-a",
+    draftVersion: 7,
+    environment: "production",
+    state: { draft: { personnel: { monitorCount: 2 } } },
+  };
+  const edits = {
+    dates: { start: "2026-08-22", end: "2026-08-23", nameListDue: "2026-08-20" },
+    personnel: { monitorCount: "2", monitorRatio: "1:50" },
+  };
+  assert.deepEqual(
+    operationPersonnelSendPayload(preview, "日期变化", edits),
+    {
+      previewToken: "token-a",
+      draftVersion: 7,
+      changeSummary: "日期变化",
+      edits,
+    },
+  );
+});
+
+test("personnel state allows deliberate adjustment and only exposes recheck for unknown result", () => {
+  const operationPersonnelActionState = compileInlineFunction(
+    "      function operationPersonnelActionState(state = {}) {",
+    "\n      function operationPersonnelActionLabel",
+  );
+  assert.deepEqual(operationPersonnelActionState({ status: "sent" }), {
+    action: "preview",
+    disabled: false,
+    showRecheck: false,
+  });
+  assert.deepEqual(operationPersonnelActionState({ status: "result_unknown" }), {
+    action: "recheck",
+    disabled: true,
+    showRecheck: true,
+  });
+  assert.deepEqual(operationPersonnelActionState({ status: "failed_resumable" }), {
+    action: "preview",
+    disabled: false,
+    showRecheck: false,
+  });
+  assert.deepEqual(operationPersonnelActionState({
+    status: "applying_config",
+    activeAttempt: { status: "running" },
+  }), {
+    action: "preview",
+    disabled: true,
+    showRecheck: false,
+  });
+  for (const status of [
+    "unsupported",
+    "waiting_batch",
+    "blocked_pending_change",
+    "operation_conflict",
+  ]) {
+    assert.equal(operationPersonnelActionState({ status }).disabled, true, status);
+  }
+});
+
+test("personnel resend requires a reviewed change summary before calling send", () => {
+  const operationPersonnelPreviewKind = compileInlineFunction(
+    "      function operationPersonnelPreviewKind(preview = {}) {",
+    "\n      function renderOperationPersonnelConfirmation",
+  );
+  const operationPersonnelSubmitError = compileInlineFunction(
+    "      function operationPersonnelSubmitError(preview = {}, changeSummary = \"\") {",
+    "\n      function invalidateOperationPersonnelRequests",
+    { operationPersonnelPreviewKind },
+  );
+  assert.equal(operationPersonnelSubmitError({
+    state: { lastSuccessfulFingerprint: "" },
+  }, ""), "");
+  assert.equal(operationPersonnelSubmitError({
+    state: { lastSuccessfulFingerprint: "sent-fingerprint" },
+  }, ""), "重新发送人员任务必须填写变化摘要");
+  assert.equal(operationPersonnelSubmitError({
+    state: { lastSuccessfulFingerprint: "sent-fingerprint" },
+  }, "新增下午场"), "");
+  assert.equal(operationPersonnelSubmitError({
+    state: {
+      lastSuccessfulFingerprint: "",
+      activePreview: { kind: "resend", externalBaseline: true },
+    },
+  }, ""), "重新发送人员任务必须填写变化摘要");
+  assert.equal(operationPersonnelSubmitError({
+    state: {
+      lastSuccessfulFingerprint: "",
+      activePreview: { kind: "resend", externalBaseline: true },
+    },
+  }, "人员落实结束日期调整"), "");
+});
+
+test("stale personnel attempt response cannot render into a newly selected project", async () => {
+  const deferred = Promise.withResolvers();
+  const renders = [];
+  const taskViewState = {
+    currentProjectId: "project-a",
+    currentProject: { taskId: "project-a" },
+    operationPersonnelRequestToken: 3,
+    operationPersonnelPollTimer: null,
+  };
+  const pollOperationPersonnelAttempt = compileInlineFunction(
+    "      async function pollOperationPersonnelAttempt(taskId, attemptId, requestToken) {",
+    "\n      async function resumeOperationPersonnelPolling",
+    {
+      taskViewState,
+      fetchJson: async () => deferred.promise,
+      operationPersonnelRequestIsCurrent: (taskId, token) => (
+        taskViewState.currentProjectId === taskId
+        && taskViewState.operationPersonnelRequestToken === token
+      ),
+      renderOperationPersonnelAttempt: (attempt) => renders.push(attempt.status),
+      loadOperationPersonnelTaskState: async () => {},
+      loadProjectOperationBatchDraft: async () => {},
+    },
+  );
+
+  const pending = pollOperationPersonnelAttempt("project-a", "attempt-a", 3);
+  taskViewState.currentProjectId = "project-b";
+  taskViewState.operationPersonnelRequestToken = 4;
+  deferred.resolve({ status: "sent", completed: true });
+  await pending;
+
+  assert.deepEqual(renders, []);
+});
+
+test("rejected personnel polling is handled and remains recoverable", async () => {
+  const cleared = [];
+  const scheduled = [];
+  const taskViewState = {
+    currentProjectId: "project-a",
+    currentProject: { taskId: "project-a" },
+    operationPersonnelRequestToken: 3,
+    operationPersonnelPollTimer: 41,
+  };
+  const operationPersonnelProgress = { textContent: "" };
+  const pollOperationPersonnelAttempt = compileInlineFunction(
+    "      async function pollOperationPersonnelAttempt(taskId, attemptId, requestToken) {",
+    "\n      async function resumeOperationPersonnelPolling",
+    {
+      taskViewState,
+      operationPersonnelProgress,
+      fetchJson: async () => { throw new Error("attempt unavailable"); },
+      operationPersonnelRequestIsCurrent: (taskId, token) => (
+        taskViewState.currentProjectId === taskId
+        && taskViewState.operationPersonnelRequestToken === token
+      ),
+      clearTimeout: (timer) => cleared.push(timer),
+      setTimeout: (callback, delay) => {
+        scheduled.push({ callback, delay });
+        return 42;
+      },
+    },
+  );
+  await assert.doesNotReject(
+    pollOperationPersonnelAttempt("project-a", "attempt-a", 3),
+  );
+  assert.deepEqual(cleared, [41]);
+  assert.equal(scheduled[0].delay, 2000);
+  assert.match(operationPersonnelProgress.textContent, /attempt unavailable/);
+  assert.equal(taskViewState.operationPersonnelPollTimer, 42);
+});
+
+test("stale personnel errors do not overwrite the current project", () => {
+  const taskViewState = {
+    currentProjectId: "project-b",
+    operationPersonnelRequestToken: 4,
+  };
+  const surface = { textContent: "project-b-state" };
+  const renderOperationPersonnelRequestError = compileInlineFunction(
+    "      function renderOperationPersonnelRequestError(taskId, requestToken, surface, error, restoreControl = null) {",
+    "\n      async function loadOperationPersonnelTaskState",
+    {
+      operationPersonnelRequestIsCurrent: (taskId, token) => (
+        taskViewState.currentProjectId === taskId
+        && taskViewState.operationPersonnelRequestToken === token
+      ),
+    },
+  );
+  assert.equal(
+    renderOperationPersonnelRequestError("project-a", 3, surface, new Error("stale")),
+    false,
+  );
+  assert.equal(surface.textContent, "project-b-state");
+});
+
+test("project switching invalidates personnel requests and clears their polling timer", () => {
+  const cleared = [];
+  const taskViewState = {
+    currentProjectId: "project-a",
+    operationPersonnelRequestToken: 8,
+    operationPersonnelPollTimer: 41,
+  };
+  const beginOperationPersonnelProjectRequest = compileInlineFunction(
+    "      function beginOperationPersonnelProjectRequest(projectId) {",
+    "\n      function operationPersonnelSendPayload",
+    {
+      taskViewState,
+      invalidateOperationPersonnelRequests: () => {
+        if (taskViewState.operationPersonnelPollTimer) cleared.push(taskViewState.operationPersonnelPollTimer);
+        taskViewState.operationPersonnelPollTimer = null;
+        taskViewState.operationPersonnelRequestToken += 1;
+        return taskViewState.operationPersonnelRequestToken;
+      },
+    },
+  );
+
+  const token = beginOperationPersonnelProjectRequest("project-b");
+  assert.equal(token, 9);
+  assert.equal(taskViewState.currentProjectId, "project-b");
+  assert.equal(taskViewState.operationPersonnelPollTimer, null);
+  assert.deepEqual(cleared, [41]);
+});
+
+test("each personnel preview invalidates older responses from the same project", () => {
+  const taskViewState = {
+    currentProjectId: "project-a",
+    operationPersonnelRequestToken: 9,
+    operationPersonnelPollTimer: null,
+  };
+  const invalidateOperationPersonnelRequests = compileInlineFunction(
+    "      function invalidateOperationPersonnelRequests() {",
+    "\n      function beginOperationPersonnelProjectRequest",
+    { taskViewState, clearTimeout: () => {} },
+  );
+  assert.equal(invalidateOperationPersonnelRequests(), 10);
+  assert.equal(invalidateOperationPersonnelRequests(), 11);
+  assert.equal(taskViewState.currentProjectId, "project-a");
+});
+
+test("personnel UI reads server remainingSeconds instead of deriving poll countdown locally", () => {
+  const attemptRenderer = sourceBetween(
+    "      function renderOperationPersonnelAttempt(attempt = {}) {",
+    "\n      async function pollOperationPersonnelAttempt",
+  );
+  assert.ok(attemptRenderer.includes("operationPersonnelVerificationCopy(attempt)"));
+  assert.ok(attemptRenderer.includes("attempt.remainingSeconds"));
+  assert.ok(attemptRenderer.includes('attempt.status === "sent" ? "人员任务单发送成功"'));
+  assert.equal(attemptRenderer.includes("deadlineAt"), false);
+  const poller = sourceBetween(
+    "      async function pollOperationPersonnelAttempt(taskId, attemptId, requestToken) {",
+    "\n      async function resumeOperationPersonnelPolling",
+  );
+  assert.ok(poller.includes("operationPersonnelRequestIsCurrent(taskId, requestToken)"));
+});
+
+test("completed personnel send changes the confirmation action to close", () => {
+  const operationPersonnelConfirmCancelBtn = { textContent: "取消" };
+  const operationPersonnelConfirmSendBtn = { disabled: false };
+  const operationPersonnelProgress = { textContent: "" };
+  const renderOperationPersonnelAttempt = compileInlineFunction(
+    "      function renderOperationPersonnelAttempt(attempt = {}) {",
+    "\n      async function pollOperationPersonnelAttempt",
+    {
+      operationPersonnelConfirmCancelBtn,
+      operationPersonnelConfirmSendBtn,
+      operationPersonnelProgress,
+      operationPersonnelVerificationCopy: () => "",
+      operationPersonnelActionLabel: ({ status }) => status,
+    },
+  );
+
+  renderOperationPersonnelAttempt({
+    status: "sent",
+    completed: true,
+  });
+
+  assert.equal(operationPersonnelProgress.textContent, "人员任务单发送成功");
+  assert.equal(operationPersonnelConfirmCancelBtn.textContent, "关闭");
+  assert.equal(operationPersonnelConfirmSendBtn.disabled, true);
+});
+
+test("personnel UI automatically resumes a stalled send poll when the page regains focus", async () => {
+  const taskViewState = {
+    currentProject: { taskId: "task-a" },
+    operationPersonnelAttemptId: "attempt-a",
+    operationPersonnelRequestToken: 7,
+    operationPersonnelPollTimer: 99,
+  };
+  const cleared = [];
+  const polled = [];
+  const resumeOperationPersonnelPolling = compileInlineFunction(
+    "      async function resumeOperationPersonnelPolling() {",
+    "\n      async function recheckOperationPersonnelTask",
+    {
+      taskViewState,
+      clearTimeout: (timer) => cleared.push(timer),
+      pollOperationPersonnelAttempt: async (...args) => polled.push(args),
+    },
+  );
+
+  assert.equal(await resumeOperationPersonnelPolling(), true);
+  assert.deepEqual(cleared, [99]);
+  assert.equal(taskViewState.operationPersonnelPollTimer, null);
+  assert.deepEqual(polled, [["task-a", "attempt-a", 7]]);
+  assert.ok(html.includes('window.addEventListener("focus", () => {'));
+  assert.ok(html.includes("void resumeOperationPersonnelPolling();"));
+});
+
+test("opening personnel detail refreshes its state instead of rendering a stale project cache", async () => {
+  const events = [];
+  const panels = [
+    { dataset: { operationDetail: "personnel" }, hidden: true },
+    { dataset: { operationDetail: "archive" }, hidden: true },
+  ];
+  const buttons = [
+    { dataset: { workflowStep: "personnel" }, setAttribute: () => {} },
+  ];
+  const operationPersonnelTaskState = { textContent: "" };
+  const operationPersonnelTaskActionBtn = { disabled: false };
+  const openOperationDetail = compileInlineFunction(
+    "      async function openOperationDetail(stepKey, trigger = null) {",
+    "\n      const requirementTimeRangeFields",
+    {
+      projectWorkflowStepMeta: [
+        ["personnel", "人员任务", "泛微", "按人员服务字段生成任务参数"],
+      ],
+      operationDetailTitle: { textContent: "" },
+      operationDetailNote: { textContent: "" },
+      operationDetailModal: { querySelectorAll: () => panels },
+      projectWorkflowSteps: { querySelectorAll: () => buttons },
+      operationPersonnelTaskState,
+      operationPersonnelTaskActionBtn,
+      showProjectDialog: () => events.push("show"),
+      loadOperationPersonnelTaskState: async () => events.push("load"),
+      taskViewState: {
+        currentProject: { taskId: "task-a" },
+        operationPersonnelRequestToken: 4,
+      },
+    },
+  );
+
+  await openOperationDetail("personnel", {});
+
+  assert.deepEqual(events, ["show", "load"]);
+  assert.equal(operationPersonnelTaskState.textContent, "正在读取最新人员任务状态。");
+  assert.equal(operationPersonnelTaskActionBtn.disabled, true);
+  assert.equal(panels[0].hidden, false);
+  assert.equal(panels[1].hidden, true);
+});
+
+test("opening batch detail immediately exposes workflow update state and refreshes exact state", async () => {
+  const events = [];
+  const panels = [
+    { dataset: { operationDetail: "batch" }, hidden: true },
+    { dataset: { operationDetail: "personnel" }, hidden: true },
+  ];
+  const buttons = [
+    { dataset: { workflowStep: "batch" }, setAttribute: () => {} },
+  ];
+  const action = { hidden: true };
+  const openOperationDetail = compileInlineFunction(
+    "      async function openOperationDetail(stepKey, trigger = null) {",
+    "\n      const requirementTimeRangeFields",
+    {
+      projectWorkflowStepMeta: [
+        ["batch", "建批次", "泛微", "生成并回填运营批次代码"],
+      ],
+      operationDetailTitle: { textContent: "" },
+      operationDetailNote: { textContent: "" },
+      operationDetailModal: { querySelectorAll: () => panels },
+      projectWorkflowSteps: { querySelectorAll: () => buttons },
+      operationPersonnelTaskState: { textContent: "" },
+      operationPersonnelTaskActionBtn: { disabled: false },
+      showProjectDialog: () => events.push("show"),
+      operationBatchUpdateStateFromWorkflow: (workflow) => ({
+        pageStatus: workflow.steps.batch.status,
+        state: {
+          status: workflow.steps.batch.status,
+          changes: workflow.steps.batch.managedChanges,
+        },
+      }),
+      renderOperationBatchUpdateState: (state) => {
+        action.hidden = state.state?.status !== "update_available";
+        events.push(`render:${state.state?.status || state.pageStatus}`);
+      },
+      loadOperationBatchUpdateState: async () => events.push("load"),
+      loadOperationPersonnelTaskState: async () => events.push("personnel-load"),
+      taskViewState: {
+        currentProject: { taskId: "task-a" },
+        currentProjectWorkflow: {
+          steps: {
+            batch: {
+              status: "update_available",
+              managedChanges: [{ path: "examStartDate" }],
+            },
+          },
+        },
+        operationBatchUpdateRequestToken: 3,
+        operationPersonnelRequestToken: 4,
+      },
+    },
+  );
+
+  await openOperationDetail("batch", {});
+
+  assert.deepEqual(events, ["render:update_available", "show", "load"]);
+  assert.equal(action.hidden, false);
+  assert.equal(panels[0].hidden, false);
+  assert.equal(panels[1].hidden, true);
+});
+
+test("batch detail keeps its workflow update action when exact state refresh fails", async () => {
+  const events = [];
+  let renderedState = {};
+  const openOperationDetail = compileInlineFunction(
+    "      async function openOperationDetail(stepKey, trigger = null) {",
+    "\n      const requirementTimeRangeFields",
+    {
+      projectWorkflowStepMeta: [
+        ["batch", "建批次", "泛微", "生成并回填运营批次代码"],
+      ],
+      operationDetailTitle: { textContent: "" },
+      operationDetailNote: { textContent: "" },
+      operationDetailModal: {
+        querySelectorAll: () => [
+          { dataset: { operationDetail: "batch" }, hidden: true },
+        ],
+      },
+      projectWorkflowSteps: {
+        querySelectorAll: () => [
+          { dataset: { workflowStep: "batch" }, setAttribute: () => {} },
+        ],
+      },
+      operationPersonnelTaskState: { textContent: "" },
+      operationPersonnelTaskActionBtn: { disabled: false },
+      showProjectDialog: () => events.push("show"),
+      operationBatchUpdateStateFromWorkflow: (workflow) => ({
+        pageStatus: workflow.steps.batch.status,
+        state: {
+          status: workflow.steps.batch.status,
+          changes: workflow.steps.batch.managedChanges,
+        },
+      }),
+      renderOperationBatchUpdateState: (state) => {
+        renderedState = state;
+        events.push(`render:${state.state?.status || state.pageStatus}`);
+      },
+      loadOperationBatchUpdateState: async () => {
+        events.push("load");
+        throw new Error("状态接口暂不可用");
+      },
+      loadOperationPersonnelTaskState: async () => {},
+      taskViewState: {
+        currentProject: { taskId: "task-a" },
+        currentProjectWorkflow: {
+          steps: {
+            batch: {
+              status: "update_available",
+              managedChanges: [{ path: "examStartDate" }],
+            },
+          },
+        },
+        operationBatchUpdateRequestToken: 3,
+        operationPersonnelRequestToken: 4,
+      },
+    },
+  );
+
+  await openOperationDetail("batch", {});
+
+  assert.deepEqual(events, [
+    "render:update_available",
+    "show",
+    "load",
+    "render:update_available",
+  ]);
+  assert.equal(renderedState.state.status, "update_available");
+  assert.equal(
+    renderedState.errorMessage,
+    "读取批次修改状态失败：状态接口暂不可用",
+  );
+});
+
+test("personnel UI connects the five service APIs without an environment override", () => {
+  for (const suffix of [
+    "operation-personnel-task?_=",
+    "operation-personnel-task/preview",
+    "operation-personnel-task/send",
+    "operation-personnel-task/attempts/",
+    "operation-personnel-task/recheck",
+  ]) {
+    assert.ok(html.includes(suffix), `missing personnel endpoint ${suffix}`);
+  }
+  const preview = sourceBetween(
+    "      async function previewOperationPersonnelTask(edits = {}) {",
+    "\n      async function sendOperationPersonnelTask",
+  );
+  const send = sourceBetween(
+    "      async function sendOperationPersonnelTask() {",
+    "\n      function renderOperationPersonnelAttempt",
+  );
+  assert.ok(preview.includes("invalidateOperationPersonnelRequests()"));
+  assert.ok(preview.includes("operationPersonnelRequestIsCurrent(taskId, requestToken)"));
+  assert.ok(send.includes("collectOperationPersonnelPreviewEdits()"));
+  assert.ok(send.includes("operationPersonnelSubmitError(preview, changeSummary)"));
+  assert.equal(send.includes("environment:"), false);
+});
+
+test("same-project stale personnel panel rejection cannot overwrite newer state", async () => {
+  const personnel = Promise.withResolvers();
+  const operationPersonnelTaskState = { textContent: "newer-state" };
+  const taskViewState = {
+    currentProjectId: "",
+    currentProject: null,
+    currentProjectWorkflow: null,
+    operationBatchUpdateRequestToken: 0,
+    operationPersonnelRequestToken: 0,
+  };
+  const dependencies = {
+    taskViewState,
+    fetchJson: async () => ({ taskId: "project-a" }),
+    isCurrentProject: (taskId) => taskViewState.currentProjectId === taskId,
+    beginOperationBatchUpdateProjectRequest: (projectId) => {
+      taskViewState.currentProjectId = projectId;
+      taskViewState.operationBatchUpdateRequestToken += 1;
+      return taskViewState.operationBatchUpdateRequestToken;
+    },
+    beginOperationPersonnelProjectRequest: (projectId) => {
+      taskViewState.currentProjectId = projectId;
+      taskViewState.operationPersonnelRequestToken += 1;
+      return taskViewState.operationPersonnelRequestToken;
+    },
+    renderProjectDetail: (task) => { taskViewState.currentProject = task; },
+    loadProjectOperationBatchDraft: async () => {},
+    loadOperationPersonnelTaskState: async () => personnel.promise,
+    loadProjectRequirementForDetail: async () => {},
+    loadProjectWechatBinding: async () => {},
+    setProjectOverviewExpanded: () => {},
+    setProjectActionControlsDisabled: () => {},
+    projectOperationBatchState: { textContent: "" },
+    operationPersonnelTaskState,
+    projectRequirementInlineState: { textContent: "" },
+    projectWechatBindingState: { textContent: "" },
+    operationPersonnelRequestIsCurrent: (taskId, token) => (
+      taskViewState.currentProjectId === taskId
+      && taskViewState.operationPersonnelRequestToken === token
+    ),
+  };
+  const loadProjectDetail = compileInlineFunction(
+    "      async function loadProjectDetail(projectId) {",
+    "\n      function requirementNextAction(item = {}) {",
+    dependencies,
+  );
+
+  const pending = loadProjectDetail("project-a");
+  await Promise.resolve();
+  taskViewState.operationPersonnelRequestToken += 1;
+  personnel.reject(new Error("stale personnel error"));
+  await pending;
+
+  assert.equal(operationPersonnelTaskState.textContent, "newer-state");
 });
 
 test("requirement edit payload includes only dirty fields and preserves intentional clears", () => {
@@ -669,7 +2464,11 @@ test("rendering a project clears non-persisted content email recipients", () => 
 });
 
 test("project detail loads ignore stale project responses", async () => {
-  const taskViewState = { currentProjectId: "", currentProject: null };
+  const taskViewState = {
+    currentProjectId: "",
+    currentProject: null,
+    operationBatchUpdateRequestToken: 0,
+  };
   const deferredA = Promise.withResolvers();
   const rendered = [];
   const loadedPanels = [];
@@ -685,12 +2484,24 @@ test("project detail loads ignore stale project responses", async () => {
     loadProjectOperationBatchDraft: async (task) => {
       loadedPanels.push(`draft:${task.taskId}`);
     },
+    loadOperationPersonnelTaskState: async (task) => loadedPanels.push(`personnel:${task.taskId}`),
     loadProjectRequirementForDetail: async (task) => loadedPanels.push(`requirement:${task.taskId}`),
     loadProjectWechatBinding: async (task = taskViewState.currentProject) => loadedPanels.push(`wechat:${task.taskId}`),
+    beginOperationBatchUpdateProjectRequest: (projectId) => {
+      taskViewState.currentProjectId = projectId;
+      taskViewState.operationBatchUpdateRequestToken += 1;
+      return taskViewState.operationBatchUpdateRequestToken;
+    },
+    beginOperationPersonnelProjectRequest: (projectId) => {
+      taskViewState.currentProjectId = projectId;
+      taskViewState.operationPersonnelRequestToken = Number(taskViewState.operationPersonnelRequestToken || 0) + 1;
+      return taskViewState.operationPersonnelRequestToken;
+    },
     isCurrentProject: (taskId) => taskViewState.currentProjectId === taskId,
     setProjectOverviewExpanded: () => {},
     setProjectActionControlsDisabled: () => {},
     projectOperationBatchState: panelState(),
+    operationPersonnelTaskState: panelState(),
     projectRequirementInlineState: panelState(),
     projectWechatBindingState: panelState(),
   };
@@ -706,11 +2517,15 @@ test("project detail loads ignore stale project responses", async () => {
   await loadA;
 
   assert.deepEqual(rendered, ["project-b"]);
-  assert.deepEqual(loadedPanels.sort(), ["draft:project-b", "requirement:project-b", "wechat:project-b"]);
+  assert.deepEqual(loadedPanels.sort(), ["draft:project-b", "personnel:project-b", "requirement:project-b", "wechat:project-b"]);
 });
 
 test("project detail follow-up panel failures are isolated", async () => {
-  const taskViewState = { currentProjectId: "", currentProject: null };
+  const taskViewState = {
+    currentProjectId: "",
+    currentProject: null,
+    operationBatchUpdateRequestToken: 0,
+  };
   const loadedPanels = [];
   const panelState = () => ({ textContent: "" });
   const dependencies = {
@@ -724,12 +2539,24 @@ test("project detail follow-up panel failures are isolated", async () => {
       loadedPanels.push(`draft:${task.taskId}`);
       throw new Error("draft unavailable");
     },
+    loadOperationPersonnelTaskState: async (task) => loadedPanels.push(`personnel:${task.taskId}`),
     loadProjectRequirementForDetail: async (task) => loadedPanels.push(`requirement:${task.taskId}`),
     loadProjectWechatBinding: async (task = taskViewState.currentProject) => loadedPanels.push(`wechat:${task.taskId}`),
+    beginOperationBatchUpdateProjectRequest: (projectId) => {
+      taskViewState.currentProjectId = projectId;
+      taskViewState.operationBatchUpdateRequestToken += 1;
+      return taskViewState.operationBatchUpdateRequestToken;
+    },
+    beginOperationPersonnelProjectRequest: (projectId) => {
+      taskViewState.currentProjectId = projectId;
+      taskViewState.operationPersonnelRequestToken = Number(taskViewState.operationPersonnelRequestToken || 0) + 1;
+      return taskViewState.operationPersonnelRequestToken;
+    },
     isCurrentProject: (taskId) => taskViewState.currentProjectId === taskId,
     setProjectOverviewExpanded: () => {},
     setProjectActionControlsDisabled: () => {},
     projectOperationBatchState: panelState(),
+    operationPersonnelTaskState: panelState(),
     projectRequirementInlineState: panelState(),
     projectWechatBindingState: panelState(),
   };
@@ -741,7 +2568,7 @@ test("project detail follow-up panel failures are isolated", async () => {
 
   await assert.doesNotReject(loadProjectDetail("project-b"));
 
-  assert.deepEqual(loadedPanels.sort(), ["draft:project-b", "requirement:project-b", "wechat:project-b"]);
+  assert.deepEqual(loadedPanels.sort(), ["draft:project-b", "personnel:project-b", "requirement:project-b", "wechat:project-b"]);
   assert.equal(dependencies.projectOperationBatchState.textContent, "无法加载运营批次参数：draft unavailable");
 });
 
@@ -775,7 +2602,8 @@ test("stale project mutation responses do not overwrite the active project or DO
 
 test("every project mutation guards each response before updating shared state", () => {
   const handlers = [
-    ["createProjectOperationBatch", "      async function createProjectOperationBatch() {", "\n      async function recordProjectOperationBatchCode() {"],
+    ["createProjectOperationBatch", "      async function createProjectOperationBatch() {", "\n      async function reconcileProjectOperationBatch() {"],
+    ["reconcileProjectOperationBatch", "      async function reconcileProjectOperationBatch() {", "\n      async function recordProjectOperationBatchCode() {"],
     ["recordProjectOperationBatchCode", "      async function recordProjectOperationBatchCode() {", "\n      const projectRequirementConfigFields = ["],
     ["handleProjectRequirementStaffEdit", "      async function handleProjectRequirementStaffEdit() {", "\n      async function handleProjectRequirementChangeAction(button) {"],
     ["handleProjectRequirementChangeAction", "      async function handleProjectRequirementChangeAction(button) {", "\n      async function handleProjectRequirementSubmitAction(button) {"],
@@ -800,7 +2628,13 @@ test("every project mutation guards each response before updating shared state",
 test("project navigation clears stale state and disables actions until current render", async () => {
   const deferred = Promise.withResolvers();
   const disabledStates = [];
-  const taskViewState = { currentProjectId: "project-a", currentProject: { taskId: "project-a" } };
+  const taskViewState = {
+    currentProjectId: "project-a",
+    currentProject: { taskId: "project-a" },
+    currentProjectWorkflow: { steps: { batch: { status: "ready" } } },
+    operationBatchUpdateRequestToken: 0,
+    operationPersonnelRequestToken: 0,
+  };
   const dependencies = {
     taskViewState,
     fetchJson: async () => deferred.promise,
@@ -811,10 +2645,22 @@ test("project navigation clears stale state and disables actions until current r
       taskViewState.currentProject = task;
       dependencies.setProjectActionControlsDisabled(false);
     },
+    beginOperationBatchUpdateProjectRequest: (projectId) => {
+      taskViewState.currentProjectId = projectId;
+      taskViewState.operationBatchUpdateRequestToken += 1;
+      return taskViewState.operationBatchUpdateRequestToken;
+    },
+    beginOperationPersonnelProjectRequest: (projectId) => {
+      taskViewState.currentProjectId = projectId;
+      taskViewState.operationPersonnelRequestToken += 1;
+      return taskViewState.operationPersonnelRequestToken;
+    },
     loadProjectOperationBatchDraft: async () => {},
+    loadOperationPersonnelTaskState: async () => {},
     loadProjectRequirementForDetail: async () => {},
     loadProjectWechatBinding: async () => {},
     projectOperationBatchState: { textContent: "" },
+    operationPersonnelTaskState: { textContent: "" },
     projectRequirementInlineState: { textContent: "" },
     projectWechatBindingState: { textContent: "" },
   };
@@ -826,6 +2672,7 @@ test("project navigation clears stale state and disables actions until current r
 
   const loadB = loadProjectDetail("project-b");
   assert.equal(taskViewState.currentProject, null);
+  assert.equal(taskViewState.currentProjectWorkflow, null);
   assert.deepEqual(disabledStates, [true]);
   deferred.resolve({ taskId: "project-b" });
   await loadB;
@@ -844,13 +2691,80 @@ test("project navigation clears stale state and disables actions until current r
     "projectAutoConfigBtn",
     "operationBatchRefreshBtn",
     "operationBatchCreateBtn",
+    "operationBatchReconcileBtn",
     "operationBatchRecordBtn",
+    "operationBatchUpdateBtn",
+    "operationPersonnelTaskActionBtn",
+    "operationPersonnelTaskRecheckBtn",
     "contentRequirementEmailSendBtn",
     "projectWechatBindingRefreshBtn",
     "projectWechatBindingSaveBtn",
   ]) {
     assert.ok(actionHelper.includes(control), `missing project action control: ${control}`);
   }
+});
+
+test("operation batch automation lock survives A to B to A navigation", async () => {
+  const taskViewState = {
+    currentProjectId: "project-a",
+    currentProject: { taskId: "project-a" },
+    currentProjectWorkflow: null,
+    operationBatchAutomationTaskIds: new Set(["project-a"]),
+    operationBatchUpdateRequestToken: 0,
+    operationPersonnelRequestToken: 0,
+  };
+  const dependencies = {
+    taskViewState,
+    fetchJson: async (url) => ({ taskId: url.includes("project-b") ? "project-b" : "project-a" }),
+    isCurrentProject: (taskId) => taskViewState.currentProjectId === taskId,
+    setProjectOverviewExpanded: () => {},
+    setProjectActionControlsDisabled: () => {},
+    renderProjectDetail: (task) => { taskViewState.currentProject = task; },
+    beginOperationBatchUpdateProjectRequest: (projectId) => {
+      taskViewState.currentProjectId = projectId;
+      taskViewState.operationBatchUpdateRequestToken += 1;
+      return taskViewState.operationBatchUpdateRequestToken;
+    },
+    beginOperationPersonnelProjectRequest: (projectId) => {
+      taskViewState.currentProjectId = projectId;
+      taskViewState.operationPersonnelRequestToken += 1;
+      return taskViewState.operationPersonnelRequestToken;
+    },
+    loadProjectOperationBatchDraft: async () => {},
+    loadOperationPersonnelTaskState: async () => {},
+    loadProjectRequirementForDetail: async () => {},
+    loadProjectWechatBinding: async () => {},
+    projectOperationBatchState: { textContent: "" },
+    operationPersonnelTaskState: { textContent: "" },
+    projectRequirementInlineState: { textContent: "" },
+    projectWechatBindingState: { textContent: "" },
+  };
+  const loadProjectDetail = compileInlineFunction(
+    "      async function loadProjectDetail(projectId) {",
+    "\n      function requirementNextAction(item = {}) {",
+    dependencies,
+  );
+
+  await loadProjectDetail("project-a");
+  assert.equal(taskViewState.operationBatchAutomationTaskIds.has("project-a"), true);
+
+  await loadProjectDetail("project-b");
+  assert.equal(taskViewState.operationBatchAutomationTaskIds.has("project-a"), true);
+
+  await loadProjectDetail("project-a");
+  assert.equal(taskViewState.operationBatchAutomationTaskIds.has("project-a"), true);
+
+  const renderProjectDetail = sourceBetween(
+    "      function renderProjectDetail(task) {",
+    "\n      async function loadProjectDetail(projectId) {",
+  );
+  const loadProjectDetailSource = sourceBetween(
+    "      async function loadProjectDetail(projectId) {",
+    "\n      function requirementNextAction(item = {}) {",
+  );
+  assert.equal(renderProjectDetail.includes("operationBatchAutomationTaskIds.clear"), false);
+  assert.equal(loadProjectDetailSource.includes("operationBatchAutomationTaskIds.clear"), false);
+  assert.equal(loadProjectDetailSource.includes("operationBatchAutomationRunning"), false);
 });
 
 test("each asynchronous project panel loader guards shared state by task id", () => {
@@ -940,15 +2854,415 @@ test("recipient status text uses raw text and manual batch recording preserves i
   assert.ok(recordBatch.includes("projectOperationBatchDraft.innerHTML = draftHtml;"));
 });
 
-test("operation batch create locks its action while the request is in flight", () => {
-  const handler = sourceBetween(
+test("operation batch create and reconcile release the originating task after navigation", async () => {
+  const handlerBounds = [
+    [
+      "      async function createProjectOperationBatch() {",
+      "\n      async function reconcileProjectOperationBatch() {",
+    ],
+    [
+      "      async function reconcileProjectOperationBatch() {",
+      "\n      async function recordProjectOperationBatchCode() {",
+    ],
+  ];
+  for (const [start, end] of handlerBounds) {
+    const taskA = { taskId: "project-a", config: {} };
+    const taskViewState = { currentProjectId: "project-a", currentProject: taskA };
+    const requestStarted = Promise.withResolvers();
+    const requestFinished = Promise.withResolvers();
+    const transitions = [];
+    const handler = compileInlineFunction(start, end, {
+      taskViewState,
+      operationBatchCodeIsValid: () => false,
+      projectOperationBatchState: { textContent: "" },
+      setOperationBatchAutomationRunning: (taskId, running) => transitions.push([taskId, running]),
+      fetchJson: async () => {
+        requestStarted.resolve();
+        return await requestFinished.promise;
+      },
+      isCurrentProject: (taskId) => taskViewState.currentProjectId === taskId,
+    });
+
+    const request = handler();
+    await requestStarted.promise;
+    taskViewState.currentProjectId = "project-b";
+    taskViewState.currentProject = { taskId: "project-b", config: {} };
+    requestFinished.resolve({ task: taskA, operationBatchCode: "EZT260003" });
+    await request;
+
+    assert.deepEqual(transitions, [["project-a", true], ["project-a", false]]);
+  }
+});
+
+test("operation batch automation disables manual recording and restores unified actions", () => {
+  const taskViewState = {
+    currentProject: { taskId: "project-a", config: {} },
+    operationBatchAutomationTaskIds: new Set(),
+  };
+  const operationBatchCreateBtn = { disabled: false, hidden: false, textContent: "" };
+  const operationBatchReconcileBtn = { disabled: false, hidden: false };
+  const operationBatchRecordBtn = { disabled: false };
+  const updateOperationBatchActions = compileInlineFunction(
+    "      function updateOperationBatchActions(task = taskViewState.currentProject) {",
+    "\n      function setOperationBatchAutomationRunning",
+    {
+      taskViewState,
+      operationBatchCreateBtn,
+      operationBatchReconcileBtn,
+      operationBatchRecordBtn,
+      operationBatchCodeIsValid: () => false,
+      operationBatchNeedsReconciliation: () => false,
+    },
+  );
+  const setOperationBatchAutomationRunning = compileInlineFunction(
+    "      function setOperationBatchAutomationRunning(taskId, running) {",
+    "\n      function renderOperationBatchFromTask",
+    { taskViewState, updateOperationBatchActions },
+  );
+
+  setOperationBatchAutomationRunning("project-a", true);
+  assert.equal(operationBatchCreateBtn.disabled, true);
+  assert.equal(operationBatchReconcileBtn.disabled, true);
+  assert.equal(operationBatchRecordBtn.disabled, true);
+
+  taskViewState.currentProject = { taskId: "project-b", config: {} };
+  updateOperationBatchActions(taskViewState.currentProject);
+  assert.equal(operationBatchCreateBtn.disabled, false);
+  assert.equal(operationBatchRecordBtn.disabled, false);
+
+  taskViewState.currentProject = { taskId: "project-a", config: {} };
+  updateOperationBatchActions(taskViewState.currentProject);
+  assert.equal(operationBatchCreateBtn.disabled, true);
+  assert.equal(operationBatchRecordBtn.disabled, true);
+
+  setOperationBatchAutomationRunning("project-a", false);
+  assert.equal(operationBatchCreateBtn.disabled, false);
+  assert.equal(operationBatchReconcileBtn.disabled, true);
+  assert.equal(operationBatchRecordBtn.disabled, false);
+
+  setOperationBatchAutomationRunning("project-a", true);
+  taskViewState.currentProject = null;
+  operationBatchCreateBtn.disabled = true;
+  operationBatchReconcileBtn.disabled = true;
+  operationBatchRecordBtn.disabled = true;
+  setOperationBatchAutomationRunning("project-a", false);
+  assert.equal(operationBatchCreateBtn.disabled, true);
+  assert.equal(operationBatchReconcileBtn.disabled, true);
+  assert.equal(operationBatchRecordBtn.disabled, true);
+});
+
+test("operation batch actions switch legacy unresolved creation into reconciliation without a refresh", () => {
+  const operationBatchCreateBtn = { disabled: false, hidden: false, textContent: "" };
+  const operationBatchReconcileBtn = { disabled: true, hidden: true };
+  const operationBatchRecordBtn = { disabled: false };
+  const updateOperationBatchActions = compileInlineFunction(
+    "      function updateOperationBatchActions(task = taskViewState.currentProject) {",
+    "\n      function setOperationBatchAutomationRunning",
+    {
+      taskViewState: { currentProject: null, operationBatchAutomationTaskIds: new Set() },
+      operationBatchCreateBtn,
+      operationBatchReconcileBtn,
+      operationBatchRecordBtn,
+      operationBatchCodeIsValid: (code) => /^[A-Z]{3}\d{6}$/.test(String(code || "")),
+      operationBatchNeedsReconciliation: (task) => (
+        task?.config?.operationBatch?.status === "failed"
+        && task?.config?.operationBatch?.errorMessage === "创建完成，但未能从详情页读取批次代码"
+      ),
+    },
+  );
+
+  updateOperationBatchActions({
+    config: {
+      operationBatch: {
+        status: "failed",
+        errorMessage: "创建完成，但未能从详情页读取批次代码",
+      },
+    },
+  });
+
+  assert.equal(operationBatchCreateBtn.disabled, true);
+  assert.equal(operationBatchCreateBtn.hidden, true);
+  assert.equal(operationBatchReconcileBtn.disabled, false);
+  assert.equal(operationBatchReconcileBtn.hidden, false);
+  assert.equal(operationBatchRecordBtn.disabled, false);
+});
+
+test("operation batch reconciliation helper recognizes the stable server error code", () => {
+  const operationBatchCodeIsValid = compileInlineFunction(
+    "      function operationBatchCodeIsValid(value) {",
+    "\n      function operationBatchNeedsReconciliation(task = {}) {",
+  );
+  const operationBatchNeedsReconciliation = compileInlineFunction(
+    "      function operationBatchNeedsReconciliation(task = {}) {",
+    "\n      function operationBatchWorkflowAfterTask(task = {}) {",
+    { operationBatchCodeIsValid },
+  );
+
+  assert.equal(operationBatchNeedsReconciliation({
+    config: {
+      operationBatch: {
+        status: "failed",
+        errorCode: "OPERATION_BATCH_RECONCILIATION_REQUIRED",
+      },
+    },
+  }), true);
+  assert.equal(operationBatchNeedsReconciliation({
+    config: {
+      operationBatch: {
+        status: "failed",
+        errorMessage: "创建完成，但未能从详情页读取批次代码",
+      },
+    },
+  }), true);
+  assert.equal(operationBatchNeedsReconciliation({
+    config: { operationBatch: { status: "reconciling" } },
+  }), true);
+});
+
+test("operation batch UI only offers reconciliation after an interrupted reconciliation", () => {
+  const operationBatchCreateBtn = { disabled: false, hidden: false, textContent: "" };
+  const operationBatchReconcileBtn = { disabled: true, hidden: true };
+  const operationBatchRecordBtn = { disabled: false };
+  const operationBatchCodeIsValid = compileInlineFunction(
+    "      function operationBatchCodeIsValid(value) {",
+    "\n      function operationBatchNeedsReconciliation(task = {}) {",
+  );
+  const operationBatchNeedsReconciliation = compileInlineFunction(
+    "      function operationBatchNeedsReconciliation(task = {}) {",
+    "\n      function operationBatchWorkflowAfterTask(task = {}) {",
+    { operationBatchCodeIsValid },
+  );
+  const updateOperationBatchActions = compileInlineFunction(
+    "      function updateOperationBatchActions(task = taskViewState.currentProject) {",
+    "\n      function setOperationBatchAutomationRunning",
+    {
+      taskViewState: { currentProject: null, operationBatchAutomationTaskIds: new Set() },
+      operationBatchCreateBtn,
+      operationBatchReconcileBtn,
+      operationBatchRecordBtn,
+      operationBatchCodeIsValid,
+      operationBatchNeedsReconciliation,
+    },
+  );
+
+  updateOperationBatchActions({ config: { operationBatch: { status: "reconciling" } } });
+
+  assert.equal(operationBatchCreateBtn.disabled, true);
+  assert.equal(operationBatchCreateBtn.hidden, true);
+  assert.equal(operationBatchReconcileBtn.disabled, false);
+  assert.equal(operationBatchReconcileBtn.hidden, false);
+});
+
+test("operation batch create applies a persisted reconciliation task from a 409 response", async () => {
+  const originalTask = { taskId: "project-a", config: { operationBatchCode: "foo" } };
+  const persistedTask = {
+    taskId: "project-a",
+    config: { operationBatch: { status: "reconciliation_required" } },
+  };
+  const taskViewState = { currentProjectId: "project-a", currentProject: originalTask };
+  const renderedTasks = [];
+  const renderedWorkflows = [];
+  const operationBatchCreateBtn = { disabled: false };
+  const error = Object.assign(new Error("运营批次创建结果待同步，请先执行批次对账。"), {
+    status: 409,
+    response: { task: persistedTask },
+  });
+  const createProjectOperationBatch = compileInlineFunction(
     "      async function createProjectOperationBatch() {",
+    "\n      async function reconcileProjectOperationBatch() {",
+    {
+      taskViewState,
+      mergeProjectTaskResponse: (_current, incoming) => incoming,
+      fetchJson: async () => { throw error; },
+      isCurrentProject: (taskId) => taskViewState.currentProjectId === taskId,
+      renderOperationBatchFromTask: (task) => renderedTasks.push(task),
+      renderProjectWorkflow: (task, workflow) => renderedWorkflows.push({ task, workflow }),
+      operationBatchWorkflowAfterTask: () => ({ steps: { batch: { status: "reconciliation_required" } } }),
+      loadProjectOperationBatchDraft: async () => {},
+      projectOperationBatchState: { textContent: "" },
+      operationBatchCreateBtn,
+      operationBatchCodeIsValid: (code) => /^[A-Z]{3}\d{6}$/.test(String(code || "")),
+      setOperationBatchAutomationRunning: (_taskId, running) => {
+        if (!running) operationBatchCreateBtn.disabled = true;
+      },
+      updateOperationBatchActions: (task) => {
+        operationBatchCreateBtn.disabled = task?.config?.operationBatch?.status === "reconciliation_required";
+      },
+    },
+  );
+
+  await assert.rejects(createProjectOperationBatch(), /待同步/);
+  assert.strictEqual(taskViewState.currentProject, persistedTask);
+  assert.deepEqual(renderedTasks, [persistedTask]);
+  assert.equal(renderedWorkflows.at(-1).workflow.steps.batch.status, "reconciliation_required");
+  assert.equal(operationBatchCreateBtn.disabled, true);
+});
+
+test("operation batch create and reconcile directly consume persisted tasks from 409 responses", () => {
+  const createHandler = sourceBetween(
+    "      async function createProjectOperationBatch() {",
+    "\n      async function reconcileProjectOperationBatch() {",
+  );
+  const reconcileHandler = sourceBetween(
+    "      async function reconcileProjectOperationBatch() {",
     "\n      async function recordProjectOperationBatchCode() {",
   );
-  assert.ok(handler.includes("operationBatchCreateBtn.disabled = true"));
-  assert.ok(handler.includes("try {"));
-  assert.ok(handler.includes("finally"));
-  assert.ok(handler.includes("updateOperationBatchActions(taskViewState.currentProject)"));
+
+  for (const handler of [createHandler, reconcileHandler]) {
+    assert.ok(handler.includes("error?.status === 409"));
+    assert.ok(handler.includes("error.response?.task"));
+    assert.ok(handler.includes("taskViewState.currentProject = mergeProjectTaskResponse(taskViewState.currentProject, error.response.task)"));
+    assert.ok(handler.includes("renderOperationBatchFromTask(taskViewState.currentProject)"));
+    assert.ok(handler.includes("renderProjectWorkflow("));
+  }
+});
+
+test("operation batch reconciliation only calls its API and applies a persisted task from 409", async () => {
+  const originalTask = {
+    taskId: "project-a",
+    config: { operationBatch: { status: "reconciliation_required" } },
+  };
+  const persistedTask = {
+    taskId: "project-a",
+    config: { operationBatch: { status: "reconciliation_required", errorMessage: "未找到唯一批次" } },
+  };
+  const taskViewState = { currentProjectId: "project-a", currentProject: originalTask };
+  const requestedUrls = [];
+  const renderedTasks = [];
+  const renderedWorkflows = [];
+  const operationBatchReconcileBtn = { disabled: false };
+  const error = Object.assign(new Error("未找到唯一批次"), {
+    status: 409,
+    response: { task: persistedTask },
+  });
+  const reconcileProjectOperationBatch = compileInlineFunction(
+    "      async function reconcileProjectOperationBatch() {",
+    "\n      async function recordProjectOperationBatchCode() {",
+    {
+      taskViewState,
+      mergeProjectTaskResponse: (_current, incoming) => incoming,
+      fetchJson: async (url) => {
+        requestedUrls.push(url);
+        throw error;
+      },
+      isCurrentProject: (taskId) => taskViewState.currentProjectId === taskId,
+      renderOperationBatchFromTask: (task) => renderedTasks.push(task),
+      renderProjectWorkflow: (task, workflow) => renderedWorkflows.push({ task, workflow }),
+      operationBatchWorkflowAfterTask: () => ({ steps: { batch: { status: "reconciliation_required" } } }),
+      projectOperationBatchState: { textContent: "" },
+      operationBatchReconcileBtn,
+      setOperationBatchAutomationRunning: () => {},
+      updateOperationBatchActions: () => {},
+    },
+  );
+
+  await assert.rejects(reconcileProjectOperationBatch(), /未找到唯一批次/);
+  assert.deepEqual(requestedUrls, ["/api/tasks/project-a/operation-batch/reconcile"]);
+  assert.strictEqual(taskViewState.currentProject, persistedTask);
+  assert.deepEqual(renderedTasks, [persistedTask]);
+  assert.equal(renderedWorkflows.at(-1).workflow.steps.batch.status, "reconciliation_required");
+});
+
+test("successful operation batch reconciliation refreshes the complete server workflow", async () => {
+  const originalTask = {
+    taskId: "project-a",
+    config: { operationBatch: { status: "reconciliation_required" } },
+  };
+  const reconciledTask = {
+    taskId: "project-a",
+    config: { operationBatchCode: "EZT260003", operationBatch: { code: "EZT260003" } },
+  };
+  const taskViewState = { currentProjectId: "project-a", currentProject: originalTask };
+  const loadedTasks = [];
+  const reconcileProjectOperationBatch = compileInlineFunction(
+    "      async function reconcileProjectOperationBatch() {",
+    "\n      async function recordProjectOperationBatchCode() {",
+    {
+      taskViewState,
+      mergeProjectTaskResponse: (_current, incoming) => incoming,
+      fetchJson: async () => ({ task: reconciledTask, operationBatchCode: "EZT260003" }),
+      isCurrentProject: (taskId) => taskViewState.currentProjectId === taskId,
+      renderOperationBatchFromTask: () => {},
+      renderProjectWorkflow: () => {},
+      operationBatchWorkflowAfterTask: () => ({ steps: { batch: { status: "success" } } }),
+      loadProjectOperationBatchDraft: async (task) => loadedTasks.push(task),
+      projectOperationBatchState: { textContent: "" },
+      operationBatchReconcileBtn: { disabled: false },
+      setOperationBatchAutomationRunning: () => {},
+      updateOperationBatchActions: () => {},
+    },
+  );
+
+  await reconcileProjectOperationBatch();
+
+  assert.deepEqual(loadedTasks, [reconciledTask]);
+});
+
+test("operation batch reconciliation does not overwrite a newly selected project after workflow refresh", async () => {
+  const originalTask = {
+    taskId: "project-a",
+    config: { operationBatch: { status: "reconciliation_required" } },
+  };
+  const reconciledTask = {
+    taskId: "project-a",
+    config: { operationBatchCode: "EZT260003", operationBatch: { code: "EZT260003" } },
+  };
+  const projectB = { taskId: "project-b", config: {} };
+  const taskViewState = { currentProjectId: "project-a", currentProject: originalTask };
+  const loaderStarted = Promise.withResolvers();
+  const releaseLoader = Promise.withResolvers();
+  const projectOperationBatchState = { textContent: "" };
+  const reconcileProjectOperationBatch = compileInlineFunction(
+    "      async function reconcileProjectOperationBatch() {",
+    "\n      async function recordProjectOperationBatchCode() {",
+    {
+      taskViewState,
+      mergeProjectTaskResponse: (_current, incoming) => incoming,
+      fetchJson: async () => ({ task: reconciledTask, operationBatchCode: "EZT260003" }),
+      isCurrentProject: (taskId) => taskViewState.currentProjectId === taskId,
+      renderOperationBatchFromTask: () => {},
+      renderProjectWorkflow: () => {},
+      operationBatchWorkflowAfterTask: () => ({ steps: { batch: { status: "success" } } }),
+      loadProjectOperationBatchDraft: async () => {
+        loaderStarted.resolve();
+        await releaseLoader.promise;
+      },
+      projectOperationBatchState,
+      operationBatchReconcileBtn: { disabled: false },
+      setOperationBatchAutomationRunning: () => {},
+      updateOperationBatchActions: () => {},
+    },
+  );
+
+  const reconcileA = reconcileProjectOperationBatch();
+  await loaderStarted.promise;
+  taskViewState.currentProjectId = "project-b";
+  taskViewState.currentProject = projectB;
+  projectOperationBatchState.textContent = "project-b-state";
+  releaseLoader.resolve();
+  await reconcileA;
+
+  assert.strictEqual(taskViewState.currentProject, projectB);
+  assert.equal(projectOperationBatchState.textContent, "project-b-state");
+});
+
+test("operation batch completion checks use strict codes in create, render, and workflow loading", () => {
+  const createHandler = sourceBetween(
+    "      async function createProjectOperationBatch() {",
+    "\n      async function reconcileProjectOperationBatch() {",
+  );
+  const renderHandler = sourceBetween(
+    "      function renderOperationBatchFromTask(task = {}) {",
+    "\n      function isCurrentProject(taskId) {",
+  );
+  const loadHandler = sourceBetween(
+    "      async function loadProjectOperationBatchDraft(task = taskViewState.currentProject) {",
+    "\n      async function createProjectOperationBatch() {",
+  );
+
+  assert.ok(createHandler.includes("operationBatchCodeIsValid"));
+  assert.ok(renderHandler.includes("operationBatchCodeIsValid"));
+  assert.ok(loadHandler.includes("operationBatchCodeIsValid"));
 });
 
 test("candidate page loads and preselects task-scoped sessions", () => {
@@ -1776,6 +4090,76 @@ test("project auto configuration action lives in the upper requirement source ca
   assert.ok(html.includes('projectAutoConfigBtn.addEventListener("click"'));
 });
 
+test("platform source edits are auto confirmed across operation collaboration", () => {
+  const projectSourceRequirementChangeHistory = compileInlineFunction(
+    "      function projectSourceRequirementChangeHistory(task = {}) {",
+    "\n      function projectSourceChangeNeedsReview(record = {}) {",
+  );
+  const projectSourceChangeNeedsReview = compileInlineFunction(
+    "      function projectSourceChangeNeedsReview(record = {}) {",
+    "\n      function projectWorkflowSourceChangeNotice(task = {}, stepKey = \"\") {",
+  );
+  const projectWorkflowSourceChangeNotice = compileInlineFunction(
+    "      function projectWorkflowSourceChangeNotice(task = {}, stepKey = \"\") {",
+    "\n      function renderProjectSourceRequirementChangeLog(task = {}) {",
+    { projectSourceRequirementChangeHistory, projectSourceChangeNeedsReview },
+  );
+  const renderProjectSourceRequirementChangeLog = compileInlineFunction(
+    "      function renderProjectSourceRequirementChangeLog(task = {}) {",
+    "\n      function renderProjectRequirementInline(task, detail = null) {",
+    {
+      projectSourceRequirementChangeHistory,
+      projectSourceChangeNeedsReview,
+      safeText: (value) => String(value),
+      formatTaskTime: (value) => String(value || ""),
+    },
+  );
+
+  assert.equal(projectSourceChangeNeedsReview({ reviewStatus: "pending_review" }), true);
+  assert.equal(projectSourceChangeNeedsReview({ reviewStatus: "future_status" }), true);
+  assert.equal(projectSourceChangeNeedsReview({ reviewStatus: "auto_confirmed" }), false);
+  assert.equal(projectSourceChangeNeedsReview({}), false);
+
+  for (const stepKey of ["batch", "personnel", "content", "archive"]) {
+    const source = stepKey === "content" ? "examRequirement" : "fanwei";
+    for (const reviewStatus of ["auto_confirmed", undefined]) {
+      assert.equal(projectWorkflowSourceChangeNotice({
+        config: { projectSourceChangeHistory: [{ source, reviewStatus }] },
+      }, stepKey), "");
+    }
+  }
+
+  for (const stepKey of ["batch", "personnel", "archive"]) {
+    assert.equal(projectWorkflowSourceChangeNotice({
+      config: { projectSourceChangeHistory: [{ source: "fanwei", reviewStatus: "pending_review" }] },
+    }, stepKey), "有变更请确认");
+  }
+  assert.equal(projectWorkflowSourceChangeNotice({
+    config: { projectSourceChangeHistory: [{ source: "examRequirement", reviewStatus: "pending_review" }] },
+  }, "content"), "有变更请确认");
+
+  const autoConfirmedHtml = renderProjectSourceRequirementChangeLog({
+    config: { projectSourceChangeHistory: [{
+      source: "fanwei",
+      reviewStatus: "auto_confirmed",
+      versionBefore: 1,
+      versionAfter: 2,
+      changes: [{ field: "字段甲", before: "旧值", after: "新值" }],
+    }] },
+  });
+  const pendingHtml = renderProjectSourceRequirementChangeLog({
+    config: { projectSourceChangeHistory: [{
+      source: "examRequirement",
+      reviewStatus: "pending_review",
+      changes: [],
+    }] },
+  });
+  assert.match(autoConfirmedHtml, /平台内部修改 · 已自动确认/);
+  assert.match(autoConfirmedHtml, /字段甲/);
+  assert.match(pendingHtml, /待审核/);
+  assert.doesNotMatch(autoConfirmedHtml, /button/i);
+});
+
 test("exam detail progress cards include paper binding and grouped candidate flows", () => {
   assert.ok(html.includes("buildTaskDisplaySteps(task)"));
   assert.ok(html.includes('if (taskHasAnyTrial(task) && stepMap.has("trial_session_create"))'));
@@ -2569,6 +4953,54 @@ test("project detail renders sourced operation workflow and keeps local archive 
   assert.ok(html.includes("/operation-workflow?_=${Date.now()}"));
 });
 
+test("project personnel detail renders its structured draft instead of an empty fields fallback", () => {
+  const renderOperationPersonnelDraft = compileInlineFunction(
+    "      function renderOperationPersonnelDraft(draft = {}) {",
+    "\n      function operationBatchUpdateStatus",
+    {
+      safeText: (value) => String(value ?? ""),
+      operationBatchSourceLabel: (source) => source,
+    },
+  );
+  const rendered = renderOperationPersonnelDraft({
+    batch: {
+      code: "EZT260006",
+      batchName: "湖北邮政_2026年8月",
+    },
+    personnel: {
+      serviceType: "ATA 监考－分散在线监考",
+      platform: "悦站",
+      monitorRatio: "1:50",
+      monitorCount: 80,
+    },
+    dates: {
+      start: "2026-07-27",
+      end: "2026-08-19",
+      nameListDue: "2026-08-19",
+    },
+    recipients: {
+      toGroup: "演练组",
+      toNames: ["张乐翔"],
+      ccGroup: "",
+      ccCount: 0,
+    },
+    schedules: [{
+      scheduleCode: 1,
+      subjectName: "中国邮政集团公司湖北省分公司招聘考试V2",
+      start: "2026-08-22T15:30:00",
+      end: "2026-08-22T17:30:00",
+    }],
+    warnings: [],
+  });
+
+  assert.match(rendered, /EZT260006/);
+  assert.match(rendered, /湖北邮政_2026年8月/);
+  assert.match(rendered, /悦站/);
+  assert.match(rendered, /演练组/);
+  assert.match(rendered, /张乐翔/);
+  assert.doesNotMatch(rendered, /暂无参数/);
+});
+
 test("operation workflow and source cards open account-style editable dialogs", () => {
   for (const id of [
     "operationDetailModal",
@@ -2593,6 +5025,70 @@ test("operation workflow and source cards open account-style editable dialogs", 
   assert.ok(html.includes("/source-snapshot"));
 });
 
+test("source save keeps the fresh operation batch draft instead of a persisted stale draft", async () => {
+  const staleBatchName = "中国邮政集团公司湖北省分公司招聘考试_2026年8月";
+  const freshBatchName = "湖北邮政_2026年8月";
+  const task = {
+    taskId: "project-a",
+    config: {
+      operationBatch: {
+        draft: {
+          fields: {
+            batchName: { value: staleBatchName },
+          },
+        },
+      },
+    },
+  };
+  const result = {
+    task,
+    workflow: {},
+    batchDraft: {
+      fields: {
+        batchName: { value: freshBatchName },
+      },
+    },
+  };
+  const batchPanel = { textContent: "" };
+  const sourceDetailSaveBtn = { disabled: false };
+  const saveProjectSourceDetail = compileInlineFunction(
+    "      async function saveProjectSourceDetail() {",
+    "\n      function renderOperationBatchDraft",
+    {
+      taskViewState: {
+        currentProjectId: "project-a",
+        wechatRequirementDetails: {},
+      },
+      validateVisibleTimeRangeEditors: () => true,
+      sourceDetailFields: {},
+      sourceDetailSaveBtn,
+      sourceDetailState: { textContent: "" },
+      fetchJson: async () => result,
+      collectSourceDetailPayload: () => ({ source: "fanwei" }),
+      isCurrentProject: (taskId) => taskId === "project-a",
+      renderProjectDetail: (renderedTask) => {
+        batchPanel.textContent = renderedTask.config.operationBatch.draft.fields.batchName.value;
+      },
+      renderProjectWorkflow: (_renderedTask, _workflow, draft) => {
+        batchPanel.textContent = draft.fields.batchName.value;
+      },
+      renderOperationBatchFromTask: (renderedTask) => {
+        batchPanel.textContent = renderedTask.config.operationBatch.draft.fields.batchName.value;
+      },
+      renderProjectRequirementInline: () => {},
+      projectRequirementRequestId: () => "",
+      projectOperationBatchState: { textContent: "" },
+      closeProjectDialog: () => {},
+      sourceDetailModal: {},
+    },
+  );
+
+  await saveProjectSourceDetail();
+
+  assert.equal(batchPanel.textContent, freshBatchName);
+  assert.equal(sourceDetailSaveBtn.disabled, false);
+});
+
 test("EasyExam source editing includes the established requirement dropdown options", () => {
   const sourceControl = sourceBetween(
     "      function sourceFieldControl(group, key, value, selectOptions = {}) {",
@@ -2611,6 +5107,13 @@ test("EasyExam source editing includes the established requirement dropdown opti
   for (const field of ["试卷扣时规则", "考试地址", "视频监控", "视频录制", "鹰眼监控", "考试类型", "人工判分"]) {
     assert.ok(html.includes(`"${field}": [`), `missing dropdown options for ${field}`);
   }
+});
+
+test("Fanwei source editing exposes batch-name mode and restores automatic values", () => {
+  assert.ok(html.includes("data-source-batch-name-mode"));
+  assert.ok(html.includes('id="sourceBatchNameRestoreAutoBtn"'));
+  assert.ok(html.includes('data-source-readonly-field="项目名称"'));
+  assert.ok(html.includes("restoreBatchNameAuto"));
 });
 
 test("project configuration opens saved EasyExam requirements from the upper source card", () => {

@@ -8,6 +8,7 @@ import {
   buildProjectWorkflow,
   normalizeFanweiBusinessRequirement,
 } from "./project_workflow.mjs";
+import { buildOperationPersonnelTaskDraft, operationPersonnelTaskFingerprint } from "./operation_personnel_task.mjs";
 
 const fanwei = {
   requestid: "1505614",
@@ -58,6 +59,25 @@ test("builds versioned Fanwei and EasyExam snapshots for a project card", () => 
   assert.equal(result.examRequirements.length, 1);
   assert.equal(result.examRequirements[0], result.examRequirement);
   assert.equal(result.businessRequirement.project_code, "F0020795");
+});
+
+test("initial Fanwei project config generates an automatic business batch name", () => {
+  const config = buildFanweiProjectConfig({
+    fanwei: {
+      fields: {
+        "项目名称": "中国邮政集团公司湖北省分公司社会招聘考试",
+        "客户名称": "中国邮政集团公司湖北省分公司",
+      },
+    },
+    model: { requirementFields: { "考试日期时间": "2026/08/22 09:00 - 2026/08/22 11:00" } },
+    requirements: [
+      { fields: { "考试名称": "社会招聘考试", "考试日期时间": "2026/08/22 09:00 - 2026/08/22 11:00" } },
+      { fields: { "考试名称": "专项能力测试", "考试日期时间": "2026/09/01 09:00 - 2026/09/01 11:00" } },
+    ],
+  });
+  assert.equal(config.businessRequirement.batch_name, "社招_2026年8月");
+  assert.equal(config.businessRequirement.batch_name_mode, "auto");
+  assert.equal(config.fanweiSource.raw.fields["批次名称"], "社招_2026年8月");
 });
 
 test("stores every copied EasyExam requirement while keeping the first as the legacy snapshot", () => {
@@ -140,7 +160,17 @@ test("personnel and archive drafts keep their source boundaries", () => {
 });
 
 test("workflow opens personnel and content after batch and archive after actual execution", () => {
-  const config = buildFanweiProjectConfig({ fanwei, model, parsed: { config: {} } });
+  const config = buildFanweiProjectConfig({
+    fanwei,
+    model,
+    parsed: {
+      config: {
+        startTimeDisplay: "2026/07/20 09:30",
+        endTimeDisplay: "2026/07/20 11:30",
+        courses: [{ code: "C001", name: "综合能力" }],
+      },
+    },
+  });
   const waiting = buildProjectWorkflow({ config, sessions: [] }, { warnings: [] });
   assert.equal(waiting.steps.batch.status, "ready");
   assert.equal(waiting.steps.personnel.status, "waiting_batch");
@@ -148,7 +178,288 @@ test("workflow opens personnel and content after batch and archive after actual 
   assert.equal(waiting.steps.archive.status, "waiting_execution");
 
   const ready = buildProjectWorkflow({ config: { ...config, operationBatchCode: "EZT260003" }, sessions: [{ session_id: "1001" }] }, { warnings: [] });
-  assert.equal(ready.steps.personnel.status, "ready");
+  assert.equal(ready.steps.personnel.status, "needs_review");
   assert.equal(ready.steps.content.status, "ready");
   assert.equal(ready.steps.archive.status, "ready");
+});
+
+test("workflow exposes the stable personnel-task status and actions", () => {
+  const config = buildFanweiProjectConfig({
+    fanwei,
+    model,
+    parsed: {
+      config: {
+        startTimeDisplay: "2026/08/20 09:30",
+        endTimeDisplay: "2026/08/20 11:30",
+        courses: [{ code: "C001", name: "综合能力" }],
+      },
+    },
+  });
+  const task = { config: { ...config, operationBatchCode: "EZT260003" }, sessions: [] };
+  const draft = buildOperationPersonnelTaskDraft(task);
+  task.config.operationPersonnelTask = { lastSuccessfulFingerprint: operationPersonnelTaskFingerprint(draft) };
+
+  const workflow = buildProjectWorkflow(task, { warnings: [] });
+
+  assert.equal(workflow.steps.personnel.status, "sent");
+  assert.deepEqual(workflow.steps.personnel.actions, [{
+    id: "preview_adjust",
+    label: "调整人员任务并重新发送",
+  }]);
+});
+
+test("workflow uses the same confirmed personnel fields as the detail state", () => {
+  const config = buildFanweiProjectConfig({
+    fanwei,
+    model,
+    parsed: {
+      config: {
+        startTimeDisplay: "2026/08/20 09:30",
+        endTimeDisplay: "2026/08/20 11:30",
+        courses: [{ code: "C001", name: "综合能力" }],
+      },
+    },
+  });
+  const task = {
+    config: {
+      ...config,
+      operationBatchCode: "EZT260003",
+      operationPersonnelTask: {
+        status: "sent",
+        confirmedEdits: {
+          dates: {
+            start: "2026-07-30",
+            end: "2026-08-17",
+            nameListDue: "2026-08-17",
+          },
+          personnel: { monitorRatio: "1:55", monitorCount: 70 },
+        },
+      },
+    },
+    sessions: [],
+  };
+  const sentDraft = buildOperationPersonnelTaskDraft(task);
+  task.config.operationPersonnelTask.lastSuccessfulFingerprint =
+    operationPersonnelTaskFingerprint(sentDraft);
+
+  const workflow = buildProjectWorkflow(task, { warnings: [] });
+
+  assert.deepEqual(workflow.personnelDraft.dates, {
+    start: "2026-07-30",
+    end: "2026-08-17",
+    nameListDue: "2026-08-17",
+  });
+  assert.equal(workflow.personnelDraft.personnel.monitorRatio, "1:55");
+  assert.equal(workflow.personnelDraft.personnel.monitorCount, 70);
+  assert.equal(workflow.steps.personnel.status, "sent");
+});
+
+test("workflow includes synchronized managed schedules when deciding whether personnel content changed", () => {
+  const task = {
+    config: {
+      operationBatchCode: "EZT260003",
+      businessRequirement: {
+        batch_name: "湖北邮政_2026年8月",
+        ata_invigilator_arrangement: "需要安排分散人工监考",
+        estimated_subject_count: "4000",
+      },
+      operationBatch: {
+        estimatedMaxSubjectCount: 4000,
+        managedSnapshot: {
+          batchName: "湖北邮政_2026年8月",
+          examStartDate: "2026-08-22",
+          examEndDate: "2026-08-22",
+          schedules: [{
+            requirementIndex: 0,
+            name: "湖北邮政招聘考试",
+            start: "2026-08-22T09:00:00",
+            end: "2026-08-22T11:00:00",
+          }],
+        },
+      },
+      examRequirements: [{
+        id: "requirement-1",
+        version: 2,
+        fields: {
+          "考试名称": "湖北邮政招聘考试",
+          "考试日期时间": "2026/08/22 09:00 - 2026/08/22 11:00",
+          "科目信息": "综合能力",
+        },
+        config: {
+          startTimeDisplay: "2026/08/22 09:00",
+          endTimeDisplay: "2026/08/22 11:00",
+          courses: [{ code: "20260822-01-01", name: "湖北邮政招聘考试" }],
+        },
+      }],
+    },
+    sessions: [],
+  };
+  const sentDraft = buildOperationPersonnelTaskDraft(task);
+  sentDraft.managedSchedules = structuredClone(
+    task.config.operationBatch.managedSnapshot.schedules,
+  );
+  task.config.operationPersonnelTask = {
+    status: "sent",
+    lastSuccessfulFingerprint: operationPersonnelTaskFingerprint(sentDraft),
+  };
+
+  const workflow = buildProjectWorkflow(task, { warnings: [] });
+
+  assert.deepEqual(workflow.personnelDraft.managedSchedules, sentDraft.managedSchedules);
+  assert.equal(
+    operationPersonnelTaskFingerprint(workflow.personnelDraft),
+    task.config.operationPersonnelTask.lastSuccessfulFingerprint,
+  );
+  assert.deepEqual(workflow.steps.personnel, {
+    status: "sent",
+    actions: [{
+      id: "preview_adjust",
+      label: "调整人员任务并重新发送",
+    }],
+  });
+});
+
+test("workflow keeps no-personnel arrangements skipped", () => {
+  const config = buildFanweiProjectConfig({ fanwei, model, parsed: { config: {} } });
+  config.businessRequirement.ata_invigilator_arrangement = "不需要安排人工监考";
+
+  const workflow = buildProjectWorkflow({
+    config: { ...config, operationBatchCode: "EZT260003" },
+    sessions: [],
+  }, { warnings: [] });
+
+  assert.deepEqual(workflow.steps.personnel, { status: "skipped", actions: [] });
+});
+
+test("workflow does not mark an unresolved external batch as creatable", () => {
+  const workflow = buildProjectWorkflow({
+    config: { operationBatch: { status: "reconciliation_required" } },
+    sessions: [],
+  }, { warnings: [] });
+
+  assert.equal(workflow.steps.batch.status, "reconciliation_required");
+});
+
+test("workflow keeps an interrupted reconciliation pending until a valid batch code is saved", () => {
+  const workflow = buildProjectWorkflow({
+    config: { operationBatch: { status: "reconciling" } },
+    sessions: [],
+  }, { warnings: [] });
+
+  assert.equal(workflow.steps.batch.status, "reconciliation_required");
+  assert.equal(workflow.steps.personnel.status, "waiting_batch");
+  assert.equal(workflow.steps.content.status, "waiting_batch");
+});
+
+test("workflow keeps malformed non-empty batch codes pending and downstream steps locked", () => {
+  const workflow = buildProjectWorkflow({
+    config: {
+      operationBatchCode: "foo",
+      operationBatch: { status: "created_unpublished" },
+    },
+    sessions: [{ session_id: "1001" }],
+  }, { warnings: [] });
+
+  assert.equal(workflow.steps.batch.status, "reconciliation_required");
+  assert.equal(workflow.steps.personnel.status, "waiting_batch");
+  assert.equal(workflow.steps.content.status, "waiting_batch");
+  assert.equal(workflow.steps.archive.status, "waiting_execution");
+});
+
+test("workflow exposes managed batch update state without treating subjects as managed", () => {
+  const task = {
+    config: {
+      operationBatchCode: "EZT260003",
+      businessRequirement: {
+        batch_name: "湖北邮政社招_2026年8月",
+        ata_invigilator_arrangement: "不需要安排人工监考",
+      },
+      operationBatch: {
+        managedSnapshot: {
+          batchName: "湖北邮政社招_2026年8月",
+          examStartDate: "2026-08-22",
+          examEndDate: "2026-08-22",
+          schedules: [{
+            requirementIndex: 0,
+            name: "笔试",
+            start: "2026-08-22T09:00:00",
+            end: "2026-08-22T11:00:00",
+          }],
+        },
+      },
+      examRequirements: [{
+        fields: {
+          "考试名称": "笔试",
+          "考试日期时间": "2026/08/22 09:00 - 2026/08/22 11:00",
+          "科目信息": "新科目",
+        },
+      }],
+    },
+    sessions: [],
+  };
+
+  const workflow = buildProjectWorkflow(task, { warnings: [] });
+
+  assert.equal(workflow.steps.batch.status, "success");
+  assert.equal(workflow.steps.batch.baselineRequired, false);
+  assert.deepEqual(workflow.steps.batch.missingSchedules, []);
+  assert.deepEqual(workflow.steps.batch.managedChanges, []);
+});
+
+test("workflow prioritizes persisted in-flight and failure states over a computed update", () => {
+  for (const status of ["updating", "update_failed", "update_conflict"]) {
+    const workflow = buildProjectWorkflow({
+      config: {
+        operationBatchCode: "EZT260003",
+        businessRequirement: { batch_name: "批次" },
+        operationBatch: {
+          status,
+          managedSnapshot: {
+            batchName: "批次",
+            examStartDate: "2026-08-22",
+            examEndDate: "2026-08-22",
+            schedules: [{
+              requirementIndex: 0,
+              name: "旧日程",
+              start: "2026-08-22T09:00:00",
+              end: "2026-08-22T11:00:00",
+            }],
+          },
+        },
+        examRequirements: [{
+          fields: {
+            "考试名称": "新日程",
+            "考试日期时间": "2026/08/22 09:00 - 2026/08/22 11:00",
+          },
+        }],
+      },
+      sessions: [],
+    }, { warnings: [] });
+
+    assert.equal(workflow.steps.batch.status, status);
+    assert.equal(workflow.steps.batch.managedChanges[0].path, "schedules[0].name");
+  }
+});
+
+test("workflow exposes incomplete managed schedules for an existing batch", () => {
+  const workflow = buildProjectWorkflow({
+    config: {
+      operationBatchCode: "EZT260003",
+      businessRequirement: { batch_name: "批次" },
+      operationBatch: {},
+      examRequirements: [
+        { fields: { "考试名称": "第一场", "考试日期时间": "2026/08/22 09:00 - 2026/08/22 11:00" } },
+        { fields: { "考试名称": "第二场", "考试日期时间": "" } },
+      ],
+    },
+    sessions: [],
+  }, { warnings: [] });
+
+  assert.equal(workflow.steps.batch.status, "waiting_schedule");
+  assert.equal(workflow.steps.batch.baselineRequired, true);
+  assert.deepEqual(workflow.steps.batch.missingSchedules, [{
+    requirementIndex: 1,
+    fields: ["考试日期时间"],
+  }]);
+  assert.deepEqual(workflow.steps.batch.managedChanges, []);
 });

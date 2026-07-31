@@ -56,16 +56,50 @@ import {
 import { handleRequirementRequest } from "./requirement_request_api.mjs";
 import {
   acquireOperationBatchCreation,
-  applyOperationBatchResult,
   buildOperationBatchDraft,
+  operationBatchCodeIsValid,
+  operationBatchDraftForReconciliation,
+  operationBatchFailureState,
+  operationBatchNeedsReconciliation,
   releaseOperationBatchCreation,
+  resolveOperationBatchResultWrite,
 } from "./operation_batch.mjs";
+import { runOperationBatchCreationFlow } from "./operation_batch_creation_flow.mjs";
+import {
+  createOperationBatchCoordinator,
+  operationBatchCreationFailureResponse,
+  readFreshOperationBatchTask,
+  withFreshOperationBatchTask,
+} from "./operation_batch_coordinator.mjs";
+import {
+  applyOperationBatchManagedResult,
+  buildDesiredOperationBatchSnapshot,
+} from "./operation_batch_update.mjs";
+import {
+  inspectOperationBatchManagedSnapshot,
+  runOperationBatchManagedUpdate,
+  runOperationBatchScheduleInitialization,
+} from "./operation_batch_update_runner.mjs";
+import {
+  createOperationBatchUpdateApi,
+  createOperationBatchUpdateService,
+} from "./operation_batch_update_service.mjs";
 import {
   checkOperationConsoleAutomationEnvironment,
   enableOperationConsoleAutomation,
   installOperationConsoleAutomationDeps,
 } from "./operation_console_env.mjs";
-import { runOperationBatchCreation } from "./operation_batch_runner.mjs";
+import {
+  OPERATION_BATCH_RECONCILIATION_REQUIRED,
+  runOperationBatchCreation,
+  runOperationBatchReconciliation,
+} from "./operation_batch_runner.mjs";
+import { createOperationPersonnelTaskService } from "./operation_personnel_task_service.mjs";
+import {
+  runOperationPersonnelAttempt,
+  runOperationPersonnelInspection,
+  runOperationPersonnelRecheck,
+} from "./operation_personnel_task_runner.mjs";
 import { deleteTaskSessionsFromTenant } from "./session_deletion.mjs";
 import { enableSessionVideoRecording } from "./session_video_recording.mjs";
 import { calculateRoomSizes } from "./room_assignment.mjs";
@@ -116,6 +150,11 @@ import {
   buildProjectWorkflow,
   normalizeFanweiBusinessRequirement,
 } from "./project_workflow.mjs";
+import {
+  defaultOperationBatchName,
+  resolveOperationBatchName,
+  withOperationBatchNameEditorDefaults,
+} from "./operation_batch_name.mjs";
 import { buildAutoConfigFromRequirement } from "./requirement_auto_config_adapter.mjs";
 import {
   buildWindowsChromeLaunchArgs,
@@ -884,6 +923,8 @@ async function runTaskState(action, payload = {}) {
   });
   let stdout = "";
   let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
   child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
   child.stdin.end(JSON.stringify(payload));
@@ -1460,14 +1501,22 @@ async function createFanweiRequirementImportFromPayload(payload, req, options = 
 
 async function handleFanweiRequirementImport(req, res) {
   const payload = parseJsonSafe(await readBody(req)) || {};
-  json(res, 200, await createFanweiRequirementImportFromPayload(payload, req));
+  try {
+    json(res, 200, await createFanweiRequirementImportFromPayload(payload, req));
+  } catch (error) {
+    json(res, error.status || 500, {
+      error: error instanceof Error ? error.message : String(error),
+      errorCode: error.errorCode,
+      detail: error.detail,
+    });
+  }
 }
 
 async function handleProjectWorkflow(taskId, req, res) {
   const task = await runTaskState("get", { taskId });
   if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
   const batchDraft = buildOperationBatchDraft(task, operationBatchDraftOverridesFromTask(task));
-  return json(res, 200, { ok: true, task, batchDraft, workflow: buildProjectWorkflow(task, batchDraft) });
+  return json(res, 200, { ok: true, task: withOperationBatchNameEditorDefaults(task), batchDraft, workflow: buildProjectWorkflow(task, batchDraft) });
 }
 
 function editableStringRecord(value) {
@@ -1631,7 +1680,7 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
   if (source === "fanwei") {
     const currentSource = task.config?.fanweiSource || {};
     const currentRaw = currentSource.raw || {};
-    const raw = {
+    let raw = {
       ...currentRaw,
       fields: editableStringRecord(payload.fields),
       serviceConfirmation: {
@@ -1640,14 +1689,35 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
       },
       examSceneRows: editableExamSceneRows(payload.examSceneRows),
     };
+    const requirementFields = taskExamRequirements(task)[0]?.fields || task.config?.examRequirement?.fields || {};
+    const batchName = resolveOperationBatchName({
+      previousValue: currentSource.raw?.fields?.["批次名称"],
+      previousMode: currentSource.batchNameMode,
+      generatedValue: defaultOperationBatchName({
+        examName: requirementFields["考试名称"],
+        examStart: requirementFields["考试日期时间"],
+      }),
+      submittedValue: payload.restoreBatchNameAuto === true ? "" : raw.fields["批次名称"],
+      restoreAuto: payload.restoreBatchNameAuto === true,
+    });
+    raw = {
+      ...raw,
+      fields: { ...raw.fields, "批次名称": batchName.value },
+    };
     const changes = projectRequirementFieldChanges(fanweiHistoryFields(currentRaw), fanweiHistoryFields(raw));
-    const requirementFields = task.config?.examRequirement?.fields || {};
-    const businessRequirement = normalizeFanweiBusinessRequirement(raw, { requirementFields });
+    const businessRequirement = {
+      ...normalizeFanweiBusinessRequirement(raw, { requirementFields }),
+      batch_name: batchName.value,
+      batch_name_mode: batchName.mode,
+      batch_name_auto_value: batchName.autoValue,
+    };
     const fanweiSource = {
       ...currentSource,
       version: Number(currentSource.version || 0) + 1,
       modifiedAt: now,
       serialNo: businessRequirement.operation_serial_number || currentSource.serialNo || "",
+      batchNameMode: batchName.mode,
+      batchNameAutoValue: batchName.autoValue,
       raw,
     };
     const projectCard = {
@@ -1663,6 +1733,7 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
       projectCode: businessRequirement.project_code || task.config?.projectCode || "",
       projectSourceChangeHistory: appendProjectSourceChangeHistory(task, {
         source: "fanwei",
+        reviewStatus: "auto_confirmed",
         changedAt: now,
         versionBefore: Number(currentSource.version || 0),
         versionAfter: Number(fanweiSource.version || 0),
@@ -1705,11 +1776,41 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
     };
     const examRequirements = currentRequirements.length ? [...currentRequirements] : [examRequirement];
     examRequirements[requirementIndex] = examRequirement;
+    const currentSource = task.config?.fanweiSource || {};
+    const currentRaw = currentSource.raw || {};
+    const currentBusinessRequirement = task.config?.businessRequirement || {};
+    const batchName = resolveOperationBatchName({
+      previousValue: currentRaw.fields?.["批次名称"] || currentBusinessRequirement.batch_name,
+      previousMode: currentSource.batchNameMode || currentBusinessRequirement.batch_name_mode,
+      generatedValue: defaultOperationBatchName({
+        examName: examRequirements[0]?.fields?.["考试名称"],
+        examStart: examRequirements[0]?.fields?.["考试日期时间"],
+      }),
+      submittedValue: currentRaw.fields?.["批次名称"] || currentBusinessRequirement.batch_name,
+    });
+    const fanweiSource = {
+      ...currentSource,
+      batchNameMode: batchName.mode,
+      batchNameAutoValue: batchName.autoValue,
+      raw: {
+        ...currentRaw,
+        fields: { ...(currentRaw.fields || {}), "批次名称": batchName.value },
+      },
+    };
+    const businessRequirement = {
+      ...currentBusinessRequirement,
+      batch_name: batchName.value,
+      batch_name_mode: batchName.mode,
+      batch_name_auto_value: batchName.autoValue,
+    };
     configPatch = {
       examRequirements,
       examRequirement: examRequirements[0],
+      fanweiSource,
+      businessRequirement,
       projectSourceChangeHistory: appendProjectSourceChangeHistory(task, {
         source: "examRequirement",
+        reviewStatus: "auto_confirmed",
         requirementIndex,
         changedAt: now,
         versionBefore: Number(current.version || 0),
@@ -4546,7 +4647,10 @@ async function handleTaskDetail(taskId, req, res) {
     syncedTask.candidates = [];
   }
   const enrichedTask = await enrichTaskPaperUnitInfoForDetail(req, syncedTask);
-  return json(res, 200, { ...enrichedTask, sessionChangeFeatureEnabled });
+  return json(res, 200, {
+    ...withOperationBatchNameEditorDefaults(enrichedTask),
+    sessionChangeFeatureEnabled,
+  });
 }
 
 function sessionChangeDisabled(res) {
@@ -5604,8 +5708,8 @@ async function handleScoreStampApplication(taskId, req, res) {
 }
 
 async function handleTaskHide(taskId, req, res) {
-  const task = await runTaskState("get", { taskId });
-  if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  const initialTask = await runTaskState("get", { taskId });
+  if (!initialTask || !visibleByOwner(auth, req, initialTask)) return notFound(res);
   const requestUrl = new URL(req.url, "http://127.0.0.1");
   if (requestUrl.searchParams.get("archive") === "1") {
     const result = await runTaskState("hide", { taskId });
@@ -5613,24 +5717,33 @@ async function handleTaskHide(taskId, req, res) {
     const archivedTask = await runTaskState("get", { taskId });
     return json(res, 200, { ok: true, archived: true, task: archivedTask });
   }
-  const login = getYikaoLoginForTask(task);
-  const apiBase = normalizeApiBase(process.env.YIKAO_API_BASE || login.apiBase || "https://eztest.cn");
-  const logs = [];
-  const deletion = await deleteTaskSessionsFromTenant({
-    login,
-    apiBase,
-    sessions: task.sessions || [],
-    requestJson: readTenantJsonWithLogin,
-    emitLog: (message) => logs.push(message),
-  });
-  const result = await runTaskState("delete", { taskId });
-  if (!result?.deleted) return notFound(res);
-  return json(res, 200, {
-    ok: true,
-    deleted: true,
-    taskId,
-    deletedSessionIds: deletion.deletedSessionIds,
-    logs,
+  return await withFreshOperationBatchTask({
+    acquire: () => operationBatchCoordinator.acquireTask(taskId),
+    readTask: () => runTaskState("get", { taskId }),
+    onAcquireError: (error) => operationBatchLockConflictResponse(taskId, initialTask, res, error),
+    onMissing: () => notFound(res),
+    run: async (task) => {
+      if (!visibleByOwner(auth, req, task)) return notFound(res);
+      const login = getYikaoLoginForTask(task);
+      const apiBase = normalizeApiBase(process.env.YIKAO_API_BASE || login.apiBase || "https://eztest.cn");
+      const logs = [];
+      const deletion = await deleteTaskSessionsFromTenant({
+        login,
+        apiBase,
+        sessions: task.sessions || [],
+        requestJson: readTenantJsonWithLogin,
+        emitLog: (message) => logs.push(message),
+      });
+      const result = await runTaskState("delete", { taskId });
+      if (!result?.deleted) return notFound(res);
+      return json(res, 200, {
+        ok: true,
+        deleted: true,
+        taskId,
+        deletedSessionIds: deletion.deletedSessionIds,
+        logs,
+      });
+    },
   });
 }
 
@@ -5641,106 +5754,717 @@ function operationBatchDraftOverridesFromTask(task = {}) {
   };
 }
 
-const operationBatchCreationInFlight = new Set();
+const operationBatchAutomationInFlight = new Set();
+const operationBatchResultInFlight = new Set();
+const operationBatchAutomationLockKey = "persistent-profile";
+const operationBatchCoordinator = createOperationBatchCoordinator({
+  acquireLock: acquireOperationBatchCreation,
+  releaseLock: releaseOperationBatchCreation,
+  profileInFlight: operationBatchAutomationInFlight,
+  taskInFlight: operationBatchResultInFlight,
+  profileKey: operationBatchAutomationLockKey,
+});
+let operationBatchUpdateApi;
+const operationPersonnelTaskActiveAttempts = new Set();
+let operationPersonnelTaskService;
+
+function operationBatchUpdateRunnerOptions() {
+  return {
+    baseUrl: process.env.OPERATION_CONSOLE_BASE_URL,
+    userDataDir: process.env.OPERATION_CONSOLE_USER_DATA_DIR,
+  };
+}
+
+function assertOperationBatchUpdateAutomationEnabled() {
+  if (process.env.OPERATION_CONSOLE_AUTOMATION_ENABLED === "1") return;
+  const error = new Error(
+    "运营控制台浏览器自动化未启用。请先确认测试环境已登录，并设置 OPERATION_CONSOLE_AUTOMATION_ENABLED=1 后重启服务。",
+  );
+  error.status = 409;
+  error.code = "OPERATION_BATCH_AUTOMATION_DISABLED";
+  throw error;
+}
+
+function getOperationBatchUpdateApi() {
+  if (operationBatchUpdateApi) return operationBatchUpdateApi;
+  const readTask = (taskId) => runTaskState("get", { taskId });
+  const service = createOperationBatchUpdateService({
+    readTask,
+    updateTaskConfig: (taskId, config) => runTaskState("update_config", { taskId, config }),
+    coordinator: operationBatchCoordinator,
+    runInspection: (instruction) => inspectOperationBatchManagedSnapshot(
+      instruction,
+      operationBatchUpdateRunnerOptions(),
+    ),
+    runUpdate: (instruction) => runOperationBatchManagedUpdate(
+      instruction,
+      operationBatchUpdateRunnerOptions(),
+    ),
+    assertAutomationEnabled: assertOperationBatchUpdateAutomationEnabled,
+  });
+  operationBatchUpdateApi = createOperationBatchUpdateApi({
+    service,
+    workflowForTask: (task) => {
+      const batchDraft = buildOperationBatchDraft(
+        task,
+        operationBatchDraftOverridesFromTask(task),
+      );
+      return buildProjectWorkflow(task, batchDraft);
+    },
+  });
+  return operationBatchUpdateApi;
+}
+
+function getOperationPersonnelTaskService() {
+  if (operationPersonnelTaskService) return operationPersonnelTaskService;
+  const runnerOptions = () => ({
+    baseUrl: process.env.OPERATION_CONSOLE_BASE_URL,
+    userDataDir: process.env.OPERATION_CONSOLE_USER_DATA_DIR,
+  });
+  operationPersonnelTaskService = createOperationPersonnelTaskService({
+    readTask: (taskId) => runTaskState("get", { taskId }),
+    updateTaskConfig: (taskId, config) => runTaskState("update_config", { taskId, config }),
+    readRequirement: (requestId) => requestId
+      ? runRequirementState("get", { requestId })
+      : null,
+    coordinator: operationBatchCoordinator,
+    activeAttemptIds: operationPersonnelTaskActiveAttempts,
+    runInspection: (instruction) => runOperationPersonnelInspection(instruction, runnerOptions()),
+    runAttempt: (instruction, options) => runOperationPersonnelAttempt(
+      instruction,
+      { ...options, ...runnerOptions() },
+    ),
+    runRecheck: (instruction) => runOperationPersonnelRecheck(instruction, runnerOptions()),
+    environment: process.env.OPERATION_CONSOLE_ENVIRONMENT || "",
+  });
+  return operationPersonnelTaskService;
+}
+
+function operationPersonnelTaskActor(req) {
+  if (!auth.enabled) return { email: "", role: "admin" };
+  return getAuthUserFromRequest(auth, req);
+}
+
+function operationPersonnelTaskError(res, error) {
+  return json(res, Number(error?.status || 500), {
+    error: error instanceof Error ? error.message : String(error),
+    ...(error?.code ? { errorCode: error.code } : {}),
+  });
+}
+
+async function assertOperationPersonnelTaskVisible(taskId, req) {
+  const task = await runTaskState("get", { taskId });
+  if (task && visibleByOwner(auth, req, task)) return;
+  const error = new Error("人员任务不存在");
+  error.status = 404;
+  error.code = "PERSONNEL_TASK_NOT_FOUND";
+  throw error;
+}
+
+async function readOperationPersonnelPayload(req) {
+  const body = await readBody(req);
+  if (!body.toString("utf8").trim()) return {};
+  const payload = parseJsonSafe(body);
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) return payload;
+  const error = new Error("请求 JSON 格式无效");
+  error.status = 400;
+  error.code = "PERSONNEL_INVALID_JSON";
+  throw error;
+}
+
+function assertOperationPersonnelAutomationEnabled() {
+  if (process.env.OPERATION_CONSOLE_AUTOMATION_ENABLED === "1") return;
+  const error = new Error(
+    "运营控制台浏览器自动化未启用。请先确认测试环境已登录，并设置 OPERATION_CONSOLE_AUTOMATION_ENABLED=1 后重启服务。",
+  );
+  error.status = 409;
+  error.code = "PERSONNEL_AUTOMATION_DISABLED";
+  throw error;
+}
+
+async function handleOperationPersonnelTaskState(taskId, req, res) {
+  try {
+    const result = await getOperationPersonnelTaskService().get(
+      taskId,
+      operationPersonnelTaskActor(req),
+    );
+    return json(res, 200, result);
+  } catch (error) {
+    return operationPersonnelTaskError(res, error);
+  }
+}
+
+async function handleOperationPersonnelTaskPreview(taskId, req, res) {
+  try {
+    await assertOperationPersonnelTaskVisible(taskId, req);
+    const payload = await readOperationPersonnelPayload(req);
+    assertOperationPersonnelAutomationEnabled();
+    const result = await getOperationPersonnelTaskService().preview(
+      taskId,
+      operationPersonnelTaskActor(req),
+      payload,
+    );
+    return json(res, 200, result);
+  } catch (error) {
+    return operationPersonnelTaskError(res, error);
+  }
+}
+
+async function handleOperationPersonnelTaskSend(taskId, req, res) {
+  try {
+    await assertOperationPersonnelTaskVisible(taskId, req);
+    const payload = await readOperationPersonnelPayload(req);
+    assertOperationPersonnelAutomationEnabled();
+    const result = await getOperationPersonnelTaskService().send(
+      taskId,
+      operationPersonnelTaskActor(req),
+      payload,
+    );
+    return json(res, 202, { attemptId: result.attemptId });
+  } catch (error) {
+    return operationPersonnelTaskError(res, error);
+  }
+}
+
+const operationPersonnelCheckpointOrder = [
+  "inspect_batch",
+  "publish_batch",
+  "verify_exam_schedules",
+  "sync_personnel_config",
+  "sync_personnel_dates",
+  "sync_exam_service_requirements",
+  "verify_task_sheet",
+  "select_recipients",
+  "submit_send",
+  "verify_send_record",
+];
+
+function operationPersonnelAttemptResponse(result) {
+  const attempt = result.attempt || {};
+  const checkpoints = result.state?.checkpoints || {};
+  const checkpoint = operationPersonnelCheckpointOrder
+    .filter((name) => checkpoints[name])
+    .at(-1) || "";
+  const deadline = Date.parse(attempt.verification?.deadlineAt);
+  const remainingSeconds = Number.isFinite(deadline)
+    ? Math.max(0, Math.ceil((deadline - Date.now()) / 1000))
+    : 0;
+  return {
+    attemptId: attempt.attemptId,
+    status: attempt.status,
+    checkpoint,
+    verificationPhase: attempt.verification?.phase || "",
+    remainingSeconds,
+    completed: ["sent", "failed_resumable", "result_unknown"].includes(attempt.status),
+    error: attempt.error || null,
+  };
+}
+
+function operationPersonnelTaskRecheckResponse(result) {
+  return {
+    taskId: result.taskId,
+    ...operationPersonnelAttemptResponse({
+      state: result.state,
+      attempt: result.state?.activeAttempt,
+    }),
+  };
+}
+
+async function handleOperationPersonnelTaskAttempt(taskId, attemptId, req, res) {
+  try {
+    const result = await getOperationPersonnelTaskService().attempt(
+      taskId,
+      operationPersonnelTaskActor(req),
+      attemptId,
+    );
+    return json(res, 200, operationPersonnelAttemptResponse(result));
+  } catch (error) {
+    return operationPersonnelTaskError(res, error);
+  }
+}
+
+async function handleOperationPersonnelTaskRecheck(taskId, req, res) {
+  try {
+    await assertOperationPersonnelTaskVisible(taskId, req);
+    assertOperationPersonnelAutomationEnabled();
+    const result = await getOperationPersonnelTaskService().recheck(
+      taskId,
+      operationPersonnelTaskActor(req),
+    );
+    return json(res, 200, operationPersonnelTaskRecheckResponse(result));
+  } catch (error) {
+    return operationPersonnelTaskError(res, error);
+  }
+}
+
+async function readOperationBatchUpdatePayload(req) {
+  const body = await readBody(req);
+  if (!body.toString("utf8").trim()) return {};
+  const payload = parseJsonSafe(body);
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) return payload;
+  const error = new Error("请求 JSON 格式无效");
+  error.status = 400;
+  error.code = "OPERATION_BATCH_UPDATE_INVALID_JSON";
+  throw error;
+}
+
+function sendOperationBatchUpdateResponse(res, result) {
+  return json(res, result.statusCode, result.body);
+}
+
+async function handleOperationBatchUpdateState(taskId, req, res) {
+  const result = await getOperationBatchUpdateApi().state(
+    taskId,
+    operationPersonnelTaskActor(req),
+  );
+  return sendOperationBatchUpdateResponse(res, result);
+}
+
+async function handleOperationBatchUpdatePreview(taskId, req, res) {
+  let payload;
+  try {
+    payload = await readOperationBatchUpdatePayload(req);
+  } catch (error) {
+    return json(res, error.status || 400, {
+      error: error.message,
+      errorCode: error.code,
+    });
+  }
+  const result = await getOperationBatchUpdateApi().preview(
+    taskId,
+    operationPersonnelTaskActor(req),
+    payload,
+  );
+  return sendOperationBatchUpdateResponse(res, result);
+}
+
+async function handleOperationBatchUpdateStart(taskId, req, res) {
+  let payload;
+  try {
+    payload = await readOperationBatchUpdatePayload(req);
+  } catch (error) {
+    return json(res, error.status || 400, {
+      error: error.message,
+      errorCode: error.code,
+    });
+  }
+  const result = await getOperationBatchUpdateApi().start(
+    taskId,
+    payload,
+    operationPersonnelTaskActor(req),
+  );
+  return sendOperationBatchUpdateResponse(res, result);
+}
+
+async function handleOperationBatchUpdateAttempt(taskId, attemptId, req, res) {
+  const result = await getOperationBatchUpdateApi().attempt(
+    taskId,
+    attemptId,
+    operationPersonnelTaskActor(req),
+  );
+  return sendOperationBatchUpdateResponse(res, result);
+}
+
+async function operationBatchLockConflictResponse(taskId, task, res, error) {
+  const currentTask = await readFreshOperationBatchTask(
+    () => runTaskState("get", { taskId }),
+    task,
+  );
+  return json(res, error?.status || 409, {
+    error: error instanceof Error ? error.message : String(error),
+    task: currentTask,
+  });
+}
+
+async function persistOperationBatchResult(taskId, task, result) {
+  const resolution = resolveOperationBatchResultWrite(task, result);
+  if (resolution.status === "conflict" || resolution.status === "idempotent") {
+    return { ...resolution, task };
+  }
+  const updated = await runTaskState("update_config", { taskId, config: resolution.patch });
+  return { ...resolution, task: updated };
+}
 
 async function handleOperationBatchDraft(taskId, req, res) {
   const task = await runTaskState("get", { taskId });
   if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
-  const payload = req.method === "POST" ? (parseJsonSafe(await readBody(req)) || {}) : operationBatchDraftOverridesFromTask(task);
-  const draft = buildOperationBatchDraft(task, payload);
   if (req.method !== "POST") {
+    const draft = buildOperationBatchDraft(task, operationBatchDraftOverridesFromTask(task));
     return json(res, 200, { ok: true, draft, task });
   }
-  const current = task.config?.operationBatch || {};
-  const operationBatch = {
-    ...current,
-    status: current.status || "draft",
-    draft,
-    updatedAt: new Date().toISOString(),
-  };
-  const updated = await runTaskState("update_config", { taskId, config: { operationBatch } });
-  return json(res, 200, { ok: true, draft, task: updated });
+  const payload = parseJsonSafe(await readBody(req)) || {};
+  return await withFreshOperationBatchTask({
+    acquire: () => operationBatchCoordinator.acquireTask(taskId),
+    readTask: () => runTaskState("get", { taskId }),
+    onAcquireError: (error) => operationBatchLockConflictResponse(taskId, task, res, error),
+    onMissing: () => notFound(res),
+    run: async (freshTask) => {
+      if (!visibleByOwner(auth, req, freshTask)) return notFound(res);
+      const draft = buildOperationBatchDraft(freshTask, payload);
+      const current = freshTask.config?.operationBatch || {};
+      const operationBatch = {
+        ...current,
+        status: current.status || "draft",
+        draft,
+        updatedAt: new Date().toISOString(),
+      };
+      const updated = await runTaskState("update_config", { taskId, config: { operationBatch } });
+      return json(res, 200, { ok: true, draft, task: updated });
+    },
+  });
 }
 
 async function handleOperationBatchCreate(taskId, req, res) {
   const task = await runTaskState("get", { taskId });
   if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
-  const existingOperationBatchCode = task.config?.operationBatchCode || task.config?.operationBatch?.code || "";
-  if (existingOperationBatchCode) {
-    return json(res, 200, {
-      ok: true,
-      task,
-      operationBatch: task.config?.operationBatch || {},
-      operationBatchCode: existingOperationBatchCode,
-      skipped: "operation_batch_already_created",
-    });
-  }
-  if (process.env.OPERATION_CONSOLE_AUTOMATION_ENABLED !== "1") {
-    return json(res, 409, {
-      error: "运营控制台浏览器自动化未启用。请先确认测试环境已登录，并设置 OPERATION_CONSOLE_AUTOMATION_ENABLED=1 后重启服务。",
-    });
-  }
-  const payload = parseJsonSafe(await readBody(req)) || operationBatchDraftOverridesFromTask(task);
-  const draft = buildOperationBatchDraft(task, payload);
-  const missing = (draft.warnings || []).map((item) => item.message).filter(Boolean);
-  if (missing.length) {
-    return badRequest(res, `批次草稿仍有缺失字段：${missing.join("；")}`);
-  }
-  acquireOperationBatchCreation(operationBatchCreationInFlight, taskId);
-  try {
-    const current = task.config?.operationBatch || {};
-    await runTaskState("update_config", {
-      taskId,
-      config: {
-        operationBatch: {
-          ...current,
-          status: "creating",
-          draft,
-          updatedAt: new Date().toISOString(),
-        },
-      },
-    });
-    const created = await runOperationBatchCreation(draft, {
-      baseUrl: process.env.OPERATION_CONSOLE_BASE_URL,
-      userDataDir: process.env.OPERATION_CONSOLE_USER_DATA_DIR,
-      allowTaskMismatch: process.env.OPERATION_CONSOLE_ALLOW_TEST_TASK_MISMATCH === "1",
-    });
-    const freshTask = await runTaskState("get", { taskId });
-    const patch = applyOperationBatchResult(freshTask, created);
-    const updated = await runTaskState("update_config", { taskId, config: patch });
-    return json(res, 200, { ok: true, task: updated, operationBatch: updated.config?.operationBatch || {}, operationBatchCode: updated.config?.operationBatchCode || "" });
-  } catch (error) {
-    const failedTask = await runTaskState("get", { taskId });
-    const failedCurrent = failedTask.config?.operationBatch || {};
-    const updated = await runTaskState("update_config", {
-      taskId,
-      config: {
-        operationBatch: {
-          ...failedCurrent,
-          status: "failed",
-          errorMessage: error instanceof Error ? error.message : String(error),
-          updatedAt: new Date().toISOString(),
-        },
-      },
-    });
-    return json(res, error?.status || 500, { error: error instanceof Error ? error.message : String(error), task: updated });
-  } finally {
-    releaseOperationBatchCreation(operationBatchCreationInFlight, taskId);
-  }
+  const payload = parseJsonSafe(await readBody(req));
+  return await withFreshOperationBatchTask({
+    acquire: () => operationBatchCoordinator.acquireAutomation(taskId),
+    readTask: () => runTaskState("get", { taskId }),
+    onAcquireError: (error) => operationBatchLockConflictResponse(taskId, task, res, error),
+    onMissing: () => notFound(res),
+    run: async (lockedTask) => {
+      if (!visibleByOwner(auth, req, lockedTask)) return notFound(res);
+      const lockedCode = lockedTask.config?.operationBatchCode || lockedTask.config?.operationBatch?.code || "";
+      if (operationBatchCodeIsValid(lockedCode)) {
+        return json(res, 200, {
+          ok: true,
+          task: lockedTask,
+          operationBatch: lockedTask.config?.operationBatch || {},
+          operationBatchCode: lockedCode,
+          skipped: "operation_batch_already_created",
+        });
+      }
+      if (operationBatchNeedsReconciliation(lockedTask)) {
+        return json(res, 409, {
+          error: "运营批次创建结果待同步，请先执行批次对账。",
+          errorCode: OPERATION_BATCH_RECONCILIATION_REQUIRED,
+          task: lockedTask,
+        });
+      }
+      if (process.env.OPERATION_CONSOLE_AUTOMATION_ENABLED !== "1") {
+        return json(res, 409, {
+          error: "运营控制台浏览器自动化未启用。请先确认测试环境已登录，并设置 OPERATION_CONSOLE_AUTOMATION_ENABLED=1 后重启服务。",
+        });
+      }
+      const draft = buildOperationBatchDraft(lockedTask, payload || operationBatchDraftOverridesFromTask(lockedTask));
+      const missing = (draft.warnings || []).map((item) => item.message).filter(Boolean);
+      if (missing.length) {
+        return badRequest(res, `批次草稿仍有缺失字段：${missing.join("；")}`);
+      }
+      let externalBatchConfirmed = false;
+      try {
+        const current = lockedTask.config?.operationBatch || {};
+        await runTaskState("update_config", {
+          taskId,
+          config: {
+            operationBatch: {
+              ...current,
+              status: "creating",
+              draft,
+              updatedAt: new Date().toISOString(),
+            },
+          },
+        });
+        const result = await runOperationBatchCreationFlow({
+          taskId,
+          task: lockedTask,
+          desired: buildDesiredOperationBatchSnapshot(lockedTask),
+          createBatch: async () => {
+            const created = await runOperationBatchCreation(draft, {
+              baseUrl: process.env.OPERATION_CONSOLE_BASE_URL,
+              userDataDir: process.env.OPERATION_CONSOLE_USER_DATA_DIR,
+              allowTaskMismatch: process.env.OPERATION_CONSOLE_ALLOW_TEST_TASK_MISMATCH === "1",
+            });
+            externalBatchConfirmed = true;
+            return created;
+          },
+          persistBatch: async (created) => {
+            const freshTask = await runTaskState("get", { taskId });
+            if (!freshTask) {
+              const error = new Error("运营批次已创建，但本地任务已不存在，无法保存创建结果");
+              error.status = 409;
+              throw error;
+            }
+            const saved = await persistOperationBatchResult(taskId, freshTask, {
+              ...created,
+              eventType: "operation_batch_created",
+            });
+            if (saved.status === "conflict") {
+              const error = new Error(
+                `运营批次代码冲突：当前为 ${saved.existingOperationBatchCode}，本次为 ${saved.operationBatchCode}`,
+              );
+              error.status = 409;
+              error.operationBatchConflict = saved;
+              throw error;
+            }
+            return saved;
+          },
+          initializeSchedules: (instruction) => runOperationBatchScheduleInitialization(
+            instruction,
+            {
+              baseUrl: process.env.OPERATION_CONSOLE_BASE_URL,
+              userDataDir: process.env.OPERATION_CONSOLE_USER_DATA_DIR,
+            },
+          ),
+          persistManaged: async (managedResult) => {
+            const freshTask = await runTaskState("get", { taskId });
+            if (!freshTask) {
+              const error = new Error("运营批次已初始化，但本地任务已不存在，无法保存回读结果");
+              error.status = 409;
+              throw error;
+            }
+            const updated = await runTaskState("update_config", {
+              taskId,
+              config: applyOperationBatchManagedResult(freshTask, managedResult),
+            });
+            return { task: updated };
+          },
+          persistFailure: async (error) => {
+            const freshTask = await runTaskState("get", { taskId });
+            if (!freshTask) {
+              const missing = new Error("运营批次代码已保存，但本地任务已不存在，无法保存初始化失败状态");
+              missing.status = 409;
+              throw missing;
+            }
+            const current = freshTask.config?.operationBatch || {};
+            const updated = await runTaskState("update_config", {
+              taskId,
+              config: {
+                operationBatch: {
+                  ...current,
+                  status: "update_failed",
+                  errorCode: String(error?.code || ""),
+                  errorMessage: error instanceof Error ? error.message : String(error),
+                  updatedAt: new Date().toISOString(),
+                },
+              },
+            });
+            return { task: updated };
+          },
+        });
+        return json(res, 200, {
+          ok: true,
+          status: result.status,
+          task: result.task,
+          operationBatch: result.task.config?.operationBatch || {},
+          operationBatchCode: result.operationBatchCode,
+        });
+      } catch (error) {
+        if (error?.operationBatchConflict) {
+          return json(res, 409, {
+            error: error.message,
+            task: error.operationBatchConflict.task,
+          });
+        }
+        if (error?.operationBatchStatus === "update_failed") {
+          return json(res, error.status || 409, {
+            error: error.message,
+            ...(error.code ? { errorCode: error.code } : {}),
+            status: "update_failed",
+            operationBatchCode: error.operationBatchCode,
+            task: error.task,
+          });
+        }
+        const failure = operationBatchFailureState(error, externalBatchConfirmed);
+        let failedTask;
+        try {
+          failedTask = await runTaskState("get", { taskId });
+        } catch (readError) {
+          const response = operationBatchCreationFailureResponse({
+            error: new Error(`${error instanceof Error ? error.message : String(error)}；读取最新任务失败：${readError instanceof Error ? readError.message : String(readError)}`),
+            externalBatchConfirmed,
+            failure,
+            reconciliationErrorCode: OPERATION_BATCH_RECONCILIATION_REQUIRED,
+          });
+          return json(res, response.statusCode, response.body);
+        }
+        if (!failedTask) {
+          const response = operationBatchCreationFailureResponse({
+            error,
+            externalBatchConfirmed,
+            failure,
+            reconciliationErrorCode: OPERATION_BATCH_RECONCILIATION_REQUIRED,
+          });
+          return json(res, response.statusCode === 409 ? 409 : 404, response.body);
+        }
+        const failedCurrent = failedTask.config?.operationBatch || {};
+        const updated = await runTaskState("update_config", {
+          taskId,
+          config: {
+            operationBatch: {
+              ...failedCurrent,
+              draft,
+              ...failure,
+              updatedAt: new Date().toISOString(),
+            },
+          },
+        });
+        const response = operationBatchCreationFailureResponse({
+          error,
+          externalBatchConfirmed,
+          failure,
+          task: updated,
+          reconciliationErrorCode: OPERATION_BATCH_RECONCILIATION_REQUIRED,
+        });
+        return json(res, response.statusCode, response.body);
+      }
+    },
+  });
+}
+
+async function handleOperationBatchReconcile(taskId, req, res) {
+  const task = await runTaskState("get", { taskId });
+  if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  return await withFreshOperationBatchTask({
+    acquire: () => operationBatchCoordinator.acquireAutomation(taskId),
+    readTask: () => runTaskState("get", { taskId }),
+    onAcquireError: (error) => operationBatchLockConflictResponse(taskId, task, res, error),
+    onMissing: () => notFound(res),
+    run: async (lockedTask) => {
+      if (!visibleByOwner(auth, req, lockedTask)) return notFound(res);
+      const lockedCode = lockedTask.config?.operationBatchCode || lockedTask.config?.operationBatch?.code || "";
+      if (operationBatchCodeIsValid(lockedCode)) {
+        return json(res, 200, {
+          ok: true,
+          task: lockedTask,
+          operationBatch: lockedTask.config?.operationBatch || {},
+          operationBatchCode: lockedCode,
+          skipped: "operation_batch_already_created",
+        });
+      }
+      if (!operationBatchNeedsReconciliation(lockedTask)) {
+        return json(res, 409, {
+          error: "当前运营批次没有待同步结果，请先创建批次。",
+          task: lockedTask,
+        });
+      }
+      if (process.env.OPERATION_CONSOLE_AUTOMATION_ENABLED !== "1") {
+        return json(res, 409, {
+          error: "运营控制台浏览器自动化未启用。请先确认测试环境已登录，并设置 OPERATION_CONSOLE_AUTOMATION_ENABLED=1 后重启服务。",
+        });
+      }
+      const draft = operationBatchDraftForReconciliation(lockedTask);
+      let externalBatchConfirmed = false;
+      try {
+        const current = lockedTask.config?.operationBatch || {};
+        await runTaskState("update_config", {
+          taskId,
+          config: {
+            operationBatch: {
+              ...current,
+              draft,
+              status: "reconciling",
+              updatedAt: new Date().toISOString(),
+            },
+          },
+        });
+        const reconciled = await runOperationBatchReconciliation(draft, {
+          baseUrl: process.env.OPERATION_CONSOLE_BASE_URL,
+          userDataDir: process.env.OPERATION_CONSOLE_USER_DATA_DIR,
+        });
+        if (!reconciled) {
+          throw new Error("批次列表未找到唯一匹配的运营批次代码");
+        }
+        externalBatchConfirmed = true;
+        const freshTask = await runTaskState("get", { taskId });
+        if (!freshTask) {
+          const error = new Error("已找到运营批次，但本地任务已不存在，无法保存对账结果");
+          error.status = 409;
+          throw error;
+        }
+        const saved = await persistOperationBatchResult(taskId, freshTask, {
+          ...reconciled,
+          eventType: "operation_batch_reconciled",
+        });
+        if (saved.status === "conflict") {
+          return json(res, 409, {
+            error: `运营批次代码冲突：当前为 ${saved.existingOperationBatchCode}，本次为 ${saved.operationBatchCode}`,
+            task: saved.task,
+          });
+        }
+        return json(res, 200, {
+          ok: true,
+          task: saved.task,
+          operationBatch: saved.task.config?.operationBatch || {},
+          operationBatchCode: saved.operationBatchCode,
+          ...(saved.status === "idempotent" ? { skipped: "operation_batch_result_already_recorded" } : {}),
+        });
+      } catch (error) {
+        let pendingTask;
+        try {
+          pendingTask = await runTaskState("get", { taskId });
+        } catch (readError) {
+          return json(res, 500, {
+            error: `${error instanceof Error ? error.message : String(error)}；读取最新任务失败：${readError instanceof Error ? readError.message : String(readError)}`,
+            errorCode: OPERATION_BATCH_RECONCILIATION_REQUIRED,
+          });
+        }
+        if (!pendingTask) {
+          return json(res, externalBatchConfirmed ? 409 : 404, {
+            error: error instanceof Error ? error.message : String(error),
+            errorCode: OPERATION_BATCH_RECONCILIATION_REQUIRED,
+          });
+        }
+        const pendingCurrent = pendingTask.config?.operationBatch || {};
+        const updated = await runTaskState("update_config", {
+          taskId,
+          config: {
+            operationBatch: {
+              ...pendingCurrent,
+              draft,
+              status: "reconciliation_required",
+              errorCode: OPERATION_BATCH_RECONCILIATION_REQUIRED,
+              errorMessage: error instanceof Error ? error.message : String(error),
+              updatedAt: new Date().toISOString(),
+            },
+          },
+        });
+        return json(res, 409, {
+          error: error instanceof Error ? error.message : String(error),
+          errorCode: OPERATION_BATCH_RECONCILIATION_REQUIRED,
+          task: updated,
+        });
+      }
+    },
+  });
 }
 
 async function handleOperationBatchResult(taskId, req, res) {
   const task = await runTaskState("get", { taskId });
   if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
   const payload = parseJsonSafe(await readBody(req)) || {};
-  let patch;
-  try {
-    patch = applyOperationBatchResult(task, payload);
-  } catch (error) {
-    return badRequest(res, error instanceof Error ? error.message : String(error));
-  }
-  const updated = await runTaskState("update_config", { taskId, config: patch });
-  return json(res, 200, { ok: true, task: updated, operationBatch: updated.config?.operationBatch || {}, operationBatchCode: updated.config?.operationBatchCode || "" });
+  return await withFreshOperationBatchTask({
+    acquire: () => operationBatchCoordinator.acquireTask(taskId),
+    readTask: () => runTaskState("get", { taskId }),
+    onAcquireError: (error) => operationBatchLockConflictResponse(taskId, task, res, error),
+    onMissing: () => notFound(res),
+    run: async (freshTask) => {
+      if (!visibleByOwner(auth, req, freshTask)) return notFound(res);
+      let saved;
+      try {
+        saved = await persistOperationBatchResult(taskId, freshTask, {
+          ...payload,
+          eventType: "operation_batch_recorded",
+        });
+      } catch (error) {
+        return badRequest(res, error instanceof Error ? error.message : String(error));
+      }
+      if (saved.status === "conflict") {
+        return json(res, 409, {
+          error: `运营批次代码冲突：当前为 ${saved.existingOperationBatchCode}，本次为 ${saved.operationBatchCode}`,
+          task: saved.task,
+        });
+      }
+      return json(res, 200, {
+        ok: true,
+        task: saved.task,
+        operationBatch: saved.task.config?.operationBatch || {},
+        operationBatchCode: saved.operationBatchCode,
+        ...(saved.status === "idempotent" ? { skipped: "operation_batch_result_already_recorded" } : {}),
+      });
+    },
+  });
 }
 
 async function readEmailSettings() {
@@ -6433,9 +7157,59 @@ async function requestHandler(req, res) {
     if (req.method === "POST" && operationBatchCreateMatch) {
       return await handleOperationBatchCreate(decodeURIComponent(operationBatchCreateMatch[1]), req, res);
     }
+    const operationBatchReconcileMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/reconcile$/);
+    if (req.method === "POST" && operationBatchReconcileMatch) {
+      return await handleOperationBatchReconcile(decodeURIComponent(operationBatchReconcileMatch[1]), req, res);
+    }
     const operationBatchResultMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/result$/);
     if (req.method === "POST" && operationBatchResultMatch) {
       return await handleOperationBatchResult(decodeURIComponent(operationBatchResultMatch[1]), req, res);
+    }
+    const operationBatchUpdateStateMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/update-state$/);
+    if (req.method === "GET" && operationBatchUpdateStateMatch) {
+      return await handleOperationBatchUpdateState(decodeURIComponent(operationBatchUpdateStateMatch[1]), req, res);
+    }
+    const operationBatchUpdatePreviewMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/update-preview$/);
+    if (req.method === "POST" && operationBatchUpdatePreviewMatch) {
+      return await handleOperationBatchUpdatePreview(decodeURIComponent(operationBatchUpdatePreviewMatch[1]), req, res);
+    }
+    const operationBatchUpdateMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/update$/);
+    if (req.method === "POST" && operationBatchUpdateMatch) {
+      return await handleOperationBatchUpdateStart(decodeURIComponent(operationBatchUpdateMatch[1]), req, res);
+    }
+    const operationBatchUpdateAttemptMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/update-attempts\/([^/]+)$/);
+    if (req.method === "GET" && operationBatchUpdateAttemptMatch) {
+      return await handleOperationBatchUpdateAttempt(
+        decodeURIComponent(operationBatchUpdateAttemptMatch[1]),
+        decodeURIComponent(operationBatchUpdateAttemptMatch[2]),
+        req,
+        res,
+      );
+    }
+    const personnelStateMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-personnel-task$/);
+    if (req.method === "GET" && personnelStateMatch) {
+      return await handleOperationPersonnelTaskState(decodeURIComponent(personnelStateMatch[1]), req, res);
+    }
+    const personnelPreviewMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-personnel-task\/preview$/);
+    if (req.method === "POST" && personnelPreviewMatch) {
+      return await handleOperationPersonnelTaskPreview(decodeURIComponent(personnelPreviewMatch[1]), req, res);
+    }
+    const personnelSendMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-personnel-task\/send$/);
+    if (req.method === "POST" && personnelSendMatch) {
+      return await handleOperationPersonnelTaskSend(decodeURIComponent(personnelSendMatch[1]), req, res);
+    }
+    const personnelAttemptMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-personnel-task\/attempts\/([^/]+)$/);
+    if (req.method === "GET" && personnelAttemptMatch) {
+      return await handleOperationPersonnelTaskAttempt(
+        decodeURIComponent(personnelAttemptMatch[1]),
+        decodeURIComponent(personnelAttemptMatch[2]),
+        req,
+        res,
+      );
+    }
+    const personnelRecheckMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-personnel-task\/recheck$/);
+    if (req.method === "POST" && personnelRecheckMatch) {
+      return await handleOperationPersonnelTaskRecheck(decodeURIComponent(personnelRecheckMatch[1]), req, res);
     }
     const contentRequirementEmailMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/content-requirement-email$/);
     if (req.method === "POST" && contentRequirementEmailMatch) {

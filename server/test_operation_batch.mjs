@@ -4,12 +4,19 @@ import test from "node:test";
 import {
   applyOperationBatchResult,
   buildOperationBatchDraft,
+  operationBatchCodeIsValid,
   operationBatchDisplayId,
+  operationBatchDraftForReconciliation,
+  operationBatchFailureState,
+  operationBatchNeedsReconciliation,
+  resolveOperationBatchResultWrite,
 } from "./operation_batch.mjs";
 import {
+  OPERATION_BATCH_RECONCILIATION_REQUIRED,
   operationConsoleNeedsLogin,
   operationConsoleLoginMessage,
   operationBatchCodeFromText,
+  operationBatchListResultFromRows,
   operationConfigServiceSelections,
   operationDateTitle,
   operationDropdownValueCandidates,
@@ -20,7 +27,111 @@ import {
   operationTaskMismatchAllowed,
   operationTaskSearchInputSelector,
   operationSelectControlSelector,
+  resolveSubmittedOperationBatch,
 } from "./operation_batch_runner.mjs";
+
+function fakeDetailPageWithoutCode() {
+  return {
+    locator() {
+      return { innerText: async () => "目标项目_2026年8月" };
+    },
+    url() {
+      return "http://operation/batch/batchDetail?batch_guid=guid-1";
+    },
+    async waitForFunction() {
+      throw new Error("详情批次代码未出现");
+    },
+  };
+}
+
+function fakeDetailPageWithDelayedCode() {
+  let codeVisible = false;
+  return {
+    locator() {
+      return {
+        innerText: async () => (codeVisible ? "QTT260007\n目标项目_2026年8月" : "目标项目_2026年8月"),
+      };
+    },
+    url() {
+      return "http://operation/batch/batchDetail?batch_guid=guid-1";
+    },
+    async waitForFunction() {
+      codeVisible = true;
+    },
+  };
+}
+
+test("operation batch list result only reads the exact batch row", () => {
+  const result = operationBatchListResultFromRows([
+    "QTT260006\n其他项目_2026年8月",
+    "QTT260007\n目标项目_2026年8月",
+  ], "目标项目_2026年8月", "http://operation/batch/batchList");
+  assert.equal(result.operationBatchCode, "QTT260007");
+});
+
+test("operation batch list result rejects ambiguous exact matches", () => {
+  assert.throws(() => operationBatchListResultFromRows([
+    "QTT260007\n目标项目_2026年8月",
+    "QTT260008\n目标项目_2026年8月",
+  ], "目标项目_2026年8月", "http://operation/batch/batchList"), /多个批次代码/);
+});
+
+test("operation batch list result rejects duplicate matching rows with the same code", () => {
+  assert.throws(() => operationBatchListResultFromRows([
+    "QTT260007\n目标项目_2026年8月",
+    "QTT260007\n目标项目_2026年8月",
+  ], "目标项目_2026年8月", "http://operation/batch/batchList"), /无法确认唯一批次代码/);
+});
+
+test("operation batch list result rejects a matching row with multiple codes", () => {
+  assert.throws(() => operationBatchListResultFromRows([
+    "QTT260007\nQTT260008\n目标项目_2026年8月",
+  ], "目标项目_2026年8月", "http://operation/batch/batchList"), /无法确认唯一批次代码/);
+});
+
+test("submitted batch falls back to list and preserves the lookup result", async () => {
+  const expected = {
+    operationBatchCode: "QTT260007",
+    batchGuid: "",
+    detailUrl: "http://operation/batch/batchList",
+    status: "created_unpublished",
+  };
+  const result = await resolveSubmittedOperationBatch(fakeDetailPageWithoutCode(), {
+    batchListUrl: expected.detailUrl,
+    batchName: "目标项目_2026年8月",
+    findFromList: async () => expected,
+    detailCodeWaitMs: 1,
+  });
+  assert.deepEqual(result, expected);
+});
+
+test("submitted batch uses the detail code when it appears without list lookup", async () => {
+  let listLookups = 0;
+  const result = await resolveSubmittedOperationBatch(fakeDetailPageWithDelayedCode(), {
+    batchListUrl: "http://operation/batch/batchList",
+    batchName: "目标项目_2026年8月",
+    findFromList: async () => {
+      listLookups += 1;
+      return null;
+    },
+    detailCodeWaitMs: 1,
+  });
+  assert.equal(result.operationBatchCode, "QTT260007");
+  assert.equal(result.batchGuid, "guid-1");
+  assert.equal(listLookups, 0);
+});
+
+test("submitted batch without detail or list result requires reconciliation", async () => {
+  await assert.rejects(
+    () => resolveSubmittedOperationBatch(fakeDetailPageWithoutCode(), {
+      batchListUrl: "http://operation/batch/batchList",
+      batchName: "目标项目_2026年8月",
+      findFromList: async () => null,
+      detailCodeWaitMs: 1,
+    }),
+    (error) => error?.code === OPERATION_BATCH_RECONCILIATION_REQUIRED && error?.status === 409,
+  );
+});
 
 test("buildOperationBatchDraft maps business requirement fields with explicit sources", () => {
   const task = {
@@ -32,6 +143,7 @@ test("buildOperationBatchDraft maps business requirement fields with explicit so
         operation_serial_number: "R0031682",
         project_code: "F0012393",
         project_name: "浙江省对外服务有限公司社会招聘项目",
+        batch_name: "浙江外服社招_2026年7月",
         business_direction: "政府",
         applicant_department: "地方业务中心",
         ata_invigilator_arrangement: "不需要",
@@ -65,9 +177,52 @@ test("buildOperationBatchDraft maps business requirement fields with explicit so
   assert.equal(draft.fields.billingBasis.value, "按开考科次结算");
   assert.equal(draft.fields.examStartDate.value, "2026-07-10");
   assert.equal(draft.fields.examEndDate.value, "2026-07-10");
-  assert.equal(draft.fields.batchName.source, "default_rule");
-  assert.ok(draft.fields.batchName.value.includes("2026年7月"));
+  assert.equal(draft.fields.batchName.source, "business_requirement");
+  assert.equal(draft.fields.batchName.value, "浙江外服社招_2026年7月");
   assert.equal(draft.warnings.some((item) => item.field === "projectDepartment"), false);
+});
+
+test("buildOperationBatchDraft keeps a missing business batch name as a required warning", () => {
+  const draft = buildOperationBatchDraft({
+    projectName: "不能回退使用的项目名",
+    config: {
+      businessRequirement: {
+        project_name: "也不能用于重建批次名称",
+        exam_schedule: [{ exam_date: "2026-07-10" }],
+      },
+    },
+  }, {
+    fields: {
+      batchName: "不能掩盖缺失值的过期批次名称",
+    },
+  });
+
+  assert.equal(draft.fields.batchName.value, "");
+  assert.equal(draft.fields.batchName.source, "business_requirement");
+  assert.deepEqual(
+    draft.warnings.find((item) => item.field === "batchName"),
+    { field: "batchName", message: "批次名称缺失，需要人工补充" },
+  );
+});
+
+test("buildOperationBatchDraft ignores batch name overrides but keeps other overrides", () => {
+  const draft = buildOperationBatchDraft({
+    config: {
+      businessRequirement: {
+        batch_name: "业务需求权威批次",
+      },
+    },
+  }, {
+    fields: {
+      batchName: "请求中的过期批次",
+      projectDepartment: "项目实施一部",
+    },
+  });
+
+  assert.equal(draft.fields.batchName.value, "业务需求权威批次");
+  assert.equal(draft.fields.batchName.source, "business_requirement");
+  assert.equal(draft.fields.projectDepartment.value, "项目实施一部");
+  assert.equal(draft.fields.projectDepartment.source, "manual");
 });
 
 test("buildOperationBatchDraft normalizes office department and personnel service defaults", () => {
@@ -129,6 +284,157 @@ test("applyOperationBatchResult writes batch code without replacing internal ids
   assert.equal(patch.operationBatch.events[0].type, "operation_batch_created");
 });
 
+test("applyOperationBatchResult records the requested reconciliation audit event", () => {
+  const patch = applyOperationBatchResult({}, {
+    operationBatchCode: "EZT260003",
+    eventType: "operation_batch_reconciled",
+  });
+
+  assert.equal(patch.operationBatch.events[0].type, "operation_batch_reconciled");
+});
+
+test("operation batch result writes apply once, return same-code idempotency, and reject different codes", () => {
+  const task = {
+    config: {
+      operationBatchCode: "EZT260003",
+      operationBatch: {
+        code: "EZT260003",
+        events: [{ type: "operation_batch_recorded", code: "EZT260003" }],
+      },
+    },
+  };
+
+  const same = resolveOperationBatchResultWrite(task, {
+    operationBatchCode: "EZT260003",
+    eventType: "operation_batch_reconciled",
+  });
+  assert.deepEqual(same, {
+    status: "idempotent",
+    operationBatchCode: "EZT260003",
+    existingOperationBatchCode: "EZT260003",
+  });
+  assert.equal(task.config.operationBatch.events.length, 1);
+
+  const conflict = resolveOperationBatchResultWrite(task, {
+    operationBatchCode: "QTT260007",
+    eventType: "operation_batch_reconciled",
+  });
+  assert.deepEqual(conflict, {
+    status: "conflict",
+    operationBatchCode: "QTT260007",
+    existingOperationBatchCode: "EZT260003",
+  });
+  assert.equal(task.config.operationBatch.events.length, 1);
+
+  const nestedConflict = resolveOperationBatchResultWrite({
+    config: {
+      operationBatchCode: "legacy-invalid",
+      operationBatch: { code: "EZT260003", events: [] },
+    },
+  }, { operationBatchCode: "QTT260007" });
+  assert.equal(nestedConflict.status, "conflict");
+  assert.equal(nestedConflict.existingOperationBatchCode, "EZT260003");
+
+  const fresh = resolveOperationBatchResultWrite({ config: {} }, {
+    operationBatchCode: "QTT260007",
+    eventType: "operation_batch_reconciled",
+  });
+  assert.equal(fresh.status, "apply");
+  assert.equal(fresh.operationBatchCode, "QTT260007");
+  assert.equal(fresh.patch.operationBatch.events.length, 1);
+  assert.equal(fresh.patch.operationBatch.events[0].type, "operation_batch_reconciled");
+});
+
+test("operation batch codes require three uppercase letters and six digits", () => {
+  assert.equal(operationBatchCodeIsValid("EZT260003"), true);
+  assert.equal(operationBatchCodeIsValid("foo"), false);
+  assert.equal(operationBatchCodeIsValid(""), false);
+  assert.equal(operationBatchCodeIsValid("ezt260003"), false);
+});
+
+test("applyOperationBatchResult rejects empty and malformed batch codes", () => {
+  assert.throws(
+    () => applyOperationBatchResult({}, { operationBatchCode: "" }),
+    /运营批次代码/,
+  );
+  assert.throws(
+    () => applyOperationBatchResult({}, { operationBatchCode: "foo" }),
+    /运营批次代码/,
+  );
+});
+
+test("operation batch reconciliation state includes stable and legacy submitted errors", () => {
+  assert.equal(operationBatchNeedsReconciliation({
+    config: { operationBatch: { status: "reconciliation_required" } },
+  }), true);
+  assert.equal(operationBatchNeedsReconciliation({
+    config: { operationBatch: { errorCode: OPERATION_BATCH_RECONCILIATION_REQUIRED } },
+  }), true);
+  assert.equal(operationBatchNeedsReconciliation({
+    config: { operationBatch: { status: "failed", errorMessage: "创建完成，但未能从详情页读取批次代码" } },
+  }), true);
+  assert.equal(operationBatchNeedsReconciliation({
+    config: { operationBatch: { status: "failed", errorMessage: "登录失败" } },
+  }), false);
+});
+
+test("operation batch reconciliation state treats interrupted creating without a code as pending", () => {
+  assert.equal(operationBatchNeedsReconciliation({
+    config: { operationBatch: { status: "creating" } },
+  }), true);
+  assert.equal(operationBatchNeedsReconciliation({
+    config: { operationBatch: { status: "reconciling" } },
+  }), true);
+  assert.equal(operationBatchNeedsReconciliation({
+    config: {
+      operationBatchCode: "EZT260003",
+      operationBatch: { status: "creating" },
+    },
+  }), false);
+});
+
+test("operation batch reconciliation state treats malformed non-empty codes as pending", () => {
+  assert.equal(operationBatchNeedsReconciliation({
+    config: { operationBatchCode: "foo", operationBatch: { status: "created_unpublished" } },
+  }), true);
+});
+
+test("operation batch reconciliation reuses the saved creation draft", () => {
+  const savedDraft = {
+    fields: {
+      batchName: { value: "创建时批次名", source: "manual" },
+    },
+  };
+  const task = {
+    projectName: "当前项目名",
+    config: {
+      operationBatch: { draft: savedDraft },
+      businessRequirement: { project_name: "已变化项目名" },
+    },
+  };
+
+  assert.strictEqual(operationBatchDraftForReconciliation(task), savedDraft);
+  assert.notStrictEqual(
+    operationBatchDraftForReconciliation({ projectName: "当前项目名" }),
+    savedDraft,
+  );
+});
+
+test("operation batch failure state stays pending after the external runner returns", () => {
+  assert.deepEqual(
+    operationBatchFailureState(new Error("本地数据库写入失败"), true),
+    {
+      status: "reconciliation_required",
+      errorCode: OPERATION_BATCH_RECONCILIATION_REQUIRED,
+      errorMessage: "本地数据库写入失败",
+    },
+  );
+  assert.deepEqual(
+    operationBatchFailureState(new Error("登录失败"), false),
+    { status: "failed", errorCode: "", errorMessage: "登录失败" },
+  );
+});
+
 test("operationBatchDisplayId prefers batch code over internal requirement id", () => {
   assert.equal(operationBatchDisplayId({
     config: {
@@ -162,7 +468,10 @@ test("operation batch runner identifies operation console login redirect", () =>
   assert.equal(operationConsoleNeedsLogin("http://172.16.21.201:9004/loginWaiting?response_type=code"), true);
   assert.equal(operationConsoleNeedsLogin("http://172.16.21.201:9003/OAuth2/authorize?redirect_uri=http%3A%2F%2F172.16.18.198%3A8020%2Fuser%2Flogin"), true);
   assert.equal(operationConsoleNeedsLogin("http://172.16.18.198:8020/batch/batchList"), false);
-  assert.match(operationConsoleLoginMessage(10), /10 分钟/);
+  const loginMessage = operationConsoleLoginMessage(10);
+  assert.match(loginMessage, /10 分钟/);
+  assert.match(loginMessage, /继续当前批次操作/);
+  assert.doesNotMatch(loginMessage, /继续创建/);
 });
 
 test("operation batch runner extracts operation batch code from batch list text", () => {

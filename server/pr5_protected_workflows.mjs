@@ -1,5 +1,5 @@
 export const PROTECTED_BASE_COMMIT =
-  "e3250c09bfb2666a9787b4d23bdf348634f69ff8";
+  "d4fb619512e5e8227a6c397c7c19b05c2b1daddd";
 
 export const PROTECTED_EXACT_FILES = [
   "server/fanwei_auto_read.mjs",
@@ -41,14 +41,68 @@ export const PROTECTED_SENTINELS = {
   ],
 };
 
+const TASK4_FANWEI_IMPORT_GUARD_CHANGE = {
+  name: "Task 4 synced schedule deletion guard",
+  current: `  const existingOperationBatchCode = [
+    existingTask?.config?.operationBatchCode,
+    existingTask?.config?.operationBatch?.code,
+  ].find((code) => operationBatchCodeIsValid(code)) || "";
+  const existingRequirementCount = Array.isArray(existingTask?.config?.examRequirements)
+    ? existingTask.config.examRequirements.length
+    : 0;
+  if (operationBatchCodeIsValid(existingOperationBatchCode) && requirementFieldsList.length < existingRequirementCount) {
+    const error = new Error("批次创建后不允许删除已对应运控日程的易考需求单。");
+    error.status = 409;
+    error.errorCode = "OPERATION_BATCH_SCHEDULE_DELETE_FORBIDDEN";
+    throw error;
+  }
+`,
+  baseline: "",
+};
+
+const TASK4_FANWEI_IMPORT_ERROR_MAPPING_CHANGE = {
+  name: "Task 4 Fanwei import conflict error mapping",
+  current: `  try {
+    json(res, 200, await createFanweiRequirementImportFromPayload(payload, req));
+  } catch (error) {
+    json(res, error.status || 500, {
+      error: error instanceof Error ? error.message : String(error),
+      errorCode: error.errorCode,
+      detail: error.detail,
+    });
+  }
+`,
+  baseline: "  json(res, 200, await createFanweiRequirementImportFromPayload(payload, req));\n",
+};
+
+const TASK10_TASK_DETAIL_RESPONSE_ENRICHMENT_CHANGE = {
+  name: "Task 10 legacy batch-name response enrichment",
+  current: `  return json(res, 200, {
+    ...withOperationBatchNameEditorDefaults(enrichedTask),
+    sessionChangeFeatureEnabled,
+  });
+`,
+  baseline: "  return json(res, 200, { ...enrichedTask, sessionChangeFeatureEnabled });\n",
+};
+
 export const PROTECTED_SHARED_REGIONS = {
   "server/easy_exam_server.mjs": [
     { name: "import workbook task creation", kind: "js-block", startAnchor: "async function createImportFromWorkbook({" },
     { name: "auto-config job state", kind: "js-block", startAnchor: "function createJob(importRecord, login) {" },
     { name: "auto-config progress events", kind: "js-block", startAnchor: "function pushEvent(job, evt) {" },
     { name: "Fanwei preview handler", kind: "js-block", startAnchor: "async function handleFanweiRequirementPreview(req, res) {" },
-    { name: "Fanwei import task creation", kind: "js-block", startAnchor: "async function createFanweiRequirementImportFromPayload(payload, req, options = {}) {" },
-    { name: "Fanwei import handler", kind: "js-block", startAnchor: "async function handleFanweiRequirementImport(req, res) {" },
+    {
+      name: "Fanwei import task creation",
+      kind: "allowlisted-js-block",
+      startAnchor: "async function createFanweiRequirementImportFromPayload(payload, req, options = {}) {",
+      allowedChanges: [TASK4_FANWEI_IMPORT_GUARD_CHANGE],
+    },
+    {
+      name: "Fanwei import handler",
+      kind: "allowlisted-js-block",
+      startAnchor: "async function handleFanweiRequirementImport(req, res) {",
+      allowedChanges: [TASK4_FANWEI_IMPORT_ERROR_MAPPING_CHANGE],
+    },
     { name: "Fanwei auto-read status handler", kind: "js-block", startAnchor: "async function handleFanweiAutoReadStatus(_req, res) {" },
     { name: "Fanwei local-read handler", kind: "js-block", startAnchor: "async function handleFanweiLocalRead(req, res) {" },
     { name: "Fanwei auto-read handler", kind: "js-block", startAnchor: "async function handleFanweiAutoRead(req, res) {" },
@@ -62,7 +116,12 @@ export const PROTECTED_SHARED_REGIONS = {
     { name: "auto-config progress state handler", kind: "js-block", startAnchor: "function handleJobState(job, res) {" },
     { name: "auto-config events handler", kind: "js-block", startAnchor: "function handleEvents(job, req, res) {" },
     { name: "exam list handler", kind: "js-block", startAnchor: "async function handleExamList(req, res) {" },
-    { name: "exam detail handler", kind: "js-block", startAnchor: "async function handleTaskDetail(taskId, req, res) {" },
+    {
+      name: "exam detail handler",
+      kind: "allowlisted-js-block",
+      startAnchor: "async function handleTaskDetail(taskId, req, res) {",
+      allowedChanges: [TASK10_TASK_DETAIL_RESPONSE_ENRICHMENT_CHANGE],
+    },
     { name: "Fanwei preview route", kind: "js-block", startAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/fanwei/requirement-preview\") {" },
     { name: "Fanwei import route", kind: "js-block", startAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/fanwei/requirement-import\") {" },
     { name: "Fanwei status route", kind: "js-block", startAnchor: "if (req.method === \"GET\" && url.pathname === \"/api/fanwei/auto-read/status\") {" },
@@ -78,69 +137,82 @@ export const PROTECTED_SHARED_REGIONS = {
       endAnchor: "const roomsPreviewMatch = url.pathname.match(",
       allowedInsertions: [
         {
-          name: "email settings route",
-          kind: "js-block",
-          startAnchor: "if ((req.method === \"GET\" || req.method === \"POST\") && url.pathname === \"/api/email/settings\") {",
-          afterAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/settings\") {",
-          beforeAnchor: "if (url.pathname === \"/api/customer-service-scheduler\" || url.pathname.startsWith(\"/api/customer-service-scheduler/\")) {",
-        },
-        {
-          name: "email test route",
-          kind: "js-block",
-          startAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/email/test\") {",
-          afterAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/settings\") {",
-          beforeAnchor: "if (url.pathname === \"/api/customer-service-scheduler\" || url.pathname.startsWith(\"/api/customer-service-scheduler/\")) {",
-        },
-        {
-          name: "operation environment route",
-          kind: "js-block",
-          startAnchor: "if (req.method === \"GET\" && url.pathname === \"/api/operation-console/environment\") {",
-          afterAnchor: "if (await handleWechatCollector(req, res, url)) {",
-          beforeAnchor: "if (req.method === \"GET\" && url.pathname === \"/api/tasks\") {",
-        },
-        {
-          name: "operation environment install route",
-          kind: "js-block",
-          startAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/operation-console/environment/install\") {",
-          afterAnchor: "if (await handleWechatCollector(req, res, url)) {",
-          beforeAnchor: "if (req.method === \"GET\" && url.pathname === \"/api/tasks\") {",
-        },
-        {
-          name: "operation environment enable route",
-          kind: "js-block",
-          startAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/operation-console/environment/enable\") {",
-          afterAnchor: "if (await handleWechatCollector(req, res, url)) {",
-          beforeAnchor: "if (req.method === \"GET\" && url.pathname === \"/api/tasks\") {",
-        },
-        {
-          name: "operation batch draft route",
+          name: "operation batch reconcile route",
           kind: "js-route-pair",
-          startAnchor: "const operationBatchDraftMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/draft$/);",
-          routeAnchor: "if ((req.method === \"GET\" || req.method === \"POST\") && operationBatchDraftMatch) {",
+          startAnchor: "const operationBatchReconcileMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/reconcile$/);",
+          routeAnchor: "if (req.method === \"POST\" && operationBatchReconcileMatch) {",
           afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
           beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
         },
         {
-          name: "operation batch create route",
+          name: "operation personnel state route",
           kind: "js-route-pair",
-          startAnchor: "const operationBatchCreateMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/create$/);",
-          routeAnchor: "if (req.method === \"POST\" && operationBatchCreateMatch) {",
+          startAnchor: "const personnelStateMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-personnel-task$/);",
+          routeAnchor: "if (req.method === \"GET\" && personnelStateMatch) {",
           afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
           beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
         },
         {
-          name: "operation batch result route",
+          name: "operation personnel preview route",
           kind: "js-route-pair",
-          startAnchor: "const operationBatchResultMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/result$/);",
-          routeAnchor: "if (req.method === \"POST\" && operationBatchResultMatch) {",
+          startAnchor: "const personnelPreviewMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-personnel-task\\/preview$/);",
+          routeAnchor: "if (req.method === \"POST\" && personnelPreviewMatch) {",
           afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
           beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
         },
         {
-          name: "content requirement email route",
+          name: "operation personnel send route",
           kind: "js-route-pair",
-          startAnchor: "const contentRequirementEmailMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/content-requirement-email$/);",
-          routeAnchor: "if (req.method === \"POST\" && contentRequirementEmailMatch) {",
+          startAnchor: "const personnelSendMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-personnel-task\\/send$/);",
+          routeAnchor: "if (req.method === \"POST\" && personnelSendMatch) {",
+          afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
+          beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
+        },
+        {
+          name: "operation personnel attempt route",
+          kind: "js-route-pair",
+          startAnchor: "const personnelAttemptMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-personnel-task\\/attempts\\/([^/]+)$/);",
+          routeAnchor: "if (req.method === \"GET\" && personnelAttemptMatch) {",
+          afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
+          beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
+        },
+        {
+          name: "operation personnel recheck route",
+          kind: "js-route-pair",
+          startAnchor: "const personnelRecheckMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-personnel-task\\/recheck$/);",
+          routeAnchor: "if (req.method === \"POST\" && personnelRecheckMatch) {",
+          afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
+          beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
+        },
+        {
+          name: "operation batch update state route",
+          kind: "js-route-pair",
+          startAnchor: "const operationBatchUpdateStateMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/update-state$/);",
+          routeAnchor: "if (req.method === \"GET\" && operationBatchUpdateStateMatch) {",
+          afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
+          beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
+        },
+        {
+          name: "operation batch update preview route",
+          kind: "js-route-pair",
+          startAnchor: "const operationBatchUpdatePreviewMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/update-preview$/);",
+          routeAnchor: "if (req.method === \"POST\" && operationBatchUpdatePreviewMatch) {",
+          afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
+          beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
+        },
+        {
+          name: "operation batch update route",
+          kind: "js-route-pair",
+          startAnchor: "const operationBatchUpdateMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/update$/);",
+          routeAnchor: "if (req.method === \"POST\" && operationBatchUpdateMatch) {",
+          afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
+          beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
+        },
+        {
+          name: "operation batch update attempt route",
+          kind: "js-route-pair",
+          startAnchor: "const operationBatchUpdateAttemptMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/update-attempts\\/([^/]+)$/);",
+          routeAnchor: "if (req.method === \"GET\" && operationBatchUpdateAttemptMatch) {",
           afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
           beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
         },
@@ -181,7 +253,7 @@ export const PROTECTED_SHARED_REGIONS = {
     { name: "Fanwei preview read", kind: "js-block", startAnchor: "async function copyFanweiReaderScript() {" },
     { name: "Fanwei auto-read status", kind: "js-block", startAnchor: "async function loadFanweiAutoReadStatus() {" },
     { name: "Fanwei requirement import", kind: "js-block", startAnchor: "async function createFanweiRequirementImport() {" },
-    { name: "auto-config progress event wiring", kind: "js-block", startAnchor: "function connectEvents(jobId) {" },
+    { name: "auto-config progress event wiring", kind: "js-block", startAnchor: "function connectEvents(jobId, requirementIndex = uiState.autoConfigRequirementIndex) {" },
     { name: "protected page registration", kind: "js-array", startAnchor: "const pages = [" },
     { name: "candidate import wiring", kind: "js-call", startAnchor: "candidateImportBtn.addEventListener(\"click\", async () => {" },
     { name: "Fanwei preview wiring", kind: "js-call", startAnchor: "fanweiCopyScriptBtn.addEventListener(\"click\", () => copyFanweiReaderScript().catch((error) => {" },

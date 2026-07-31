@@ -1,3 +1,15 @@
+import { operationBatchCodeIsValid, operationBatchNeedsReconciliation } from "./operation_batch.mjs";
+import { defaultOperationBatchName, resolveOperationBatchName } from "./operation_batch_name.mjs";
+import { operationBatchUpdateState } from "./operation_batch_update.mjs";
+import { buildOperationPersonnelTaskDraft, buildOperationPersonnelTaskStatus } from "./operation_personnel_task.mjs";
+import { operationPersonnelScheduleGate } from "./operation_personnel_schedule_gate.mjs";
+
+const PERSISTED_BATCH_UPDATE_STATES = new Set([
+  "updating",
+  "update_failed",
+  "update_conflict",
+]);
+
 function text(value) {
   return String(value ?? "").trim();
 }
@@ -32,6 +44,9 @@ export function normalizeFanweiBusinessRequirement(fanwei = {}, model = {}) {
     applicant_department: text(fields["申请人部门"]),
     application_date: text(fields["申请日期"]),
     operation_serial_number: text(fields["运控流水号"]),
+    batch_name: text(fields["批次名称"]),
+    batch_name_mode: text(model.batchNameMode) === "manual" ? "manual" : "auto",
+    batch_name_auto_value: text(model.batchNameAutoValue),
     project_name: first(fields["项目名称"], requirementFields["考试名称"]),
     project_code: text(fields["项目编码"]),
     customer_name: first(fields["客户名称（仅供参考）"], fields["客户名称"], confirmation["单位名称"]),
@@ -110,6 +125,27 @@ export function buildFanweiProjectConfig({ fanwei = {}, model = {}, parsed = {},
   });
   const examRequirements = [...previousRequirements, ...appendedRequirements];
   const examRequirement = examRequirements[0];
+  const batchName = resolveOperationBatchName({
+    previousValue: previousConfig.fanweiSource?.raw?.fields?.["批次名称"],
+    previousMode: previousConfig.fanweiSource?.batchNameMode,
+    generatedValue: defaultOperationBatchName({
+      examName: examRequirement?.fields?.["考试名称"],
+      examStart: examRequirement?.fields?.["考试日期时间"],
+    }),
+    submittedValue: fanwei.fields?.["批次名称"],
+  });
+  const fanweiSource = {
+    version: fanweiVersion,
+    capturedAt: now,
+    serialNo,
+    requestId: text(fanwei.requestid),
+    batchNameMode: batchName.mode,
+    batchNameAutoValue: batchName.autoValue,
+    raw: {
+      ...fanwei,
+      fields: { ...(fanwei.fields || {}), "批次名称": batchName.value },
+    },
+  };
   return {
     ...previousConfig,
     projectCard: {
@@ -119,14 +155,13 @@ export function buildFanweiProjectConfig({ fanwei = {}, model = {}, parsed = {},
       sourceType: "fanwei",
       sourceKey: serialNo,
     },
-    fanweiSource: {
-      version: fanweiVersion,
-      capturedAt: now,
-      serialNo,
-      requestId: text(fanwei.requestid),
-      raw: fanwei,
+    fanweiSource,
+    businessRequirement: {
+      ...businessRequirement,
+      batch_name: batchName.value,
+      batch_name_mode: batchName.mode,
+      batch_name_auto_value: batchName.autoValue,
     },
-    businessRequirement,
     examRequirements,
     examRequirement,
     customerName: first(parsed.config?.customerName, businessRequirement.customer_name),
@@ -197,11 +232,22 @@ export function buildProjectWorkflow(task = {}, batchDraft = null) {
   const examRequirements = projectExamRequirements(task.config || {});
   const examRequirement = examRequirements[0] || {};
   const batchCode = first(task.config?.operationBatchCode, task.config?.operationBatch?.code);
-  const personnelDraft = buildPersonnelTaskDraft(task);
-  const archiveDraft = buildOperationArchiveDraft(task);
+  const hasBatchCode = operationBatchCodeIsValid(batchCode);
+  const personnelDraft = buildOperationPersonnelTaskDraft(task);
+  const personnelScheduleGate = operationPersonnelScheduleGate(task);
+  if (personnelScheduleGate.ok) {
+    personnelDraft.managedSchedules = structuredClone(personnelScheduleGate.schedules);
+  }
+  const personnelStatus = buildOperationPersonnelTaskStatus(task, personnelDraft);
   const personnelNotRequired = text(business.ata_invigilator_arrangement).includes("不需要");
+  const archiveDraft = buildOperationArchiveDraft(task);
   const contentReady = examRequirements.length > 0 && examRequirements.every((requirement) => Boolean(requirement.fields?.["考试名称"] && requirement.fields?.["考试日期时间"]));
   const hasActualSession = (task.sessions || []).some((session) => text(session.session_id));
+  const batchUpdate = operationBatchUpdateState(task);
+  const persistedBatchStatus = text(task.config?.operationBatch?.status);
+  const batchStatus = PERSISTED_BATCH_UPDATE_STATES.has(persistedBatchStatus)
+    ? persistedBatchStatus
+    : batchUpdate.status;
   return {
     sources: {
       fanwei: { ready: Boolean(business.operation_serial_number && business.project_code), version: task.config?.fanweiSource?.version || 0 },
@@ -209,10 +255,20 @@ export function buildProjectWorkflow(task = {}, batchDraft = null) {
       actualResult: { ready: hasActualSession },
     },
     steps: {
-      batch: { status: batchCode ? "success" : (batchDraft?.warnings?.length ? "needs_review" : "ready"), code: batchCode },
-      personnel: { status: personnelNotRequired ? "skipped" : (batchCode ? (personnelDraft.warnings.length ? "needs_review" : "ready") : "waiting_batch") },
-      content: { status: batchCode ? (contentReady ? "ready" : "needs_review") : "waiting_batch" },
-      archive: { status: batchCode && hasActualSession ? (archiveDraft.warnings.length ? "needs_review" : "ready") : "waiting_execution" },
+      batch: {
+        status: hasBatchCode
+          ? batchStatus
+          : operationBatchNeedsReconciliation(task)
+            ? "reconciliation_required"
+            : (batchDraft?.warnings?.length ? "needs_review" : "ready"),
+        code: batchCode,
+        baselineRequired: batchUpdate.baselineRequired,
+        missingSchedules: batchUpdate.missing,
+        managedChanges: batchUpdate.changes,
+      },
+      personnel: personnelNotRequired ? { status: "skipped", actions: [] } : { status: personnelStatus.status, actions: personnelStatus.actions },
+      content: { status: hasBatchCode ? (contentReady ? "ready" : "needs_review") : "waiting_batch" },
+      archive: { status: hasBatchCode && hasActualSession ? (archiveDraft.warnings.length ? "needs_review" : "ready") : "waiting_execution" },
     },
     personnelDraft,
     archiveDraft,
