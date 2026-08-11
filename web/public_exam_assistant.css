@@ -1,0 +1,360 @@
+:root {
+  color-scheme: light;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: #f6f7f8;
+  color: #202326;
+  --content-width: 860px;
+  --border: #dfe3e7;
+  --muted: #6e747a;
+  --blue: #1769aa;
+  --blue-soft: #eaf4fb;
+  --green: #16845b;
+  --surface: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  min-height: 100dvh;
+  background: #f6f7f8;
+}
+
+button,
+textarea {
+  font: inherit;
+  letter-spacing: 0;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.assistant-header {
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 10;
+  height: 68px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(12px);
+}
+
+.header-inner {
+  width: min(100%, calc(var(--content-width) + 40px));
+  height: 100%;
+  margin: 0 auto;
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.brand-block {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.brand-mark {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  object-fit: contain;
+}
+
+.brand-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.brand-copy strong {
+  overflow: hidden;
+  color: #191c1f;
+  font-size: 16px;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brand-copy span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.brand-copy i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 3px #e4f4ed;
+}
+
+.icon-button,
+.send-button {
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  cursor: pointer;
+}
+
+.icon-button {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: #3c4247;
+  font-size: 23px;
+  line-height: 1;
+}
+
+.icon-button:hover {
+  border-color: #b9c1c8;
+  background: #f4f6f7;
+}
+
+.conversation {
+  width: min(100%, var(--content-width));
+  min-height: 100dvh;
+  margin: 0 auto;
+  padding: 96px 20px 146px;
+}
+
+.messages {
+  display: grid;
+  gap: 22px;
+}
+
+.message {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.message.user {
+  justify-content: flex-end;
+}
+
+.assistant-avatar {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  margin-top: 1px;
+  object-fit: contain;
+}
+
+.message-content {
+  min-width: 0;
+  max-width: min(680px, calc(100vw - 86px));
+}
+
+.message-bubble {
+  padding: 11px 14px;
+  border-radius: 7px;
+  font-size: 15px;
+  line-height: 1.72;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.message.assistant .message-bubble {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: #25292d;
+}
+
+.message.user .message-bubble {
+  background: #1b5f92;
+  color: #fff;
+}
+
+.suggestions,
+.choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.suggestion-button,
+.choice-button {
+  min-height: 36px;
+  padding: 8px 11px;
+  border: 1px solid #cbd6df;
+  border-radius: 6px;
+  background: #fff;
+  color: #2e5d7d;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 18px;
+  text-align: left;
+}
+
+.suggestion-button:hover,
+.choice-button:hover {
+  border-color: #75a5c6;
+  background: var(--blue-soft);
+}
+
+.typing-bubble {
+  min-width: 60px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.typing-bubble span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #879098;
+  animation: typing 1.1s infinite ease-in-out;
+}
+
+.typing-bubble span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-bubble span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typing {
+  0%, 60%, 100% { opacity: 0.35; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+.composer-band {
+  position: fixed;
+  inset: auto 0 0;
+  z-index: 9;
+  padding: 16px 20px calc(18px + env(safe-area-inset-bottom));
+  border-top: 1px solid rgba(223, 227, 231, 0.9);
+  background: rgba(246, 247, 248, 0.96);
+  backdrop-filter: blur(12px);
+}
+
+.composer {
+  width: min(100%, var(--content-width));
+  min-height: 54px;
+  margin: 0 auto;
+  padding: 7px 7px 7px 15px;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  border: 1px solid #c9cfd4;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 7px 24px rgba(34, 43, 50, 0.08);
+}
+
+.composer:focus-within {
+  border-color: #5c94bd;
+  box-shadow: 0 0 0 3px rgba(45, 125, 179, 0.12), 0 7px 24px rgba(34, 43, 50, 0.08);
+}
+
+.composer textarea {
+  width: 100%;
+  min-height: 38px;
+  max-height: 144px;
+  padding: 8px 0;
+  resize: none;
+  overflow-y: auto;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #202326;
+  font-size: 15px;
+  line-height: 22px;
+}
+
+.composer textarea::placeholder {
+  color: #8b9298;
+}
+
+.send-button {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border-radius: 6px;
+  background: var(--blue);
+  color: #fff;
+  font-size: 21px;
+  line-height: 1;
+}
+
+.send-button:hover {
+  background: #115b96;
+}
+
+.send-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 640px) {
+  .assistant-header {
+    height: 62px;
+  }
+
+  .header-inner {
+    padding: 0 14px;
+  }
+
+  .brand-mark {
+    width: 38px;
+    height: 38px;
+    flex-basis: 38px;
+  }
+
+  .conversation {
+    padding: 84px 14px 132px;
+  }
+
+  .messages {
+    gap: 18px;
+  }
+
+  .message-bubble {
+    font-size: 14px;
+    line-height: 1.68;
+  }
+
+  .composer-band {
+    padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-bubble span {
+    animation: none;
+  }
+}

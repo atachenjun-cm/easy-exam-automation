@@ -25,6 +25,12 @@ function optionsFromArgs(args) {
   return {
     templatePath: args.templatePath,
     plistPath: args.plistPath,
+    appDir: args.appDir,
+    runtimeDir: args.runtimeDir,
+    nodePath: args.nodePath,
+    pythonPath: args.pythonPath,
+    homeDir: args.homeDir,
+    activeServiceLabel: args.activeServiceLabel,
   };
 }
 

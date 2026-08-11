@@ -52,7 +52,7 @@ test("visible WeChat collector crops the WeChat window to the chat transcript re
   const moduleUrl = new URL("../scripts/wechat_visible_collect.mjs", import.meta.url);
   const { buildChatCaptureRect } = await import(moduleUrl.href);
 
-  assert.equal(buildChatCaptureRect("529,48,1200,860"), "849,104,880,624");
+  assert.equal(buildChatCaptureRect("529,48,1200,860"), "749,104,980,684");
   assert.equal(buildChatCaptureRect("529,48,1200,860", {
     leftInset: 300,
     topInset: 60,
@@ -68,6 +68,8 @@ test("visible WeChat collector crops the WeChat window to the chat transcript re
 test("visible WeChat collector uses window-service identity and verifies the target conversation", async () => {
   const moduleUrl = new URL("../scripts/wechat_visible_collect.mjs", import.meta.url);
   const {
+    assertClipboardCaptureMatchesGroup,
+    assertWechatWindowCaptureAllowed,
     assertWechatConversationTitle,
     buildOpenWechatGroupScript,
     parseWechatWindowInfo,
@@ -80,6 +82,32 @@ test("visible WeChat collector uses window-service identity and verifies the tar
     width: 1200,
     height: 860,
   });
+  assert.deepEqual(parseWechatWindowInfo("1903,918,72,1200,860,0"), {
+    windowId: 1903,
+    x: 918,
+    y: 72,
+    width: 1200,
+    height: 860,
+    sharingState: 0,
+  });
+  assert.throws(
+    () => assertWechatWindowCaptureAllowed({ sharingState: 0 }),
+    /禁止系统截取主窗口/,
+  );
+  assert.doesNotThrow(() => assertWechatWindowCaptureAllowed({ sharingState: 1 }));
+  assert.doesNotThrow(() => assertWechatWindowCaptureAllowed({}));
+  assert.throws(
+    () => assertClipboardCaptureMatchesGroup("Leo", "Leo"),
+    /只复制到了搜索词/,
+  );
+  assert.throws(
+    () => assertClipboardCaptureMatchesGroup("易考控制台\n考试时间：2026-08-02", "Leo"),
+    /无法确认剪贴板内容来自目标微信群/,
+  );
+  assert.doesNotThrow(() => assertClipboardCaptureMatchesGroup(
+    "Leo\n客户：考试时间改到 8 月 2 日上午 9:30",
+    "Leo",
+  ));
   assert.doesNotThrow(() => assertWechatConversationTitle(
     "AI赋能运营自动化小组（3）\n昨天 20:47\n考试时间改到 7-1",
     "AI赋能运营自动化小组",
@@ -110,10 +138,16 @@ test("WeChat window helper opens local chat result instead of submitting Souyiso
   const openGroupBranch = helper.slice(helper.indexOf('case "open-group":'), helper.indexOf("default:"));
 
   assert.match(helper, /func clickVisibleConversation/);
+  assert.match(helper, /func conversationTitleMatches/);
   assert.match(helper, /func activateWeChat/);
+  assert.match(helper, /func requireMainWindow/);
+  assert.match(helper, /bounds\.width >= 640, bounds\.height >= 420/);
+  assert.match(helper, /微信未登录或主聊天窗口不可见/);
+  assert.match(helper, /func windowSharingState/);
+  assert.match(helper, /windowSharingState\(window\.id\)/);
   assert.match(helper, /NSWorkspace\.shared\.runningApplications/);
   assert.match(helper, /NSWorkspace\.shared\.frontmostApplication/);
-  assert.match(helper, /if mainWindow\(\) != nil \{\n    return\n  \}/);
+  assert.doesNotMatch(helper, /if mainWindow\(\) != nil \{\n    return\n  \}/);
   assert.match(helper, /activate\(options: \[\.activateAllWindows\]\)/);
   assert.match(helper, /CGEventSource\(stateID: \.hidSystemState\)/);
   assert.match(helper, /localEventsSuppressionInterval = 0/);
@@ -123,15 +157,28 @@ test("WeChat window helper opens local chat result instead of submitting Souyiso
   assert.match(helper, /process\.terminationStatus != 0/);
   assert.match(helper, /case "click-point":/);
   assert.match(helper, /case "click-point-delayed":/);
+  assert.match(helper, /func beginScreenshotMode/);
+  assert.match(helper, /window\.bounds\.height - 36/);
+  assert.match(helper, /case "begin-screenshot":/);
+  assert.match(helper, /case "end-screenshot":/);
   assert.match(openGroupBranch, /activeWindow = mainWindow/);
   assert.match(openGroupBranch, /activateWeChat\(\)/);
-  assert.match(openGroupBranch, /if !clickVisibleConversation\(CommandLine\.arguments\[2\], in: activeWindow\)/);
-  assert.match(openGroupBranch, /clearSearch: true/);
+  assert.ok(openGroupBranch.indexOf("activateWeChat()") < openGroupBranch.indexOf("activeWindow = mainWindow"));
   assert.match(openGroupBranch, /clickSearch\(activeWindow\.bounds\)/);
-  assert.match(openGroupBranch, /clickVisibleConversation\(CommandLine\.arguments\[2\], in: activeWindow\)/);
+  assert.match(openGroupBranch, /postKey\(0, flags: \.maskCommand\)[\s\S]*postKey\(9, flags: \.maskCommand\)/);
+  assert.match(openGroupBranch, /postKey\(36\)[\s\S]*postKey\(53\)/);
+  assert.doesNotMatch(openGroupBranch, /conversationTitleMatches/);
+  assert.doesNotMatch(openGroupBranch, /clickVisibleConversation/);
   assert.doesNotMatch(openGroupBranch, /usleep\(2_500_000\)/);
-  assert.match(helper, /if clearSearch \{\n    postKey\(53\)\n    usleep\(300_000\)\n  \}/);
-  assert.match(helper, /clickWithFreshProcess\(point\)/);
+  assert.match(helper, /clickWithFreshProcess\(point\)[\s\S]*if clearSearch \{\n    postKey\(53\)\n    usleep\(300_000\)\n  \}/);
+  assert.match(helper, /let scaleX = window\.bounds\.width \/ recognized\.size\.width/);
+  assert.match(helper, /let scaleY = window\.bounds\.height \/ recognized\.size\.height/);
+  assert.match(helper, /window region screenshot fallback failed/);
+  assert.match(collector, /execFileSync\("swift", \[windowHelper, "open-group", groupName\]/);
+  assert.match(collector, /execFileSync\("swift", \[windowHelper, "begin-screenshot"\]/);
+  assert.match(collector, /execFileSync\("swift", \[windowHelper, "end-screenshot"\]/);
+  assert.match(collector, /withWechatScreenshotMode\(windowHelper/);
+  assert.doesNotMatch(collector, /function resizeWechatWindow/);
   assert.match(openGroupBranch, /postKey\(9, flags: \.maskCommand\)[\s\S]*postKey\(36\)/);
   assert.match(collector, /if \(!text\.trim\(\)\)/);
   assert.match(collector, /重新打开微信群后再采集一次/);
@@ -167,24 +214,40 @@ test("visible WeChat collector retries title OCR while the chat is still loading
   ), false);
 });
 
-test("visible WeChat collector builds a window-id screenshot and relative crop plan", async () => {
+test("visible WeChat collector captures absolute chat and title regions from the target window", async () => {
   const moduleUrl = new URL("../scripts/wechat_visible_collect.mjs", import.meta.url);
-  const { buildWechatWindowCapturePlan } = await import(moduleUrl.href);
+  const { buildWechatTitleCaptureRect, buildWechatWindowCapturePlan } = await import(moduleUrl.href);
 
   assert.deepEqual(buildWechatWindowCapturePlan({
     windowId: 1903,
+    x: 918,
+    y: 72,
     width: 1200,
     height: 860,
   }, {
-    leftInset: 320,
+    leftInset: 220,
     topInset: 56,
     rightInset: 0,
-    bottomInset: 180,
+    bottomInset: 120,
   }), {
-    captureRect: "320,56,880,624",
+    captureRect: "1138,128,980,684",
+    titleCaptureRect: "1138,72,980,112",
+    windowCaptureRect: "918,72,1200,860",
     screenshotArgs: ["-x", "-o", "-l1903"],
-    cropArgs: ["-c", "624", "880", "--cropOffset", "56", "320"],
+    windowScreenshotArgs: ["-x", "-o", "-l1903"],
+    chatCropArgs: ["-c", "684", "980", "--cropOffset", "56", "220"],
+    titleCropArgs: ["-c", "112", "980", "--cropOffset", "0", "220"],
   });
+  assert.equal(buildWechatTitleCaptureRect({
+    x: 34,
+    y: 583,
+    width: 1200,
+    height: 539,
+  }), "254,583,980,112");
+  assert.throws(
+    () => buildWechatTitleCaptureRect({ x: 0, y: 0, width: 500, height: 400 }, { leftInset: 400 }),
+    /微信会话标题截图区域过小/,
+  );
 });
 
 test("visible WeChat collector rejects an empty raw capture instead of treating it as no new messages", async () => {
@@ -378,35 +441,53 @@ test("visible WeChat collector scales default scroll bursts from chat capture he
   });
 });
 
-test("visible WeChat collector plans resize only for undersized WeChat windows", async () => {
+test("visible WeChat collector adapts capture insets without resizing the user's window", async () => {
   const moduleUrl = new URL("../scripts/wechat_visible_collect.mjs", import.meta.url);
-  const { resolveWechatWindowAdjustmentPlan } = await import(moduleUrl.href);
-  const captureInsets = { leftInset: 320, topInset: 56, rightInset: 0, bottomInset: 180 };
+  const { resolveAdaptiveWechatCaptureInsets, resolveWechatWindowAdjustmentPlan } = await import(moduleUrl.href);
+  const mediumInsets = resolveAdaptiveWechatCaptureInsets({ width: 900, height: 700 });
 
-  assert.deepEqual(resolveWechatWindowAdjustmentPlan({ windowId: 99, x: 10, y: 20, width: 900, height: 700 }, captureInsets), {
+  assert.deepEqual(mediumInsets, { leftInset: 220, topInset: 56, rightInset: 0, bottomInset: 98 });
+  assert.deepEqual(resolveWechatWindowAdjustmentPlan({ windowId: 99, x: 10, y: 20, width: 900, height: 700 }, mediumInsets), {
     wechatWindow: { windowId: 99, x: 10, y: 20, width: 900, height: 700 },
-    chatCaptureSize: { width: 580, height: 464 },
-    windowAdjustment: {
-      checked: true,
-      resized: true,
-      reason: "chat_capture_too_small",
-      minChatCaptureHeight: 480,
-      targetWindow: { width: 1200, height: 860 },
-      originalWindow: { width: 900, height: 700 },
-    },
-  });
-  assert.deepEqual(resolveWechatWindowAdjustmentPlan({ windowId: 99, x: 10, y: 20, width: 1200, height: 860 }, captureInsets), {
-    wechatWindow: { windowId: 99, x: 10, y: 20, width: 1200, height: 860 },
-    chatCaptureSize: { width: 880, height: 624 },
+    chatCaptureSize: { width: 680, height: 546 },
     windowAdjustment: {
       checked: true,
       resized: false,
-      reason: "size_ok",
-      minChatCaptureHeight: 480,
-      targetWindow: { width: 1200, height: 860 },
+      reason: "adaptive_capture",
+      minChatCaptureHeight: 240,
+      originalWindow: { width: 900, height: 700 },
+    },
+  });
+  const smallInsets = resolveAdaptiveWechatCaptureInsets({ width: 686, height: 459 });
+  assert.deepEqual(smallInsets, { leftInset: 220, topInset: 56, rightInset: 0, bottomInset: 90 });
+  assert.deepEqual(resolveWechatWindowAdjustmentPlan({ windowId: 101, x: 514, y: 663, width: 686, height: 459 }, smallInsets), {
+    wechatWindow: { windowId: 101, x: 514, y: 663, width: 686, height: 459 },
+    chatCaptureSize: { width: 466, height: 313 },
+    windowAdjustment: {
+      checked: true,
+      resized: false,
+      reason: "adaptive_capture",
+      minChatCaptureHeight: 240,
+      originalWindow: { width: 686, height: 459 },
+    },
+  });
+  const largeInsets = resolveAdaptiveWechatCaptureInsets({ width: 1200, height: 860 });
+  assert.deepEqual(largeInsets, { leftInset: 220, topInset: 56, rightInset: 0, bottomInset: 120 });
+  assert.deepEqual(resolveWechatWindowAdjustmentPlan({ windowId: 99, x: 10, y: 20, width: 1200, height: 860 }, largeInsets), {
+    wechatWindow: { windowId: 99, x: 10, y: 20, width: 1200, height: 860 },
+    chatCaptureSize: { width: 980, height: 684 },
+    windowAdjustment: {
+      checked: true,
+      resized: false,
+      reason: "adaptive_capture",
+      minChatCaptureHeight: 240,
       originalWindow: { width: 1200, height: 860 },
     },
   });
+  assert.deepEqual(resolveAdaptiveWechatCaptureInsets({ width: 1200, height: 860 }, {
+    leftInset: "280",
+    bottomInset: "140",
+  }), { leftInset: 280, topInset: 56, rightInset: 0, bottomInset: 140 });
 });
 
 test("visible WeChat collector merges scrolled OCR pages from older to newer messages", async () => {
@@ -622,7 +703,7 @@ test("visible WeChat collector preflight checks window geometry without capturin
 
   const summary = JSON.parse(readFileSync(outputPath, "utf8"));
   assert.equal(summary.groups[0].status, "dry_run");
-  assert.equal(summary.groups[0].captureRect, "320,56,880,624");
+  assert.equal(summary.groups[0].captureRect, "1138,128,980,684");
   assert.equal(existsSync(summary.groups[0].screenshotPath), false);
 });
 

@@ -8,31 +8,31 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/ata/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node</string>
-    <string>/Users/ata/Library/Application Support/easy-exam-automation/app/scripts/wechat_visible_collect.mjs</string>
+    <string>__EASY_EXAM_NODE__</string>
+    <string>__EASY_EXAM_APP_DIR__/scripts/wechat_visible_collect.mjs</string>
     <string>--config</string>
-    <string>/Users/ata/Library/Application Support/easy-exam-automation/runtime/wechat-requirement-groups.json</string>
+    <string>__EASY_EXAM_RUNTIME_DIR__/wechat-requirement-groups.json</string>
     <string>--state</string>
-    <string>/Users/ata/Library/Application Support/easy-exam-automation/runtime/wechat-checkpoints.json</string>
+    <string>__EASY_EXAM_RUNTIME_DIR__/wechat-checkpoints.json</string>
     <string>--push</string>
     <string>--api</string>
     <string>http://127.0.0.1:8765</string>
     <string>--captureMode</string>
     <string>ocr</string>
     <string>--output</string>
-    <string>/Users/ata/Library/Application Support/easy-exam-automation/runtime/wechat-last-run.json</string>
+    <string>__EASY_EXAM_RUNTIME_DIR__/wechat-last-run.json</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/ata/Library/Application Support/easy-exam-automation/app</string>
+  <string>__EASY_EXAM_APP_DIR__</string>
 
   <key>StartInterval</key>
   <integer>900</integer>
 
   <key>StandardOutPath</key>
-  <string>/Users/ata/Library/Application Support/easy-exam-automation/runtime/wechat-collector.log</string>
+  <string>__EASY_EXAM_RUNTIME_DIR__/wechat-collector.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/ata/Library/Application Support/easy-exam-automation/runtime/wechat-collector.err.log</string>
+  <string>__EASY_EXAM_RUNTIME_DIR__/wechat-collector.err.log</string>
 </dict>
 </plist>

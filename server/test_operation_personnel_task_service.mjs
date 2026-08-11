@@ -1,2154 +1,570 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { buildOperationPersonnelTaskDraft, operationPersonnelTaskFingerprint } from "./operation_personnel_task.mjs";
+import { buildOperationPersonnelTaskDraft } from "./operation_personnel_task.mjs";
 import {
-  normalizeOperationPersonnelSnapshot,
-  runOperationPersonnelAttempt,
-} from "./operation_personnel_task_runner.mjs";
-import { createOperationPersonnelTaskService } from "./operation_personnel_task_service.mjs";
-
-const START = Date.parse("2026-07-23T02:00:00.000Z");
-const ADMIN = { role: "admin" };
-
-function managedSchedule(overrides = {}) {
-  return {
-    requirementIndex: 0,
-    name: "湖北邮政招聘考试",
-    start: "2026-08-22T09:00:00",
-    end: "2026-08-22T11:00:00",
-    ...overrides,
-  };
-}
-
-function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => (
-      `${JSON.stringify(key)}:${stableJson(value[key])}`
-    )).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-function valueFingerprint(value) {
-  return createHash("sha256").update(stableJson(value)).digest("hex");
-}
-
-function owner() {
-  return { email: "owner@example.com", role: "user" };
-}
+  createOperationPersonnelTaskService,
+  operationPersonnelExpiredDateLabels,
+  operationPersonnelFailedResumeConflictBaseline,
+  operationPersonnelFailedResumeObservedBaseline,
+  operationPersonnelInformationMissing,
+  operationPersonnelManagedSchedules,
+  operationPersonnelRequirementsFromPersonnel,
+} from "./operation_personnel_task_service.mjs";
 
 function baseTask() {
   return {
-    taskId: "task-a",
-    ownerEmail: "owner@example.com",
+    taskId: "personnel-edit-task",
     projectName: "示例考试",
     config: {
-      requirementRequestId: "requirement-a",
       operationBatchCode: "EZT260003",
       operationBatch: {
         code: "EZT260003",
-        status: "success",
-        managedSnapshot: {
-          batchName: "湖北邮政招聘考试",
-          examStartDate: "2026-08-22",
-          examEndDate: "2026-08-22",
-          schedules: [managedSchedule()],
-        },
+        draft: { fields: {
+          batchName: { value: "示例考试_2026年8月" },
+          projectDepartment: { value: "项目实施一部" },
+        } },
       },
       businessRequirement: {
-        batch_name: "湖北邮政招聘考试",
         operation_serial_number: "R0042483",
         project_code: "P260001",
         project_name: "示例考试",
+        project_manager: "陈军",
         ata_invigilator_arrangement: "需要安排分散人工监考",
       },
-      examRequirement: {
+      examRequirements: [{
         id: "requirement-1",
         version: 3,
-        fields: {
-          "考试名称": "湖北邮政招聘考试",
-          "考试日期时间": "2026/08/22 09:00 - 2026/08/22 11:00",
-        },
+        fields: { "考试名称": "示例考试" },
         config: {
-          startTimeDisplay: "2026/08/22 09:00",
-          endTimeDisplay: "2026/08/22 11:00",
+          startTimeDisplay: "2026/08/20 09:00",
+          endTimeDisplay: "2026/08/20 11:00",
           earlyLoginMinutes: 30,
           courses: [{ code: "C001", name: "综合能力" }],
         },
-      },
+      }],
     },
     sessions: [{
       sessionType: "formal",
-      start: "2026/08/22 09:00",
-      end: "2026/08/22 11:00",
+      start: "2026/08/20 09:00",
+      end: "2026/08/20 11:00",
       candidateCount: 81,
+      roomCount: 3,
     }],
   };
 }
 
-function inspectionFor(task, environment = "test") {
-  const draft = buildOperationPersonnelTaskDraft(task, {
-    environment,
-    now: new Date(START).toISOString(),
+test("人员任务详情只允许编辑日期，分班同步字段不会被手工覆盖", async () => {
+  let task = baseTask();
+  let inspectionCalls = 0;
+  const service = createOperationPersonnelTaskService({
+    readTask: async () => structuredClone(task),
+    updateTaskConfig: async (_taskId, config) => {
+      task = { ...task, config: { ...task.config, ...structuredClone(config) } };
+      return structuredClone(task);
+    },
+    coordinator: {
+      acquireTask: () => () => {},
+      acquireProfile: () => () => {},
+    },
+    runInspection: async () => {
+      inspectionCalls += 1;
+      throw new Error("编辑保存不应检查运控平台");
+    },
+    environment: "",
+    now: () => Date.parse("2026-08-05T02:00:00.000Z"),
   });
-  const to = environment === "production"
-    ? [{ group: "拓展二部", id: "p1", name: "唐润梅" }]
-    : [{ group: "演练组", id: "t1", name: "张乐翔" }];
-  const cc = environment === "production"
-    ? ["c1", "c2", "c3", "c4"].map((id, index) => ({
-      group: "结算组",
-      id,
-      name: `结算${index + 1}`,
-    }))
-    : [];
-  return {
+
+  const result = await service.edit("personnel-edit-task", { role: "admin" }, {
+    dates: {
+      start: "2026-08-06",
+      end: "2026-08-19",
+      nameListDue: "2026-08-19",
+    },
+    personnel: {
+      monitorRatio: "1:40",
+      monitorCount: "4",
+    },
+  });
+
+  assert.equal(inspectionCalls, 0);
+  assert.equal(result.state.draft.dates.start, "2026-08-06");
+  assert.equal(result.state.draft.dates.end, "2026-08-19");
+  assert.equal(result.state.draft.personnel.monitorRatio, "1:27");
+  assert.equal(result.state.draft.personnel.monitorCount, 3);
+  assert.equal(result.state.warnings, undefined);
+  assert.equal(result.state.activePreview, null);
+  assert.equal(task.config.operationPersonnelTask.confirmedEdits.dates.start, "2026-08-06");
+  assert.deepEqual(task.config.operationPersonnelTask.confirmedEdits.personnel, {});
+  assert.equal(result.state.status, "unsupported");
+});
+
+test("人员任务发送草稿忽略旧的手工人员参数并同步正式考试分班结果", () => {
+  const task = baseTask();
+  task.config.operationPersonnelTask = {
+    confirmedEdits: {
+      dates: { start: "2026-08-06", end: "2026-08-19", nameListDue: "2026-08-19" },
+      personnel: { monitorRatio: "1:40", monitorCount: 3 },
+    },
+  };
+
+  const draft = buildOperationPersonnelTaskDraft(task, {
+    environment: "test",
+    now: "2026-08-05T02:00:00.000Z",
+  });
+
+  assert.deepEqual(draft.dates, {
+    start: "2026-08-06",
+    end: "2026-08-19",
+    nameListDue: "2026-08-19",
+  });
+  assert.equal(draft.personnel.monitorRatio, "1:27");
+  assert.equal(draft.personnel.monitorCount, 3);
+});
+
+test("人员任务详情保存四项可编辑考务需求并用于后续写入", async () => {
+  let task = baseTask();
+  const service = createOperationPersonnelTaskService({
+    readTask: async () => structuredClone(task),
+    updateTaskConfig: async (_taskId, config) => {
+      task = { ...task, config: { ...task.config, ...structuredClone(config) } };
+      return structuredClone(task);
+    },
+    coordinator: {
+      acquireTask: () => () => {},
+      acquireProfile: () => () => {},
+    },
+    environment: "",
+    now: () => Date.parse("2026-08-05T02:00:00.000Z"),
+  });
+  const requirements = {
+    "正式考试-最早登录系统时间": "考生可于考试开始前45分钟登录",
+    "正式考试-监考人员安排": "ATA监考-分散（重点场）",
+    "正式考试-监考人员数量": "5",
+    "正式考试-监考人员比例": "1:20",
+  };
+
+  const result = await service.edit("personnel-edit-task", { role: "admin" }, { requirements });
+
+  assert.equal(result.state.draft.personnel.earliestLoginMinutes, 45);
+  assert.equal(result.state.draft.personnel.monitorCount, 5);
+  assert.equal(result.state.draft.personnel.monitorRatio, "1:20");
+  assert.equal(result.state.draft.personnel.candidateBasis, 20);
+  assert.deepEqual(result.state.draft.requirementOverrides, requirements);
+  assert.deepEqual(result.state.draft.targetRequirements.slice(0, 4), Object.entries(requirements).map(([name, value]) => ({ name, value })));
+  assert.deepEqual(task.config.operationPersonnelTask.confirmedEdits.requirements, requirements);
+
+  const rebuilt = buildOperationPersonnelTaskDraft(task, {
+    environment: "test",
+    now: "2026-08-05T02:00:00.000Z",
+  });
+  assert.equal(rebuilt.personnel.earliestLoginMinutes, 45);
+  assert.equal(rebuilt.personnel.monitorCount, 5);
+  assert.equal(rebuilt.personnel.monitorRatio, "1:20");
+  assert.deepEqual(rebuilt.requirementOverrides, requirements);
+});
+
+test("人员任务详情拒绝保存格式无效的考务需求", async () => {
+  const task = baseTask();
+  const service = createOperationPersonnelTaskService({
+    readTask: async () => structuredClone(task),
+    updateTaskConfig: async () => {
+      throw new Error("无效草稿不应持久化");
+    },
+    coordinator: {
+      acquireTask: () => () => {},
+      acquireProfile: () => () => {},
+    },
+    environment: "test",
+    now: () => Date.parse("2026-08-05T02:00:00.000Z"),
+  });
+
+  await assert.rejects(
+    () => service.edit("personnel-edit-task", { role: "admin" }, {
+      requirements: {
+        "正式考试-最早登录系统时间": "未填写时间",
+        "正式考试-监考人员安排": "",
+        "正式考试-监考人员数量": "0",
+        "正式考试-监考人员比例": "无效比例",
+      },
+    }),
+    (error) => error?.code === "PERSONNEL_DRAFT_INCOMPLETE",
+  );
+});
+
+test("人员任务生成完整的五项正式考试考务需求", () => {
+  const draft = buildOperationPersonnelTaskDraft(baseTask(), {
+    environment: "test",
+    now: "2026-08-05T02:00:00.000Z",
+  });
+  const requirements = operationPersonnelRequirementsFromPersonnel(draft.personnel);
+
+  assert.deepEqual(requirements, [
+    { name: "正式考试-最早登录系统时间", value: "考生可于考试开始前30分钟登录" },
+    { name: "正式考试-监考人员安排", value: "ATA监考-分散" },
+    { name: "正式考试-监考人员数量", value: "3" },
+    { name: "正式考试-监考人员比例", value: "1:27" },
+    { name: "正式考试-监考登录监控", value: "否" },
+  ]);
+  assert.deepEqual(operationPersonnelInformationMissing(draft), []);
+});
+
+test("人员任务刷新时沿用已完成考务需求检查点的真实回读", async () => {
+  const task = baseTask();
+  const readback = [
+    { name: "正式考试-最早登录系统时间", value: "考生可于考试开始前30分钟登录" },
+    { name: "正式考试-监考人员安排", value: "ATA监考-分散" },
+    { name: "正式考试-监考人员数量", value: "3" },
+    { name: "正式考试-监考人员比例", value: "1:27" },
+    { name: "正式考试-监考登录监控", value: "否" },
+  ];
+  task.config.operationPersonnelTask = {
+    status: "failed_resumable",
+    checkpoints: {
+      sync_exam_service_requirements: {
+        status: "completed",
+        readback,
+      },
+    },
+  };
+  const service = createOperationPersonnelTaskService({
+    readTask: async () => structuredClone(task),
+    coordinator: { acquireTask: () => () => {} },
+    environment: "test",
+    now: () => Date.parse("2026-08-05T02:00:00.000Z"),
+  });
+
+  const result = await service.get(task.taskId, { role: "admin" });
+
+  assert.deepEqual(result.state.draft.operationRequirements, readback);
+});
+
+test("人员任务严格阻止未填写完整的人员信息", () => {
+  const draft = buildOperationPersonnelTaskDraft(baseTask(), {
+    environment: "test",
+    now: "2026-08-05T02:00:00.000Z",
+  });
+  draft.personnel.loginMonitoring = "";
+  draft.personnel.candidateBasis = "";
+
+  assert.deepEqual(operationPersonnelInformationMissing(draft), [
+    "监考登录监控",
+    "监考人数计算基数",
+    "正式考试-监考登录监控",
+  ]);
+});
+
+test("人员任务结束日期或名单提交日期过期时阻止发送", () => {
+  const draft = buildOperationPersonnelTaskDraft(baseTask(), {
+    environment: "test",
+    now: "2026-08-05T02:00:00.000Z",
+  });
+  draft.dates = {
+    start: "2026-08-05",
+    end: "2026-08-07",
+    nameListDue: "2026-08-06",
+  };
+
+  assert.deepEqual(
+    operationPersonnelExpiredDateLabels(draft, Date.parse("2026-08-08T02:00:00.000Z")),
+    ["人员落实结束日期", "人员名单提交日期"],
+  );
+  assert.deepEqual(
+    operationPersonnelInformationMissing(draft, { now: Date.parse("2026-08-08T02:00:00.000Z") })
+      .filter((label) => label.endsWith("已过期")),
+    ["人员落实结束日期已过期", "人员名单提交日期已过期"],
+  );
+});
+
+test("批次缺少受管快照时从当前人员草稿建立严格日程基线", () => {
+  const draft = buildOperationPersonnelTaskDraft(baseTask(), {
+    environment: "test",
+    now: "2026-08-05T02:00:00.000Z",
+  });
+
+  assert.deepEqual(operationPersonnelManagedSchedules(draft, []), [{
+    requirementIndex: 0,
+    name: "综合能力",
+    start: "2026/08/20 09:00",
+    end: "2026/08/20 11:00",
+  }]);
+});
+
+test("首次预览可用草稿日程核对已有运控日程", async () => {
+  let task = baseTask();
+  const service = createOperationPersonnelTaskService({
+    readTask: async () => structuredClone(task),
+    updateTaskConfig: async (_taskId, config) => {
+      task = { ...task, config: { ...task.config, ...structuredClone(config) } };
+      return structuredClone(task);
+    },
+    coordinator: {
+      acquireTask: () => () => {},
+      acquireProfile: () => () => {},
+    },
+    runInspection: async () => ({
+      batch: {
+        code: "EZT260003",
+        projectCode: "P260001",
+        projectName: "示例考试",
+        batchName: "示例考试_2026年8月",
+        projectDepartment: "项目实施一部",
+        projectManager: "陈军",
+        published: true,
+      },
+      schedules: [{
+        scheduleCode: 1,
+        subjectName: "综合能力",
+        start: "2026-08-20 09:00",
+        end: "2026-08-20 11:00",
+      }],
+      personnel: {},
+      dates: {},
+      requirements: [],
+      taskSheet: {},
+      sendRecords: [],
+      directoryMatch: { to: [], cc: [] },
+    }),
+    environment: "test",
+    now: () => Date.parse("2026-08-05T02:00:00.000Z"),
+    makeToken: () => "preview-token",
+  });
+
+  const result = await service.preview(task.taskId, { role: "admin" });
+
+  assert.deepEqual(result.state.draft.managedSchedules, [{
+    requirementIndex: 0,
+    name: "综合能力",
+    start: "2026/08/20 09:00",
+    end: "2026/08/20 11:00",
+  }]);
+  assert.deepEqual(result.state.draft.displaySchedules, [{
+    scheduleCode: 1,
+    name: "综合能力",
+    start: "2026/08/20 09:00",
+    end: "2026/08/20 11:00",
+  }]);
+  assert.equal(result.state.draft.targetRequirements.length, 5);
+  assert.ok(result.state.draft.targetRequirements.every((item) => item.value));
+});
+
+test("发送排队复核在无受管快照时继续使用草稿日程", async () => {
+  let task = baseTask();
+  let deferredJob = null;
+  let attemptInstruction = null;
+  const snapshot = {
     batch: {
-      ...draft.batch,
-      batchName: "",
-      projectDepartment: "",
-      projectManager: "",
-      systemType: "",
-      published: false,
+      code: "EZT260003",
+      projectCode: "P260001",
+      projectName: "示例考试",
+      batchName: "示例考试_2026年8月",
+      projectDepartment: "项目实施一部",
+      projectManager: "陈军",
+      published: true,
     },
     schedules: [{
-      scheduleCode: 17,
-      subjectName: "湖北邮政招聘考试",
-      start: "2026-08-22T09:00:00",
-      end: "2026-08-22T11:00:00",
+      scheduleCode: 1,
+      subjectName: "综合能力",
+      start: "2026-08-20 09:00",
+      end: "2026-08-20 11:00",
     }],
     personnel: {},
     dates: {},
     requirements: [],
-    taskSheet: {
-      type: "分散在线监考",
-      conditions: [{ name: "人员配置", satisfied: true }],
-      content: "任务内容",
-    },
+    taskSheet: {},
     sendRecords: [],
-    directoryMatch: { to, cc },
+    directoryMatch: { to: [], cc: [] },
   };
-}
-
-function requirementsForPersonnel(personnel = {}) {
-  return [
-    {
-      name: "正式考试-最早登录系统时间",
-      value: `考生可于考试开始前${personnel.earliestLoginMinutes}分钟登录`,
-    },
-    { name: "正式考试-监考人员安排", value: "ATA监考-分散" },
-    { name: "正式考试-监考人员数量", value: String(personnel.monitorCount) },
-    { name: "正式考试-监考人员比例", value: String(personnel.monitorRatio) },
-    { name: "正式考试-监考登录监控", value: String(personnel.loginMonitoring) },
-  ];
-}
-
-function successfulAttemptResult(overrides = {}) {
-  return {
-    status: "sent",
-    sendRecord: { type: "首次发送", sentAt: "2026-07-23T02:00:20.000Z" },
-    operationSnapshot: { batch: { code: "EZT260003", published: true } },
-    completedAt: "2026-07-23T02:00:21.000Z",
-    ...overrides,
-  };
-}
-
-function serviceHarness(options = {}) {
-  let currentTime = START;
-  const task = baseTask();
-  const requirement = options.requirement || { requestId: "requirement-a", version: 3, changeRequests: [] };
-  const runnerCalls = [];
-  const inspectionInstructions = [];
-  const attemptInstructions = [];
-  const recheckInstructions = [];
-  const deferredJobs = [];
-  const profileLocks = [];
-  const taskLocks = [];
-  const persistedStates = [];
-  let tokenCounter = 0;
-  let attemptCounter = 0;
-  let inspection = inspectionFor(task, options.environment || "test");
-  const setBatchScheduleStatus = (status) => {
-    task.config.operationBatch.status = status;
-    task.config.operationBatch.managedSnapshot = {
-      batchName: "湖北邮政招聘考试",
-      examStartDate: "2026-08-22",
-      examEndDate: "2026-08-22",
-      schedules: [managedSchedule(
-        status === "update_available" ? { start: "2026-08-22T08:00:00" } : {},
-      )],
-    };
-  };
-  const setSynchronizedManagedSchedule = (overrides = {}) => {
-    const schedule = managedSchedule(overrides);
-    task.config.examRequirement.fields["考试日期时间"] = [
-      schedule.start.replace("T", " "),
-      schedule.end.replace("T", " "),
-    ].join(" - ");
-    task.config.operationBatch.status = "success";
-    task.config.operationBatch.managedSnapshot = {
-      batchName: "湖北邮政招聘考试",
-      examStartDate: schedule.start.slice(0, 10),
-      examEndDate: schedule.end.slice(0, 10),
-      schedules: [schedule],
-    };
-  };
-  setBatchScheduleStatus(options.batchScheduleStatus || "success");
-  let batchChangedAfterInspection = false;
-
-  if (options.alreadySent || options.changedAfterSend) {
-    const currentDraft = buildOperationPersonnelTaskDraft(task, {
-      environment: options.environment || "test",
-      now: new Date(START).toISOString(),
-    });
-    currentDraft.managedSchedules = structuredClone(
-      task.config.operationBatch.managedSnapshot.schedules,
-    );
-    task.config.operationPersonnelTask = {
-      schemaVersion: 1,
-      environment: options.environment || "test",
-      status: "sent",
-      draft: currentDraft,
-      draftVersion: 1,
-      sourceFingerprint: operationPersonnelTaskFingerprint(currentDraft),
-      lastSuccessfulFingerprint: options.changedAfterSend
-        ? "previous-fingerprint"
-        : operationPersonnelTaskFingerprint(currentDraft),
-      scheduleCodeMap: currentDraft.scheduleCodeMap,
-      lastOperationSnapshot: structuredClone(inspection),
-      checkpoints: {},
-      activePreview: null,
-      activeAttempt: null,
-      sendHistory: [],
-      changeSummary: "",
-      events: [],
-    };
-  }
-
-  if (options.orphanedAttemptCheckpoint || options.resultUnknown) {
-    const draft = buildOperationPersonnelTaskDraft(task, {
-      environment: options.environment || "test",
-      now: new Date(START).toISOString(),
-    });
-    draft.managedSchedules = structuredClone(
-      task.config.operationBatch.managedSnapshot.schedules,
-    );
-    const operationSnapshot = normalizeOperationPersonnelSnapshot(inspection);
-    draft.operationBatch = structuredClone(operationSnapshot.batch);
-    draft.operationRequirements = structuredClone(operationSnapshot.requirements);
-    draft.operationTaskSheet = structuredClone(operationSnapshot.taskSheet);
-    draft.directoryMatch = structuredClone(operationSnapshot.directoryMatch);
-    draft.previewOperationSnapshot = structuredClone(operationSnapshot);
-    draft.displaySchedules = operationSnapshot.schedules.map((schedule, index) => ({
-      scheduleCode: schedule.scheduleCode,
-      name: draft.managedSchedules[index].name,
-      start: draft.managedSchedules[index].start,
-      end: draft.managedSchedules[index].end,
-    }));
-    const target = normalizeOperationPersonnelSnapshot({
-      batch: {
-        ...draft.operationBatch,
-        ...draft.batch,
-        published: true,
-      },
-      schedules: inspection.schedules,
-      personnel: draft.personnel,
-      dates: draft.dates,
-      requirements: requirementsForPersonnel(draft.personnel),
-      taskSheet: draft.operationTaskSheet,
-      directoryMatch: draft.directoryMatch,
-    });
-    const checkpointName = options.orphanedAttemptCheckpoint || "verify_send_record";
-    const attempt = {
-      attemptId: "attempt-orphan",
-      kind: "initial",
-      operator: "owner@example.com",
-      environment: options.environment || "test",
-      requirementVersion: 3,
-      draftVersion: 1,
-      fingerprint: operationPersonnelTaskFingerprint(draft),
-      recipients: { to: inspection.directoryMatch.to, cc: inspection.directoryMatch.cc },
-      managedSchedules: structuredClone(draft.managedSchedules),
-      displaySchedules: structuredClone(draft.displaySchedules),
-      changeSummary: "",
-      createdAt: "2026-07-23T02:00:00.000Z",
-      startedAt: "2026-07-23T02:00:01.000Z",
-      status: "running",
-      target,
-      baseline: structuredClone(target),
-      previewBinding: {
-        operationSnapshotFingerprint: valueFingerprint(operationSnapshot),
-        directoryMatchFingerprint: valueFingerprint(operationSnapshot.directoryMatch),
-        managedScheduleFingerprint: valueFingerprint(draft.managedSchedules),
-        displayScheduleFingerprint: valueFingerprint(draft.displaySchedules),
-      },
-    };
-    task.config.operationPersonnelTask = {
-      schemaVersion: 1,
-      environment: options.environment || "test",
-      status: options.resultUnknown ? "result_unknown" : "sending",
-      draft,
-      draftVersion: 1,
-      sourceFingerprint: operationPersonnelTaskFingerprint(draft),
-      lastSuccessfulFingerprint: "",
-      scheduleCodeMap: draft.scheduleCodeMap,
-      lastOperationSnapshot: null,
-      checkpoints: {
-        ...(options.submitStartedAt ? {
-          submit_send: {
-            name: "submit_send",
-            status: "running",
-            readback: { kind: "initial", startedAt: options.submitStartedAt },
-          },
-        } : {}),
-        [checkpointName]: {
-          name: checkpointName,
-          status: "running",
-          ...(checkpointName === "submit_send"
-            ? { readback: { kind: "initial", startedAt: attempt.startedAt } }
-            : {}),
-        },
-      },
-      activePreview: null,
-      activeAttempt: attempt,
-      sendHistory: [],
-      changeSummary: "",
-      events: [],
-    };
-  }
-
-  const updateTaskConfig = async (taskId, config) => {
-    assert.equal(taskId, task.taskId);
-    await options.beforeUpdateTaskConfig?.(config, task);
-    persistedStates.push(structuredClone(config.operationPersonnelTask));
-    task.config = { ...task.config, ...structuredClone(config) };
-    return task;
-  };
-  const runnerResult = options.runnerResult || successfulAttemptResult();
   const service = createOperationPersonnelTaskService({
-    readTask: async (taskId) => taskId === task.taskId ? task : null,
-    updateTaskConfig,
-    readRequirement: async () => requirement,
+    readTask: async () => structuredClone(task),
+    updateTaskConfig: async (_taskId, config) => {
+      task = { ...task, config: { ...task.config, ...structuredClone(config) } };
+      return structuredClone(task);
+    },
     coordinator: {
-      acquireProfile() {
-        profileLocks.push("acquire");
-        return () => profileLocks.push("release");
-      },
-      acquireTask(taskId) {
-        assert.equal(taskId, task.taskId);
-        taskLocks.push("acquire");
-        options.onTaskLockAcquire?.(task);
-        return () => taskLocks.push("release");
-      },
+      acquireTask: () => () => {},
+      acquireProfile: () => () => {},
     },
-    runInspection: async (instruction) => {
-      runnerCalls.push("inspection");
-      inspectionInstructions.push(structuredClone(instruction));
-      assert.equal(instruction.environment, options.environment || "test");
-      options.onInspection?.(task);
-      const result = structuredClone(
-        typeof options.inspectionResult === "function"
-          ? options.inspectionResult(instruction, inspection)
-          : inspection,
-      );
-      if (options.changeBatchAfterInspection && !batchChangedAfterInspection) {
-        batchChangedAfterInspection = true;
-        setBatchScheduleStatus(options.changeBatchAfterInspection);
-      }
-      if (options.changeManagedScheduleAfterInspection && !batchChangedAfterInspection) {
-        batchChangedAfterInspection = true;
-        setSynchronizedManagedSchedule(options.changeManagedScheduleAfterInspection);
-      }
-      if (options.externalBaseline) {
-        result.sendRecords = structuredClone(options.externalSendRecords || [{
-          type: "首次发送",
-          sentAt: "2026-07-23 10:09:34",
-        }]);
-        if (!instruction.directoryProbeSummary) {
-          result.directoryMatch = { to: [], cc: [] };
-        }
-      }
-      return result;
-    },
-    runAttempt: async (instruction, runnerOptions) => {
-      runnerCalls.push("attempt");
-      attemptInstructions.push(structuredClone(instruction));
-      if (options.runAttempt) return options.runAttempt(instruction, runnerOptions);
-      if (options.checkpoint) await runnerOptions.onCheckpoint(options.checkpoint);
-      if (typeof runnerResult === "function") return runnerResult();
-      return typeof runnerResult?.then === "function" ? runnerResult : structuredClone(runnerResult);
-    },
-    runRecheck: async (instruction) => {
-      runnerCalls.push("recheck");
-      recheckInstructions.push(structuredClone(instruction));
-      return structuredClone(options.recheckResult || { status: "result_unknown", sendRecord: null });
-    },
-    environment: options.environment ?? "test",
-    activeAttemptIds: new Set(),
-    now: () => currentTime,
-    makeToken: () => `preview-${++tokenCounter}`,
-    makeAttemptId: () => `attempt-${++attemptCounter}`,
-    defer: options.defer || ((job) => deferredJobs.push(job)),
-  });
-
-  return {
-    service,
-    task,
-    requirement,
-    runnerCalls,
-    inspectionInstructions,
-    attemptInstructions,
-    recheckInstructions,
-    deferredJobs,
-    profileLocks,
-    taskLocks,
-    inspections: inspectionInstructions,
-    persistedStates,
-    attempts: attemptInstructions,
-    setBatchScheduleStatus,
-    setSynchronizedManagedSchedule,
-    setInspection(value) {
-      inspection = value;
-    },
-    advance(ms) {
-      currentTime += ms;
-    },
-    async runDeferred() {
-      while (deferredJobs.length) await deferredJobs.shift()();
-    },
-  };
-}
-
-test("preview token binds requirement, draft, operation snapshot and directory", async () => {
-  const harness = serviceHarness();
-  const preview = await harness.service.preview("task-a", owner(), {});
-  const active = harness.task.config.operationPersonnelTask.activePreview;
-
-  assert.equal(active.requirementVersion, 3);
-  assert.equal(active.draftVersion, preview.draftVersion);
-  assert.match(active.operationSnapshotFingerprint, /^[a-f0-9]{64}$/);
-  assert.match(active.directoryMatchFingerprint, /^[a-f0-9]{64}$/);
-  assert.match(active.managedScheduleFingerprint, /^[a-f0-9]{64}$/);
-  assert.match(active.displayScheduleFingerprint, /^[a-f0-9]{64}$/);
-  harness.task.config.examRequirement.version += 1;
-
-  await assert.rejects(
-    harness.service.send("task-a", owner(), {
-      previewToken: preview.previewToken,
-      draftVersion: preview.draftVersion,
-      changeSummary: "",
-    }),
-    { code: "PERSONNEL_PREVIEW_STALE", status: 409 },
-  );
-});
-
-test("preview blocks before operation inspection when batch schedules are incomplete", async () => {
-  const harness = serviceHarness({ batchScheduleStatus: "waiting_schedule" });
-  await assert.rejects(
-    harness.service.preview("task-a", ADMIN),
-    (error) => error.code === "PERSONNEL_BATCH_SCHEDULE_INCOMPLETE"
-      && /请先在建批次环节完成批次信息修改/.test(error.message),
-  );
-  assert.equal(harness.inspections.length, 0);
-});
-
-test("preview blocks when batch update is available or failed", async () => {
-  for (const status of ["update_available", "updating", "update_failed"]) {
-    const harness = serviceHarness({ batchScheduleStatus: status });
-    await assert.rejects(
-      harness.service.preview("task-a", ADMIN),
-      (error) => error.code === "PERSONNEL_BATCH_UPDATE_REQUIRED",
-    );
-  }
-});
-
-test("preview exposes managed schedules and read-only operation schedule codes", async () => {
-  const harness = serviceHarness({ batchScheduleStatus: "success" });
-  const preview = await harness.service.preview("task-a", ADMIN);
-  assert.deepEqual(preview.state.draft.managedSchedules, [{
-    requirementIndex: 0,
-    name: "湖北邮政招聘考试",
-    start: "2026-08-22T09:00:00",
-    end: "2026-08-22T11:00:00",
-  }]);
-  assert.equal(Object.hasOwn(preview.state.draft.managedSchedules[0], "scheduleCode"), false);
-  assert.deepEqual(preview.state.draft.displaySchedules, [{
-    scheduleCode: 17,
-    name: "湖北邮政招聘考试",
-    start: "2026-08-22T09:00:00",
-    end: "2026-08-22T11:00:00",
-  }]);
-  assert.equal(Object.hasOwn(preview.state.draft.displaySchedules[0], "requirementIndex"), false);
-});
-
-test("preview rejects missing operation schedule codes before any send", async () => {
-  const harness = serviceHarness();
-  const inspection = inspectionFor(harness.task);
-  inspection.schedules = [{
-    scheduleCode: "",
-    subjectName: "湖北邮政招聘考试",
-    start: "2026-08-22T09:00:00",
-    end: "2026-08-22T11:00:00",
-  }];
-  harness.setInspection(inspection);
-
-  await assert.rejects(
-    harness.service.preview("task-a", ADMIN),
-    { code: "PERSONNEL_BATCH_SCHEDULE_CONFLICT", status: 409 },
-  );
-  assert.deepEqual(harness.attempts, []);
-  assert.equal(harness.deferredJobs.length, 0);
-});
-
-test("preview rechecks the batch schedule gate before persisting", async () => {
-  const harness = serviceHarness({ changeBatchAfterInspection: "update_available" });
-  await assert.rejects(
-    harness.service.preview("task-a", ADMIN),
-    (error) => error.code === "PERSONNEL_BATCH_UPDATE_REQUIRED",
-  );
-  assert.equal(harness.persistedStates.length, 0);
-});
-
-test("preview rejects a successful managed snapshot changed before persistence", async () => {
-  const harness = serviceHarness({
-    changeManagedScheduleAfterInspection: {
-      start: "2026-08-22T10:00:00",
-      end: "2026-08-22T12:00:00",
-    },
-  });
-  await assert.rejects(
-    harness.service.preview("task-a", ADMIN),
-    (error) => error.code === "PERSONNEL_BATCH_SCHEDULE_CONFLICT",
-  );
-  assert.equal(harness.persistedStates.length, 0);
-});
-
-test("send invalidates a confirmed preview when batch schedules changed", async () => {
-  const harness = serviceHarness({ batchScheduleStatus: "success" });
-  const preview = await harness.service.preview("task-a", ADMIN);
-  harness.setBatchScheduleStatus("update_available");
-  await assert.rejects(
-    harness.service.send("task-a", ADMIN, {
-      previewToken: preview.previewToken,
-      draftVersion: preview.draftVersion,
-    }),
-    (error) => error.code === "PERSONNEL_BATCH_UPDATE_REQUIRED",
-  );
-  assert.equal(harness.attempts.length, 0);
-});
-
-test("send rejects a successful managed schedule changed after preview", async () => {
-  const harness = serviceHarness({ batchScheduleStatus: "success" });
-  const preview = await harness.service.preview("task-a", ADMIN);
-  harness.setSynchronizedManagedSchedule({
-    start: "2026-08-22T10:00:00",
-    end: "2026-08-22T12:00:00",
-  });
-
-  await assert.rejects(
-    harness.service.send("task-a", ADMIN, {
-      previewToken: preview.previewToken,
-      draftVersion: preview.draftVersion,
-    }),
-    (error) => error.code === "PERSONNEL_BATCH_SCHEDULE_CONFLICT",
-  );
-  assert.equal(harness.attempts.length, 0);
-  assert.equal(harness.task.config.operationPersonnelTask.activePreview, null);
-});
-
-test("send keeps managed schedules outside the operation target and forwards them read-only", async () => {
-  const harness = serviceHarness();
-  const visible = inspectionFor(harness.task);
-  visible.schedules = [{
-    scheduleEntryId: "visible-1",
-    scheduleCode: 88,
-    subjectCode: "C001",
-    subjectName: "湖北邮政招聘考试",
-    start: "2026-08-22T09:00:00",
-    end: "2026-08-22T11:00:00",
-    durationMinutes: 120,
-    earlyLoginMinutes: 30,
-  }];
-  harness.setInspection(visible);
-
-  const preview = await harness.service.preview("task-a", ADMIN);
-  await harness.service.send("task-a", ADMIN, {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-  });
-
-  const attempt = harness.task.config.operationPersonnelTask.activeAttempt;
-  const inspectCheckpoint = harness.task.config.operationPersonnelTask.checkpoints.inspect_batch;
-  assert.equal(inspectCheckpoint.status, "completed");
-  assert.match(inspectCheckpoint.targetDigest, /^[a-f0-9]{64}$/);
-  assert.deepEqual(
-    inspectCheckpoint.readback,
-    harness.task.config.operationPersonnelTask.draft.previewOperationSnapshot,
-  );
-  assert.deepEqual(attempt.target.schedules, visible.schedules);
-  assert.deepEqual(attempt.managedSchedules, [managedSchedule()]);
-  assert.deepEqual(attempt.displaySchedules, [{
-    scheduleCode: 88,
-    name: "湖北邮政招聘考试",
-    start: "2026-08-22T09:00:00",
-    end: "2026-08-22T11:00:00",
-  }]);
-  await harness.runDeferred();
-  assert.deepEqual(harness.attempts[0].managedSchedules, [managedSchedule()]);
-  assert.deepEqual(harness.attempts[0].displaySchedules, attempt.displaySchedules);
-});
-
-test("ordinary resend uses draft changes even when operation configuration is unchanged", async () => {
-  const harness = serviceHarness({
-    changedAfterSend: true,
-    inspectionResult(instruction, current) {
-      const result = structuredClone(current);
-      if (!instruction.directoryProbeSummary) {
-        result.directoryMatch = { to: [], cc: [] };
-      }
-      return result;
-    },
-  });
-  harness.task.config.examRequirement.fields["考试日期时间"] =
-    "2026/08/22 10:00 - 2026/08/22 12:00";
-  harness.task.config.operationBatch.managedSnapshot = {
-    batchName: "湖北邮政招聘考试",
-    examStartDate: "2026-08-22",
-    examEndDate: "2026-08-22",
-    schedules: [managedSchedule({
-      start: "2026-08-22T10:00:00",
-      end: "2026-08-22T12:00:00",
-    })],
-  };
-  const draft = buildOperationPersonnelTaskDraft(harness.task, {
-    environment: "test",
-    now: new Date(START).toISOString(),
-  });
-  const current = inspectionFor(harness.task);
-  current.batch = { ...draft.batch, published: true };
-  current.schedules = [{
-    scheduleEntryId: "visible-1",
-    scheduleCode: 88,
-    subjectCode: "C001",
-    subjectName: "湖北邮政招聘考试",
-    start: "2026-08-22T10:00:00",
-    end: "2026-08-22T12:00:00",
-    durationMinutes: 120,
-    earlyLoginMinutes: 30,
-  }];
-  current.personnel = structuredClone(draft.personnel);
-  current.dates = structuredClone(draft.dates);
-  current.requirements = requirementsForPersonnel(draft.personnel);
-  harness.task.config.operationPersonnelTask.lastOperationSnapshot = structuredClone(current);
-  harness.task.config.operationPersonnelTask.changeSummary = "上次监考人数调整";
-  harness.setInspection(current);
-
-  const preview = await harness.service.preview("task-a", ADMIN);
-  assert.equal(harness.inspectionInstructions.length, 1);
-  assert.match(
-    harness.inspectionInstructions[0].directoryProbeSummary,
-    /批次受管日程/,
-  );
-  assert.doesNotMatch(
-    harness.inspectionInstructions[0].directoryProbeSummary,
-    /上次监考人数调整/,
-  );
-  assert.deepEqual(preview.state.draft.directoryMatch, {
-    to: [{ group: "演练组", id: "t1", name: "张乐翔" }],
-    cc: [],
-  });
-  assert.deepEqual(preview.operationChanges, []);
-  assert.equal(
-    preview.changes.fields.some((item) => item.path === "managedSchedules"),
-    true,
-  );
-  const accepted = await harness.service.send("task-a", ADMIN, {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "批次受管日程已调整",
-  });
-  assert.equal(accepted.statusCode, 202);
-});
-
-test("resend adopts a synchronized managed schedule change after the batch was updated", async () => {
-  const harness = serviceHarness({ changedAfterSend: true });
-  harness.setSynchronizedManagedSchedule({
-    start: "2026-08-23T09:00:00",
-    end: "2026-08-23T11:00:00",
-  });
-  const current = inspectionFor(harness.task);
-  current.schedules = [{
-    ...current.schedules[0],
-    start: "2026-08-23T09:00:00",
-    end: "2026-08-23T11:00:00",
-  }];
-  harness.setInspection(current);
-
-  const preview = await harness.service.preview("task-a", ADMIN);
-
-  assert.equal(preview.state.status, "changes_pending");
-  assert.deepEqual(preview.state.draft.managedSchedules, [{
-    requirementIndex: 0,
-    name: "湖北邮政招聘考试",
-    start: "2026-08-23T09:00:00",
-    end: "2026-08-23T11:00:00",
-  }]);
-  assert.deepEqual(preview.state.draft.displaySchedules, [{
-    scheduleCode: 17,
-    name: "湖北邮政招聘考试",
-    start: "2026-08-23T09:00:00",
-    end: "2026-08-23T11:00:00",
-  }]);
-});
-
-test("ordinary resend reads operation state and recipient directory in one inspection", async () => {
-  const harness = serviceHarness({
-    changedAfterSend: true,
-    inspectionResult(instruction, current) {
-      assert.match(instruction.directoryProbeSummary, /人员|考试日程|批次受管日程/);
-      return structuredClone(current);
-    },
-  });
-
-  const preview = await harness.service.preview("task-a", ADMIN);
-
-  assert.equal(harness.inspectionInstructions.length, 1);
-  assert.deepEqual(preview.state.draft.directoryMatch, {
-    to: [{ group: "演练组", id: "t1", name: "张乐翔" }],
-    cc: [],
-  });
-});
-
-test("known resend preview ignores stale derived task-sheet content", async () => {
-  const harness = serviceHarness({ alreadySent: true });
-  harness.task.config.operationPersonnelTask.lastOperationSnapshot.taskSheet.content = [
-    "人员落实日期 2026-07-29 ~ 2026-08-19",
-    "监考人员数量 80",
-    "监考人员比例 1:50",
-  ].join("；");
-  harness.setInspection({
-    ...inspectionFor(harness.task),
-    taskSheet: {
-      type: "分散在线监考",
-      conditions: [{ name: "人员配置", satisfied: true }],
-      content: [
-        "人员落实日期 2026-07-30 ~ 2026-08-19",
-        "监考人员数量 70",
-        "监考人员比例 1:55",
-      ].join("；"),
-    },
-  });
-
-  const preview = await harness.service.preview("task-a", owner(), {
-    monitorRatio: "1:55",
-  });
-
-  assert.equal(preview.state.status, "changes_pending");
-  assert.equal(preview.state.draft.personnel.monitorRatio, "1:55");
-  assert.equal(preview.state.draft.operationTaskSheet.content.includes("1:55"), true);
-});
-
-test("unpublished initial preview defers task sheet and directory inspection until send", async () => {
-  const harness = serviceHarness({
-    inspectionResult(instruction, inspection) {
-      assert.equal(instruction.allowUnpublishedPreview, true);
+    runInspection: async () => structuredClone(snapshot),
+    runAttempt: async (instruction) => {
+      attemptInstruction = structuredClone(instruction);
       return {
-        ...inspection,
-        batch: { ...inspection.batch, published: false },
-        taskSheet: {},
-        sendRecords: [],
-        directoryMatch: { to: [], cc: [] },
+        status: "sent",
+        completedAt: "2026-08-05T02:01:00.000Z",
+        sendRecord: { type: "首次发送", sentAt: "2026-08-05T02:01:00.000Z" },
+        operationSnapshot: structuredClone(snapshot),
       };
     },
-  });
-
-  const preview = await harness.service.preview("task-a", owner(), {});
-
-  assert.equal(preview.state.activePreview.kind, "initial");
-  assert.deepEqual(preview.state.draft.directoryMatch, { to: [], cc: [] });
-  assert.equal(preview.state.draft.previewOperationSnapshot.batch.published, false);
-});
-
-test("changing requirement 2 invalidates a preview even when the singular legacy alias is unchanged", async () => {
-  const harness = serviceHarness();
-  const first = structuredClone(harness.task.config.examRequirement);
-  harness.task.config.examRequirements = [
-    first,
-    {
-      ...structuredClone(first),
-      id: "requirement-2",
-      version: 7,
-      config: {
-        ...structuredClone(first.config),
-        startTimeDisplay: "2026/08/23 09:00",
-        endTimeDisplay: "2026/08/23 11:00",
-      },
-    },
-  ];
-  harness.task.config.examRequirements[1].fields = {
-    "考试名称": "湖北邮政招聘考试（二）",
-    "考试日期时间": "2026/08/23 09:00 - 2026/08/23 11:00",
-  };
-  harness.task.config.operationBatch.managedSnapshot = {
-    batchName: "湖北邮政招聘考试",
-    examStartDate: "2026-08-22",
-    examEndDate: "2026-08-23",
-    schedules: [
-      managedSchedule(),
-      {
-        requirementIndex: 1,
-        name: "湖北邮政招聘考试（二）",
-        start: "2026-08-23T09:00:00",
-        end: "2026-08-23T11:00:00",
-      },
-    ],
-  };
-  const inspection = inspectionFor(harness.task);
-  inspection.schedules.push({
-    scheduleCode: 18,
-    subjectName: "湖北邮政招聘考试（二）",
-    start: "2026-08-23T09:00:00",
-    end: "2026-08-23T11:00:00",
-  });
-  harness.setInspection(inspection);
-  const preview = await harness.service.preview("task-a", owner(), {});
-  harness.task.config.examRequirements[1].version += 1;
-
-  await assert.rejects(
-    harness.service.send("task-a", owner(), {
-      previewToken: preview.previewToken,
-      draftVersion: preview.draftVersion,
-      changeSummary: "",
-    }),
-    { code: "PERSONNEL_PREVIEW_STALE", status: 409 },
-  );
-  assert.equal(harness.deferredJobs.length, 0);
-  assert.equal(harness.task.config.operationPersonnelTask.activeAttempt, null);
-});
-
-test("preview rejects an unsupported personnel scope before inspection or token persistence", async () => {
-  const harness = serviceHarness();
-  harness.task.config.businessRequirement.high_end_supplement_required = "是";
-
-  await assert.rejects(
-    harness.service.preview("task-a", owner(), {}),
-    { code: "PERSONNEL_TASK_UNSUPPORTED", status: 409 },
-  );
-  assert.deepEqual(harness.runnerCalls, []);
-  assert.equal(harness.task.config.operationPersonnelTask, undefined);
-  assert.equal(harness.deferredJobs.length, 0);
-});
-
-test("send rejects residual draft warnings before queueing an attempt", async () => {
-  const harness = serviceHarness();
-  const preview = await harness.service.preview("task-a", owner(), {});
-  const state = harness.task.config.operationPersonnelTask;
-  state.draft.warnings.push({ code: "UNSUPPORTED_PERSONNEL_TASK" });
-  state.sourceFingerprint = valueFingerprint(state.draft);
-
-  await assert.rejects(
-    harness.service.send("task-a", owner(), {
-      previewToken: preview.previewToken,
-      draftVersion: preview.draftVersion,
-      changeSummary: "",
-    }),
-    { code: "PERSONNEL_DRAFT_INCOMPLETE", status: 409 },
-  );
-  assert.equal(harness.deferredJobs.length, 0);
-  assert.equal(state.activeAttempt, null);
-  assert.equal(state.activePreview.token, preview.previewToken);
-});
-
-test("visible prior send record adopts an external resend baseline in two inspections", async () => {
-  const harness = serviceHarness({ externalBaseline: true });
-  const preview = await harness.service.preview("task-a", owner(), {});
-  const state = harness.task.config.operationPersonnelTask;
-
-  assert.equal(harness.inspectionInstructions.length, 2);
-  assert.equal(harness.inspectionInstructions[0].directoryProbeSummary, undefined);
-  assert.match(
-    harness.inspectionInstructions[1].directoryProbeSummary,
-    /人员|考试日程|批次受管日程/,
-  );
-  assert.equal(state.activePreview.kind, "resend");
-  assert.equal(state.activePreview.externalBaseline, true);
-  assert.deepEqual(state.activePreview.baselineSendRecord, {
-    type: "首次发送",
-    sentAt: "2026-07-23 10:09:34",
-  });
-  assert.match(state.activePreview.baselineSnapshotFingerprint, /^[a-f0-9]{64}$/);
-  assert.equal(state.lastSuccessfulFingerprint, "");
-  assert.equal(state.sendHistory.length, 0);
-  assert.equal(
-    state.events.some((item) => (
-      item.type === "operation_personnel_external_send_baseline_adopted"
-    )),
-    true,
-  );
-  assert.equal(preview.state.activePreview.kind, "resend");
-});
-
-test("test external baseline excludes allowed identity and equivalent schedule display differences", async () => {
-  const harness = serviceHarness({ externalBaseline: true });
-  const draft = buildOperationPersonnelTaskDraft(harness.task, {
     environment: "test",
-    now: new Date(START).toISOString(),
+    now: () => Date.parse("2026-08-05T02:00:00.000Z"),
+    makeToken: () => "queued-preview-token",
+    makeAttemptId: () => "queued-attempt",
+    defer: (job) => { deferredJob = job; },
   });
-  const current = inspectionFor(harness.task, "test");
-  current.batch = {
-    ...draft.batch,
-    projectCode: "4473-26",
-    projectName: "测试运控项目",
-    published: true,
-  };
-  current.schedules = draft.schedules.map((schedule) => ({
-    scheduleEntryId: "",
-    scheduleCode: schedule.scheduleCode,
-    subjectCode: "",
-    subjectName: "湖北邮政招聘考试",
-    start: "2026-08-22T09:00:00",
-    end: "2026-08-22T11:00:00",
-    durationMinutes: 120,
-    earlyLoginMinutes: schedule.earlyLoginMinutes,
-  }));
-  current.personnel = {
-    ...draft.personnel,
-    candidateBasis: "",
-    monitorCount: 3,
-  };
-  current.dates = { ...draft.dates, end: "2026-08-18" };
-  harness.setInspection(current);
 
-  const preview = await harness.service.preview("task-a", owner(), {});
-  const paths = preview.operationChanges.map((item) => item.path);
-
-  assert.equal(paths.includes("batch.projectCode"), false);
-  assert.equal(paths.includes("batch.projectName"), false);
-  assert.equal(paths.includes("schedules"), false);
-  assert.equal(paths.includes("personnel.monitorCount"), true);
-  assert.equal(paths.includes("dates.end"), true);
-  assert.equal(paths.includes("requirements"), false);
-
-  await harness.service.send("task-a", owner(), {
+  const preview = await service.preview(task.taskId, { role: "admin" });
+  const queued = await service.send(task.taskId, { role: "admin" }, {
     previewToken: preview.previewToken,
     draftVersion: preview.draftVersion,
-    changeSummary: "人员数量和结束日期已调整",
   });
-  const attempt = harness.task.config.operationPersonnelTask.activeAttempt;
-  assert.deepEqual(attempt.target.schedules, current.schedules);
-  assert.equal(attempt.target.batch.projectCode, "4473-26");
-  assert.equal(attempt.target.batch.projectName, "测试运控项目");
-  assert.equal(
-    attempt.target.requirements.find((item) => (
-      item.name === "正式考试-监考人员数量"
-    )).value,
-    String(draft.personnel.monitorCount),
-  );
+  assert.equal(queued.attemptId, "queued-attempt");
+  assert.equal(typeof deferredJob, "function");
+  await deferredJob();
+
+  assert.deepEqual(attemptInstruction.managedSchedules, [{
+    requirementIndex: 0,
+    name: "综合能力",
+    start: "2026/08/20 09:00",
+    end: "2026/08/20 11:00",
+  }]);
+  assert.equal(task.config.operationPersonnelTask.activeAttempt.status, "sent");
 });
 
-test("unchanged external baseline still probes fixed recipients before blocking", async () => {
-  const harness = serviceHarness({ externalBaseline: true });
-  const draft = buildOperationPersonnelTaskDraft(harness.task, {
-    environment: "test",
-    now: new Date(START).toISOString(),
-  });
-  const current = inspectionFor(harness.task, "test");
-  current.batch.published = true;
-  current.schedules = draft.schedules.map((schedule) => ({
-    ...schedule,
-    subjectName: "湖北邮政招聘考试",
-    start: "2026-08-22T09:00:00",
-    end: "2026-08-22T11:00:00",
-  }));
-  current.personnel = structuredClone(draft.personnel);
-  current.dates = structuredClone(draft.dates);
-  current.requirements = requirementsForPersonnel(draft.personnel);
-  harness.setInspection(current);
-
-  await assert.rejects(
-    harness.service.preview("task-a", owner(), {}),
-    { code: "PERSONNEL_CONTENT_UNCHANGED", status: 409 },
-  );
-  assert.equal(harness.inspectionInstructions.length, 2);
-  assert.match(
-    harness.inspectionInstructions[1].directoryProbeSummary,
-    /人员|考试日程|批次受管日程/,
-  );
-  assert.equal(harness.task.config.operationPersonnelTask, undefined);
-});
-
-test("external baseline blocks drift between snapshot and directory inspection", async () => {
-  const harness = serviceHarness({
-    externalBaseline: true,
-    inspectionResult: (instruction, current) => {
-      const result = structuredClone(current);
-      if (instruction.directoryProbeSummary) {
-        result.dates.end = "2099-01-01";
-      }
-      return result;
+test("失败流程沿用上次真实基线，允许确认已知日期变更", async () => {
+  let task = baseTask();
+  const operationSnapshot = {
+    batch: {
+      code: "EZT260003",
+      projectCode: "P260001",
+      projectName: "示例考试",
+      batchName: "示例考试_2026年8月",
+      projectDepartment: "项目实施一部",
+      projectManager: "陈军",
+      published: true,
     },
-  });
-
-  await assert.rejects(
-    harness.service.preview("task-a", owner(), {}),
-    {
-      code: "PERSONNEL_OPERATION_CONFLICT",
-      status: 409,
-    },
-  );
-  assert.equal(harness.inspectionInstructions.length, 2);
-  assert.equal(harness.task.config.operationPersonnelTask, undefined);
-});
-
-test("external resend preview binds the adopted baseline against tampering", async () => {
-  const harness = serviceHarness({ externalBaseline: true });
-  const preview = await harness.service.preview("task-a", owner(), {});
-  harness.task.config.operationPersonnelTask.draft.previewBaselineSnapshot.dates.end = "2099-01-01";
-
-  await assert.rejects(
-    harness.service.send("task-a", owner(), {
-      previewToken: preview.previewToken,
-      draftVersion: preview.draftVersion,
-      changeSummary: "人员日期调整",
-    }),
-    { code: "PERSONNEL_PREVIEW_STALE", status: 409 },
-  );
-});
-
-test("external resend requires a reviewed change summary", async () => {
-  const harness = serviceHarness({ externalBaseline: true });
-  const preview = await harness.service.preview("task-a", owner(), {});
-
-  await assert.rejects(
-    harness.service.send("task-a", owner(), {
-      previewToken: preview.previewToken,
-      draftVersion: preview.draftVersion,
-      changeSummary: "",
-    }),
-    { code: "PERSONNEL_CHANGE_SUMMARY_REQUIRED", status: 400 },
-  );
-  assert.equal(harness.deferredJobs.length, 0);
-});
-
-test("external resend writes local success only after the new send record", async () => {
-  const harness = serviceHarness({
-    externalBaseline: true,
-    runnerResult: successfulAttemptResult({
-      sendRecord: {
-        type: "再次发送",
-        sentAt: "2026-07-23T02:00:20.000Z",
-      },
-    }),
-  });
-  const preview = await harness.service.preview("task-a", owner(), {});
-  const accepted = await harness.service.send("task-a", owner(), {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "人员日期调整",
-  });
-  const queued = harness.task.config.operationPersonnelTask;
-
-  assert.equal(accepted.statusCode, 202);
-  assert.equal(queued.activeAttempt.kind, "resend");
-  assert.deepEqual(
-    queued.activeAttempt.baseline,
-    queued.draft.previewBaselineSnapshot,
-  );
-  assert.equal(queued.lastSuccessfulFingerprint, "");
-  assert.equal(queued.sendHistory.length, 0);
-
-  await harness.runDeferred();
-  const completed = harness.task.config.operationPersonnelTask;
-  assert.match(completed.lastSuccessfulFingerprint, /^[a-f0-9]{64}$/);
-  assert.equal(completed.sendHistory.length, 1);
-  assert.equal(completed.sendHistory[0].attemptId, accepted.attemptId);
-});
-
-test("preview token expires after ten minutes", async () => {
-  const harness = serviceHarness();
-  const preview = await harness.service.preview("task-a", owner(), {});
-  assert.equal(preview.expiresAt, "2026-07-23T02:10:00.000Z");
-  harness.advance(10 * 60 * 1000 + 1);
-
-  await assert.rejects(
-    harness.service.send("task-a", owner(), {
-      previewToken: preview.previewToken,
-      draftVersion: preview.draftVersion,
-      changeSummary: "",
-    }),
-    { code: "PERSONNEL_PREVIEW_STALE", status: 409 },
-  );
-});
-
-test("preview token rejects an invalid expiresAt value", async () => {
-  const harness = serviceHarness();
-  const preview = await harness.service.preview("task-a", owner(), {});
-  harness.task.config.operationPersonnelTask.activePreview.expiresAt = "not-a-date";
-  await assert.rejects(
-    harness.service.send("task-a", owner(), {
-      previewToken: preview.previewToken,
-      draftVersion: preview.draftVersion,
-      changeSummary: "",
-    }),
-    { code: "PERSONNEL_PREVIEW_STALE", status: 409 },
-  );
-});
-
-test("preview rejects a requirement version changed during the operation inspection", async () => {
-  const harness = serviceHarness({
-    onInspection: (task) => {
-      task.config.examRequirement.version += 1;
-    },
-  });
-  await assert.rejects(
-    harness.service.preview("task-a", owner(), {}),
-    { code: "PERSONNEL_PREVIEW_STALE", status: 409 },
-  );
-  assert.equal(harness.task.config.operationPersonnelTask, undefined);
-});
-
-test("identical successful fingerprint cannot be resent", async () => {
-  const harness = serviceHarness({ alreadySent: true });
-  const preview = await harness.service.preview("task-a", owner(), {});
-  await assert.rejects(
-    harness.service.send("task-a", owner(), {
-      previewToken: preview.previewToken,
-      draftVersion: preview.draftVersion,
-      changeSummary: "",
-    }),
-    { code: "PERSONNEL_CONTENT_UNCHANGED", status: 409 },
-  );
-});
-
-test("get keeps a synchronized successful managed schedule in sent state", async () => {
-  const harness = serviceHarness({ alreadySent: true });
-
-  const current = await harness.service.get("task-a", owner());
-
-  assert.equal(current.state.status, "sent");
-  assert.deepEqual(current.state.draft.managedSchedules, [managedSchedule()]);
-});
-
-test("get exposes a fresh draft and changes_pending after a sent requirement changes", async () => {
-  const harness = serviceHarness({ alreadySent: true });
-  harness.task.config.examRequirement.version += 1;
-  harness.task.config.examRequirement.config.startTimeDisplay = "2026/08/23 09:00";
-  harness.task.config.examRequirement.config.endTimeDisplay = "2026/08/23 11:00";
-
-  const current = await harness.service.get("task-a", owner());
-
-  assert.equal(current.state.status, "changes_pending");
-  assert.equal(current.state.draft.schedules[0].start, "2026/08/23 09:00");
-  assert.equal(current.state.draft.sourceVersion.requirements[0].version, 4);
-  assert.equal(current.state.activeAttempt, null);
-  assert.equal(current.state.sendHistory.length, 0);
-});
-
-test("service environment is authoritative and request environment is ignored", async () => {
-  const harness = serviceHarness({ environment: "test" });
-  const preview = await harness.service.preview("task-a", owner(), { environment: "production" });
-  assert.equal(preview.state.environment, "test");
-  assert.deepEqual(preview.state.draft.recipients.toNames, ["张乐翔"]);
-  assert.equal(preview.state.draft.recipients.ccCount, 0);
-});
-
-test("send validates the complete previewed operation snapshot binding", async () => {
-  const mutations = [
-    (state) => { state.draft.operationBatch.batchName = "外部修改"; },
-    (state) => { state.draft.operationRequirements.push({ name: "新增需求", value: "是" }); },
-    (state) => { state.draft.operationTaskSheet.content = "变化后的任务内容"; },
-    (state) => { state.draft.previewOperationSnapshot.batch.batchName = "快照被替换"; },
-    (state) => { state.activePreview.operationSnapshotFingerprint = "0".repeat(64); },
-  ];
-  for (const mutate of mutations) {
-    const harness = serviceHarness();
-    const preview = await harness.service.preview("task-a", owner(), {});
-    mutate(harness.task.config.operationPersonnelTask);
-    await assert.rejects(
-      harness.service.send("task-a", owner(), {
-        previewToken: preview.previewToken,
-        draftVersion: preview.draftVersion,
-        changeSummary: "",
-      }),
-      { code: "PERSONNEL_PREVIEW_STALE", status: 409 },
-    );
-  }
-});
-
-test("unknown service environment blocks get and preview", async () => {
-  const harness = serviceHarness({ environment: "staging" });
-  const current = await harness.service.get("task-a", owner());
-  assert.equal(current.state.status, "unsupported");
-  assert.equal(current.state.environment, "staging");
-
-  await assert.rejects(
-    harness.service.preview("task-a", owner(), { environment: "test" }),
-    { code: "PERSONNEL_ENVIRONMENT_INVALID", status: 409 },
-  );
-});
-
-test("missing service environment cannot fall back to a test draft", async () => {
-  const harness = serviceHarness({ environment: "" });
-  const current = await harness.service.get("task-a", owner());
-  assert.equal(current.state.status, "unsupported");
-  assert.deepEqual(current.state.draft, {});
-});
-
-test("pending external requirement change blocks preview", async () => {
-  const harness = serviceHarness({
-    requirement: { changeRequests: [{ status: "pending_internal_review" }] },
-  });
-  await assert.rejects(
-    harness.service.preview("task-a", owner(), {}),
-    { code: "PERSONNEL_PENDING_REQUIREMENT_CHANGE", status: 409 },
-  );
-});
-
-test("non-owner cannot read or operate a personnel task", async () => {
-  const harness = serviceHarness();
-  const stranger = { email: "other@example.com", role: "user" };
-  await assert.rejects(harness.service.get("task-a", stranger), {
-    code: "PERSONNEL_TASK_NOT_FOUND",
-    status: 404,
-  });
-  await assert.rejects(harness.service.preview("task-a", stranger, {}), {
-    code: "PERSONNEL_TASK_NOT_FOUND",
-    status: 404,
-  });
-});
-
-test("editable draft changes increment version and append an auto-confirmed audit event", async () => {
-  const harness = serviceHarness();
-  const preview = await harness.service.preview("task-a", owner(), {
-    dates: { end: "2026-08-18" },
-    monitorCount: 4,
-  });
-  assert.equal(preview.draftVersion, 2);
-  assert.equal(preview.state.draft.dates.end, "2026-08-18");
-  assert.equal(preview.state.draft.personnel.monitorCount, 4);
-  assert.deepEqual(
-    preview.state.events.at(-1).changes.map((item) => item.path),
-    ["dates.end", "personnel.monitorCount"],
-  );
-  assert.equal(preview.state.events.at(-1).type, "operation_personnel_draft_auto_confirmed");
-});
-
-test("editable dates and monitor count clear only the warnings they resolve", async () => {
-  const harness = serviceHarness();
-  harness.task.sessions[0].candidateCount = 0;
-  harness.task.config.examRequirement.config.startTimeDisplay = "invalid";
-  harness.task.config.examRequirement.config.endTimeDisplay = "2026/07/24 11:00";
-  const preview = await harness.service.preview("task-a", owner(), {
+    schedules: [{
+      scheduleCode: 1,
+      subjectName: "综合能力",
+      start: "2026-08-20 09:00",
+      end: "2026-08-20 11:00",
+    }],
+    personnel: {},
     dates: {
-      start: "2026-07-23",
-      end: "2026-07-23",
-      nameListDue: "2026-07-23",
+      start: "2026-08-05",
+      end: "2026-08-05",
+      nameListDue: "2026-08-05",
     },
-    monitorCount: 2,
-  });
-  assert.equal(
-    preview.state.draft.warnings.some((item) => item.code === "PERSONNEL_DATES_REQUIRED"),
-    false,
-  );
-  assert.equal(
-    preview.state.draft.warnings.some((item) => item.code === "MONITOR_COUNT_REQUIRED"),
-    false,
-  );
-  assert.equal(
-    preview.state.draft.warnings.some((item) => item.code === "INVALID_SCHEDULE_RANGE"),
-    true,
-  );
-  assert.equal(preview.state.draft.personnel.monitorCount, 2);
-});
-
-test("invalid edited dates and monitor count keep their resolvable warnings", async () => {
-  const harness = serviceHarness();
-  harness.task.sessions[0].candidateCount = 0;
-  harness.task.config.examRequirement.config.startTimeDisplay = "2026/07/24 09:00";
-  harness.task.config.examRequirement.config.endTimeDisplay = "2026/07/24 11:00";
-  const preview = await harness.service.preview("task-a", owner(), {
-    dates: {
-      start: "2026-02-30",
-      end: "2026-02-28",
-      nameListDue: "not-a-date",
-    },
-    monitorCount: 0,
-  });
-  assert.equal(
-    preview.state.draft.warnings.some((item) => item.code === "PERSONNEL_DATES_REQUIRED"),
-    true,
-  );
-  assert.equal(
-    preview.state.draft.warnings.some((item) => item.code === "MONITOR_COUNT_REQUIRED"),
-    true,
-  );
-});
-
-test("monitor count accepts only positive integer numbers or digit strings", async () => {
-  for (const [value, expected] of [[2, 2], ["3", 3]]) {
-    const harness = serviceHarness();
-    const preview = await harness.service.preview("task-a", owner(), { monitorCount: value });
-    assert.equal(preview.state.draft.personnel.monitorCount, expected);
-    assert.equal(
-      preview.state.draft.warnings.some((item) => item.code === "MONITOR_COUNT_REQUIRED"),
-      false,
-    );
-  }
-
-  for (const value of [1.5, "1.5", 0, -1, true, [1], { value: 1 }, "", " "]) {
-    const harness = serviceHarness();
-    const preview = await harness.service.preview("task-a", owner(), { monitorCount: value });
-    assert.equal(
-      preview.state.draft.warnings.some((item) => item.code === "MONITOR_COUNT_REQUIRED"),
-      true,
-      `monitorCount=${JSON.stringify(value)}`,
-    );
-  }
-});
-
-test("monitor ratio requires a positive integer ratio and keeps one stable warning", async () => {
-  for (const value of ["1:50", "2:75"]) {
-    const harness = serviceHarness();
-    const preview = await harness.service.preview("task-a", owner(), {
-      personnel: { monitorRatio: value },
-    });
-    assert.equal(preview.state.draft.personnel.monitorRatio, value);
-    assert.equal(
-      preview.state.draft.warnings.some((item) => item.code === "MONITOR_RATIO_REQUIRED"),
-      false,
-    );
-  }
-
-  for (const value of ["", " ", "abc", "0:50", "1:0", "1.5:50", true, ["1:50"], { ratio: "1:50" }]) {
-    const harness = serviceHarness();
-    const first = await harness.service.preview("task-a", owner(), {
-      personnel: { monitorRatio: value },
-    });
-    assert.equal(
-      first.state.draft.warnings.filter((item) => item.code === "MONITOR_RATIO_REQUIRED").length,
-      1,
-      `monitorRatio=${JSON.stringify(value)}`,
-    );
-    const second = await harness.service.preview("task-a", owner(), {
-      personnel: { monitorRatio: value },
-    });
-    assert.equal(
-      second.state.draft.warnings.filter((item) => item.code === "MONITOR_RATIO_REQUIRED").length,
-      1,
-      `repeat monitorRatio=${JSON.stringify(value)}`,
-    );
-  }
-});
-
-test("preview returns actual operation to target changes separately from draft edits", async () => {
-  const harness = serviceHarness();
-  const preview = await harness.service.preview("task-a", owner(), {
-    monitorCount: 4,
-  });
-  assert.ok(Array.isArray(preview.operationChanges));
-  assert.deepEqual(
-    preview.operationChanges.find((item) => item.path === "batch.published"),
-    { path: "batch.published", before: false, after: true },
-  );
-  assert.equal(preview.operationChanges.some((item) => item.path === "schedules"), false);
-  assert.ok(preview.operationChanges.some((item) => item.path === "personnel.monitorCount"));
-  assert.equal(preview.changes.fields.some((item) => item.path === "personnel.monitorCount"), true);
-});
-
-test("send persists queued attempt and returns before the runner completes", async () => {
-  const pending = Promise.withResolvers();
-  const harness = serviceHarness({ runnerResult: pending.promise });
-  const preview = await harness.service.preview("task-a", owner(), {});
-  const accepted = await harness.service.send("task-a", owner(), {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
-  });
-
-  assert.equal(accepted.statusCode, 202);
-  assert.equal(harness.task.config.operationPersonnelTask.activeAttempt.status, "queued");
-  assert.equal(harness.runnerCalls.includes("attempt"), false);
-  pending.resolve(successfulAttemptResult());
-});
-
-test("send applies final edits once inside the task lock", async () => {
-  const harness = serviceHarness();
-  const preview = await harness.service.preview("task-a", ADMIN);
-  const queued = await harness.service.send("task-a", ADMIN, {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
-    edits: {
-      dates: {
-        start: "2026-07-28",
-        end: "2026-08-19",
-        nameListDue: "2026-08-19",
-      },
-      personnel: { monitorCount: "80", monitorRatio: "1:50" },
-    },
-  });
-
-  const state = harness.task.config.operationPersonnelTask;
-  assert.equal(queued.statusCode, 202);
-  assert.equal(state.draftVersion, preview.draftVersion + 1);
-  assert.equal(state.draft.dates.start, "2026-07-28");
-  assert.deepEqual(state.confirmedEdits, {
-    dates: {
-      start: "2026-07-28",
-      end: "2026-08-19",
-      nameListDue: "2026-08-19",
-    },
-    personnel: {
-      monitorRatio: "1:50",
-      monitorCount: 80,
-    },
-  });
-  assert.equal(state.activeAttempt.draftVersion, state.draftVersion);
-  assert.equal(state.activeAttempt.target.dates.start, "2026-07-28");
-  assert.equal(state.activeAttempt.target.personnel.monitorCount, 80);
-});
-
-test("successful send keeps confirmed personnel fields on later reads and source changes", async () => {
-  const harness = serviceHarness();
-  const preview = await harness.service.preview("task-a", ADMIN);
-  await harness.service.send("task-a", ADMIN, {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
-    edits: {
-      dates: {
-        start: "2026-07-28",
-        end: "2026-08-19",
-        nameListDue: "2026-08-19",
-      },
-      personnel: { monitorCount: "70", monitorRatio: "1:55" },
-    },
-  });
-  await harness.runDeferred();
-  harness.advance(24 * 60 * 60 * 1000);
-
-  const unchanged = await harness.service.get("task-a", ADMIN);
-  assert.equal(unchanged.state.status, "sent");
-  assert.equal(unchanged.state.draft.dates.start, "2026-07-28");
-  assert.equal(unchanged.state.draft.personnel.monitorRatio, "1:55");
-  assert.equal(unchanged.state.draft.personnel.monitorCount, 70);
-
-  harness.task.config.examRequirement.version += 1;
-  harness.task.config.examRequirement.config.startTimeDisplay = "2026/08/23 09:00";
-  harness.task.config.examRequirement.config.endTimeDisplay = "2026/08/23 11:00";
-  harness.setSynchronizedManagedSchedule({
-    start: "2026-08-23T09:00:00",
-    end: "2026-08-23T11:00:00",
-  });
-  const changed = await harness.service.get("task-a", ADMIN);
-
-  assert.equal(changed.state.status, "changes_pending");
-  assert.equal(changed.state.draft.schedules[0].start, "2026/08/23 09:00");
-  assert.equal(changed.state.draft.dates.start, "2026-07-28");
-  assert.equal(changed.state.draft.personnel.monitorRatio, "1:55");
-  assert.equal(changed.state.draft.personnel.monitorCount, 70);
-});
-
-test("send rejects invalid final edits before queueing an attempt", async () => {
-  const harness = serviceHarness();
-  const preview = await harness.service.preview("task-a", ADMIN);
-
-  await assert.rejects(
-    harness.service.send("task-a", ADMIN, {
-      previewToken: preview.previewToken,
-      draftVersion: preview.draftVersion,
-      changeSummary: "",
-      edits: { personnel: { monitorCount: "0", monitorRatio: "1:0" } },
-    }),
-    (error) => error.code === "PERSONNEL_DRAFT_INCOMPLETE",
-  );
-  assert.equal(harness.attempts.length, 0);
-  assert.equal(harness.deferredJobs.length, 0);
-});
-
-test("send validates the original preview binding before applying final edits", async () => {
-  const cases = [
-    {
-      code: "PERSONNEL_PREVIEW_STALE",
-      change(harness) {
-        harness.task.config.examRequirement.version += 1;
-      },
-    },
-    {
-      code: "PERSONNEL_BATCH_UPDATE_REQUIRED",
-      change(harness) {
-        harness.setBatchScheduleStatus("update_available");
-      },
-    },
-    {
-      code: "PERSONNEL_BATCH_SCHEDULE_CONFLICT",
-      change(harness) {
-        harness.setSynchronizedManagedSchedule({
-          start: "2026-08-22T10:00:00",
-          end: "2026-08-22T12:00:00",
-        });
-      },
-    },
-    {
-      code: "PERSONNEL_PREVIEW_STALE",
-      change(harness) {
-        harness.task.config.operationPersonnelTask.draft.previewOperationSnapshot
-          .schedules[0].scheduleCode = 999;
-      },
-    },
-    {
-      code: "PERSONNEL_PREVIEW_STALE",
-      change(harness) {
-        harness.task.config.operationPersonnelTask.draft.directoryMatch.to = [{
-          group: "伪造组",
-          id: "forged-user",
-          name: "伪造收件人",
-        }];
-      },
-    },
-  ];
-  for (const scenario of cases) {
-    const harness = serviceHarness();
-    const preview = await harness.service.preview("task-a", ADMIN);
-    scenario.change(harness);
-
-    await assert.rejects(
-      harness.service.send("task-a", ADMIN, {
-        previewToken: preview.previewToken,
-        draftVersion: preview.draftVersion,
-        changeSummary: "",
-        edits: { personnel: { monitorCount: "80", monitorRatio: "1:50" } },
-      }),
-      { code: scenario.code, status: 409 },
-    );
-    assert.equal(harness.attempts.length, 0);
-    assert.equal(harness.deferredJobs.length, 0);
-  }
-});
-
-test("queued send rechecks managed schedules after acquiring the profile lock", async () => {
-  const harness = serviceHarness();
-  const preview = await harness.service.preview("task-a", owner(), {});
-  await harness.service.send("task-a", owner(), {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
-  });
-
-  harness.task.config.examRequirement.fields["考试日期时间"] =
-    "2026/08/22 10:00 - 2026/08/22 12:00";
-  await harness.runDeferred();
-
-  assert.deepEqual(harness.runnerCalls, ["inspection"]);
-  assert.equal(
-    harness.task.config.operationPersonnelTask.activeAttempt.status,
-    "failed_resumable",
-  );
-  assert.equal(
-    harness.task.config.operationPersonnelTask.activeAttempt.error.code,
-    "PERSONNEL_BATCH_UPDATE_REQUIRED",
-  );
-  assert.deepEqual(harness.profileLocks.slice(-2), ["acquire", "release"]);
-});
-
-test("queued schedule gate and running transition share one task lock", async () => {
-  let changedDuringQueuedLock = false;
-  const harness = serviceHarness({
-    onTaskLockAcquire: (task) => {
-      if (!changedDuringQueuedLock
-          && task.config.operationPersonnelTask?.activeAttempt?.status === "queued") {
-        changedDuringQueuedLock = true;
-        task.config.examRequirement.fields["考试日期时间"] =
-          "2026/08/22 10:00 - 2026/08/22 12:00";
-      }
-    },
-  });
-  const preview = await harness.service.preview("task-a", owner(), {});
-  await harness.service.send("task-a", owner(), {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
-  });
-
-  await harness.runDeferred();
-
-  assert.equal(changedDuringQueuedLock, true);
-  assert.deepEqual(harness.runnerCalls, ["inspection"]);
-  assert.equal(
-    harness.task.config.operationPersonnelTask.activeAttempt.status,
-    "failed_resumable",
-  );
-  assert.equal(
-    harness.task.config.operationPersonnelTask.activeAttempt.error.code,
-    "PERSONNEL_BATCH_UPDATE_REQUIRED",
-  );
-});
-
-test("deferred send handles a transient failure while persisting runner failure", async () => {
-  const launched = [];
-  let rejectFailurePersistence = true;
-  const harness = serviceHarness({
-    runnerResult: async () => {
-      throw new Error("runner stopped");
-    },
-    beforeUpdateTaskConfig: async (config) => {
-      if (rejectFailurePersistence
-          && config.operationPersonnelTask?.activeAttempt?.status === "failed_resumable") {
-        rejectFailurePersistence = false;
-        throw new Error("transient persistence failure");
-      }
-    },
-    defer: (job) => launched.push(Promise.resolve().then(job)),
-  });
-  const preview = await harness.service.preview("task-a", owner(), {});
-  await harness.service.send("task-a", owner(), {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
-  });
-
-  await assert.doesNotReject(launched[0]);
-  assert.equal(
-    harness.task.config.operationPersonnelTask.activeAttempt.status,
-    "failed_resumable",
-  );
-  assert.equal(
-    harness.task.config.operationPersonnelTask.activeAttempt.error.message,
-    "transient persistence failure",
-  );
-});
-
-test("resend requires a non-empty reviewed change summary", async () => {
-  const harness = serviceHarness({ changedAfterSend: true });
-  const preview = await harness.service.preview("task-a", owner(), {});
-  await assert.rejects(
-    harness.service.send("task-a", owner(), {
-      previewToken: preview.previewToken,
-      draftVersion: preview.draftVersion,
-      changeSummary: " ",
-    }),
-    { code: "PERSONNEL_CHANGE_SUMMARY_REQUIRED", status: 400 },
-  );
-});
-
-test("preview token is consumed once and double submit cannot create two attempts", async () => {
-  const harness = serviceHarness();
-  const preview = await harness.service.preview("task-a", owner(), {});
-  const payload = {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
+    requirements: [],
+    taskSheet: {},
+    sendRecords: [],
+    directoryMatch: { to: [], cc: [] },
   };
-  const first = await harness.service.send("task-a", owner(), payload);
-  assert.equal(first.statusCode, 202);
-  assert.equal(harness.task.config.operationPersonnelTask.activePreview, null);
-  await assert.rejects(
-    harness.service.send("task-a", owner(), payload),
-    { code: "PERSONNEL_ATTEMPT_IN_PROGRESS", status: 409 },
-  );
-  assert.equal(harness.deferredJobs.length, 1);
-});
-
-test("a resumable orphan keeps its attempt id and completed checkpoints", async () => {
-  const harness = serviceHarness({ orphanedAttemptCheckpoint: "sync_personnel_dates" });
-  harness.task.config.operationPersonnelTask.activeAttempt.error = {
-    code: "OLD_FAILURE",
-    message: "previous failure",
-  };
-  harness.task.config.operationPersonnelTask.activeAttempt.completedAt =
-    "2026-07-23T02:00:02.000Z";
-  const preview = await harness.service.preview("task-a", owner(), {});
-  const accepted = await harness.service.send("task-a", owner(), {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
-  });
-  assert.equal(accepted.attemptId, "attempt-orphan");
-  assert.equal(
-    harness.task.config.operationPersonnelTask.checkpoints.sync_personnel_dates.status,
-    "running",
-  );
-  assert.equal(harness.task.config.operationPersonnelTask.activeAttempt.error, null);
-  assert.equal(harness.task.config.operationPersonnelTask.activeAttempt.completedAt, "");
-});
-
-test("preview accepts requirement values written by a resumable attempt", async () => {
-  const harness = serviceHarness({ changedAfterSend: true });
-  const state = harness.task.config.operationPersonnelTask;
-  const baseline = structuredClone(state.lastOperationSnapshot);
-  baseline.personnel = {
-    ...structuredClone(state.draft.personnel),
-    monitorCount: 65,
-    monitorRatio: "1:55",
-  };
-  baseline.requirements = requirementsForPersonnel({
-    ...state.draft.personnel,
-    monitorCount: 65,
-    monitorRatio: "1:55",
-  });
-  const current = structuredClone(baseline);
-  current.personnel.monitorCount = 80;
-  current.personnel.monitorRatio = "1:50";
-  current.requirements = requirementsForPersonnel({
-    ...state.draft.personnel,
-    monitorCount: 80,
-    monitorRatio: "1:50",
-  });
-  state.status = "failed_resumable";
-  state.lastOperationSnapshot = structuredClone(baseline);
-  state.activeAttempt = {
-    attemptId: "attempt-resumable",
+  task.config.operationPersonnelTask = {
     status: "failed_resumable",
-    target: structuredClone(current),
-    baseline: structuredClone(baseline),
-  };
-  state.checkpoints = {
-    sync_exam_service_requirements: {
-      name: "sync_exam_service_requirements",
-      status: "completed",
-      readback: structuredClone(current.requirements),
+    activeAttempt: {
+      attemptId: "failed-attempt",
+      status: "failed_resumable",
+      baseline: {
+        ...structuredClone(operationSnapshot),
+        schedules: [],
+        dates: {
+          start: "2026-08-06",
+          end: "2026-08-06",
+          nameListDue: "2026-08-06",
+        },
+      },
+    },
+    checkpoints: {
+      inspect_batch: {
+        status: "completed",
+        readback: structuredClone(operationSnapshot),
+      },
     },
   };
-  const drifted = structuredClone(current);
-  drifted.personnel.monitorCount = 81;
-  drifted.requirements[2].value = "81";
-  harness.setInspection(drifted);
-  await assert.rejects(
-    () => harness.service.preview("task-a", owner(), {
-      monitorCount: 80,
-      monitorRatio: "1:50",
-    }),
-    { code: "PERSONNEL_OPERATION_CONFLICT" },
-  );
-  harness.setInspection(current);
-
-  const preview = await harness.service.preview("task-a", owner(), {
-    monitorCount: 80,
-    monitorRatio: "1:50",
-  });
-
-  assert.equal(preview.state.status, "failed_resumable");
-  assert.equal(typeof preview.previewToken, "string");
-  assert.equal(preview.operationChanges.some((item) => [
-    "personnel.monitorCount",
-    "personnel.monitorRatio",
-    "requirements.2.value",
-    "requirements.3.value",
-  ].includes(item.path)), false);
-
-  const persisted = harness.task.config.operationPersonnelTask;
-  const draft = persisted.draft;
-  const snapshot = draft.previewOperationSnapshot;
-  const batch = {
-    ...snapshot.batch,
-    ...draft.operationBatch,
-    ...draft.batch,
-    projectCode: snapshot.batch.projectCode,
-    projectName: snapshot.batch.projectName,
-    published: true,
-  };
-  persisted.activeAttempt = {
-    ...persisted.activeAttempt,
+  const service = createOperationPersonnelTaskService({
+    readTask: async () => structuredClone(task),
+    updateTaskConfig: async (_taskId, config) => {
+      task = { ...task, config: { ...task.config, ...structuredClone(config) } };
+      return structuredClone(task);
+    },
+    coordinator: {
+      acquireTask: () => () => {},
+      acquireProfile: () => () => {},
+    },
+    runInspection: async () => structuredClone(operationSnapshot),
     environment: "test",
-    kind: "resend",
-    requirementVersion: persisted.activePreview.requirementVersion,
-    draftVersion: persisted.draftVersion,
-    fingerprint: operationPersonnelTaskFingerprint(draft),
-    recipients: {
-      to: structuredClone(draft.directoryMatch.to),
-      cc: structuredClone(draft.directoryMatch.cc),
-    },
-    target: normalizeOperationPersonnelSnapshot({
-      batch,
-      schedules: snapshot.schedules,
-      personnel: draft.personnel,
-      dates: draft.dates,
-      requirements: requirementsForPersonnel(draft.personnel),
-      taskSheet: draft.operationTaskSheet,
-      sendRecords: snapshot.sendRecords,
-      directoryMatch: draft.directoryMatch,
-    }),
-    baseline: structuredClone(draft.previewBaselineSnapshot),
-    previewBinding: {
-      baselineSnapshotFingerprint: persisted.activePreview.baselineSnapshotFingerprint,
-      operationSnapshotFingerprint: valueFingerprint(draft.previewBaselineSnapshot),
-      directoryMatchFingerprint: persisted.activePreview.directoryMatchFingerprint,
-      managedScheduleFingerprint: persisted.activePreview.managedScheduleFingerprint,
-      displayScheduleFingerprint: persisted.activePreview.displayScheduleFingerprint,
-    },
-  };
-  const accepted = await harness.service.send("task-a", owner(), {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "调整监考人数和比例",
-  });
-  assert.equal(accepted.attemptId, "attempt-resumable");
-  assert.equal(
-    harness.task.config.operationPersonnelTask.checkpoints
-      .sync_exam_service_requirements.status,
-    "completed",
-  );
-});
-
-test("changed resumable target gets a new attempt id and replaces old checkpoints with preview inspection", async () => {
-  const harness = serviceHarness({ orphanedAttemptCheckpoint: "sync_personnel_dates" });
-  const preview = await harness.service.preview("task-a", owner(), { monitorCount: 4 });
-  const accepted = await harness.service.send("task-a", owner(), {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
-  });
-  assert.equal(accepted.attemptId, "attempt-1");
-  assert.deepEqual(
-    Object.keys(harness.task.config.operationPersonnelTask.checkpoints),
-    ["inspect_batch"],
-  );
-  assert.equal(
-    harness.task.config.operationPersonnelTask.checkpoints.inspect_batch.status,
-    "completed",
-  );
-  assert.equal(
-    harness.task.config.operationPersonnelTask.activeAttempt.target.personnel.monitorCount,
-    4,
-  );
-});
-
-test("queued attempt retains the exact previewed batch identity", async () => {
-  const harness = serviceHarness();
-  harness.task.config.operationBatch.draft = {
-    fields: {
-      batchName: { value: "2026 秋季批次" },
-    },
-  };
-  const inspected = inspectionFor(harness.task);
-  inspected.batch.batchName = "2026 秋季批次";
-  inspected.batch.projectDepartment = "交付一部";
-  inspected.batch.projectManager = "负责人";
-  inspected.batch.systemType = "易考";
-  harness.setInspection(inspected);
-  const preview = await harness.service.preview("task-a", owner(), {});
-  await harness.service.send("task-a", owner(), {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
-  });
-  await harness.runDeferred();
-  assert.equal(harness.attemptInstructions[0].target.batch.batchName, "2026 秋季批次");
-  assert.equal(harness.attemptInstructions[0].target.batch.projectDepartment, "交付一部");
-});
-
-test("background attempt persists checkpoints and atomically records success", async () => {
-  const checkpoint = {
-    name: "submit_send",
-    status: "running",
-    startedAt: "2026-07-23T02:00:10.000Z",
-    targetDigest: "digest",
-    readback: { kind: "initial", startedAt: "2026-07-23T02:00:10.000Z" },
-  };
-  const harness = serviceHarness({ checkpoint });
-  const preview = await harness.service.preview("task-a", owner(), {});
-  const accepted = await harness.service.send("task-a", owner(), {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
-  });
-  await harness.runDeferred();
-
-  const state = harness.task.config.operationPersonnelTask;
-  assert.deepEqual(state.checkpoints.submit_send, checkpoint);
-  assert.equal(state.status, "sent");
-  assert.equal(state.activeAttempt.attemptId, accepted.attemptId);
-  assert.equal(state.activeAttempt.status, "sent");
-  assert.equal(state.sendHistory.length, 1);
-  assert.equal(state.sendHistory[0].attemptId, accepted.attemptId);
-  assert.equal(state.sendHistory[0].fingerprint, state.lastSuccessfulFingerprint);
-});
-
-test("failure classification preserves the irreversible submit boundary", async () => {
-  for (const checkpoint of [
-    { name: "sync_personnel_dates", status: "running" },
-    {
-      name: "submit_send",
-      status: "running",
-      readback: { kind: "initial", startedAt: "2026-07-23T02:00:10.000Z" },
-    },
-  ]) {
-    const failure = new Error("runner stopped");
-    const harness = serviceHarness({
-      checkpoint,
-      runnerResult: async () => { throw failure; },
-    });
-    const preview = await harness.service.preview("task-a", owner(), {});
-    await harness.service.send("task-a", owner(), {
-      previewToken: preview.previewToken,
-      draftVersion: preview.draftVersion,
-      changeSummary: "",
-    });
-    await harness.runDeferred();
-    assert.equal(
-      harness.task.config.operationPersonnelTask.status,
-      checkpoint.name === "submit_send" ? "result_unknown" : "failed_resumable",
-    );
-  }
-});
-
-test("final schedule readback drift is failed_resumable before submit", async () => {
-  const code = "PERSONNEL_BATCH_SCHEDULE_CONFLICT";
-  const harness = serviceHarness({
-    runnerResult: async () => {
-      throw Object.assign(new Error("final schedule readback drift"), { code });
-    },
-  });
-  const preview = await harness.service.preview("task-a", owner(), {});
-  await harness.service.send("task-a", owner(), {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
+    now: () => Date.parse("2026-08-05T02:00:00.000Z"),
+    makeToken: () => "resume-preview-token",
   });
 
-  await harness.runDeferred();
-
-  const state = harness.task.config.operationPersonnelTask;
-  assert.equal(state.checkpoints.submit_send, undefined);
-  assert.equal(state.status, "failed_resumable");
-  assert.equal(state.activeAttempt.status, "failed_resumable");
-  assert.equal(state.activeAttempt.error.code, code);
-});
-
-test("real runner checkpoint callbacks keep final schedule code drift resumable before send", async () => {
-  const events = [];
-  const harness = serviceHarness({
-    runAttempt: async (instruction, runnerOptions) => {
-      const page = {
-        state: {
-          batch: { ...instruction.baseline.batch },
-          schedules: structuredClone(instruction.target.schedules),
-          personnel: { platform: "" },
-          dates: {},
-          requirements: [],
-          taskSheet: structuredClone(instruction.target.taskSheet),
-          sendRecords: [],
-          selectedRecipients: { to: [], cc: [] },
-        },
-      };
-      let current = START;
-      return runOperationPersonnelAttempt(instruction, {
-        context: { pages: () => [page], close: async () => {} },
-        readBatchPages: async () => ({
-          headers: ["批次代码"],
-          pages: [[{ cells: [instruction.batch.code], pageNumber: 1 }]],
-        }),
-        openBatchRow: async () => {},
-        openEztestSchedulePage: async () => {},
-        openPersonnelPage: async () => {},
-        readBatch: async () => ({ ...page.state.batch }),
-        readSchedules: async () => page.state.schedules,
-        readPersonnel: async () => page.state.personnel,
-        readDates: async () => page.state.dates,
-        readRequirements: async () => page.state.requirements,
-        readTaskSheet: async () => page.state.taskSheet,
-        readTaskSheetSchedules: async () => page.state.schedules,
-        readSendRecords: async () => page.state.sendRecords,
-        readDirectoryGroups: async () => [{
-          name: "演练组",
-          people: [{ id: "t1", name: "张乐翔" }],
-        }],
-        publishBatch: async () => { page.state.batch.published = true; },
-        syncPersonnelConfig: async (_page, personnel) => {
-          page.state.personnel = structuredClone(personnel);
-        },
-        syncPersonnelDates: async (_page, dates) => {
-          page.state.dates = structuredClone(dates);
-        },
-        syncExamServiceRequirements: async (_page, requirements) => {
-          page.state.requirements = structuredClone(requirements);
-        },
-        openTaskSheet: async () => {},
-        selectRecipients: async (_page, recipients) => {
-          page.state.selectedRecipients = structuredClone(recipients);
-          page.state.schedules[0].scheduleCode = 999;
-        },
-        readSelectedRecipients: async () => page.state.selectedRecipients,
-        confirmSend: async () => events.push("confirm_send"),
-        closeTaskSheet: async () => {},
-        reopenTaskSheet: async () => {},
-        now: () => {
-          const value = current;
-          current += 1000;
-          return value;
-        },
-        onCheckpoint: async (checkpoint) => {
-          if (checkpoint.name === "submit_send") events.push("submit_send");
-          await runnerOptions.onCheckpoint(checkpoint);
-        },
-      });
-    },
-  });
-  const preview = await harness.service.preview("task-a", owner(), {});
-  await harness.service.send("task-a", owner(), {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
-  });
-
-  await harness.runDeferred();
-
-  const state = harness.task.config.operationPersonnelTask;
-  assert.equal(state.checkpoints.submit_send, undefined);
-  assert.equal(state.status, "failed_resumable");
-  assert.equal(state.activeAttempt.status, "failed_resumable");
-  assert.equal(
-    state.activeAttempt.error.code,
-    "PERSONNEL_BATCH_SCHEDULE_CONFLICT",
-    state.activeAttempt.error.message,
-  );
-  assert.equal(events.includes("submit_send"), false);
-  assert.equal(events.includes("confirm_send"), false);
-});
-
-test("final recipient readback drift is failed_resumable before submit", async () => {
-  const code = "PERSONNEL_OPERATION_CONFLICT";
-  const harness = serviceHarness({
-    runnerResult: async () => {
-      throw Object.assign(new Error("final recipient readback drift"), { code });
-    },
-  });
-  const preview = await harness.service.preview("task-a", owner(), {});
-  await harness.service.send("task-a", owner(), {
-    previewToken: preview.previewToken,
-    draftVersion: preview.draftVersion,
-    changeSummary: "",
-  });
-
-  await harness.runDeferred();
-
-  const state = harness.task.config.operationPersonnelTask;
-  assert.equal(state.checkpoints.submit_send, undefined);
-  assert.equal(state.status, "failed_resumable");
-  assert.equal(state.activeAttempt.status, "failed_resumable");
-  assert.equal(state.activeAttempt.error.code, code);
-});
-
-test("restart recovery distinguishes pre-send failure from unknown send result", async () => {
-  const beforeSend = serviceHarness({ orphanedAttemptCheckpoint: "sync_personnel_dates" });
-  assert.equal((await beforeSend.service.get("task-a", owner())).state.status, "failed_resumable");
-
-  const afterSend = serviceHarness({ orphanedAttemptCheckpoint: "verify_send_record" });
-  assert.equal((await afterSend.service.get("task-a", owner())).state.status, "result_unknown");
-});
-
-test("attempt lookup is project-scoped", async () => {
-  const harness = serviceHarness({ resultUnknown: true });
-  await assert.rejects(harness.service.attempt("task-a", owner(), "attempt-other"), {
-    code: "PERSONNEL_ATTEMPT_NOT_FOUND",
-    status: 404,
-  });
-  assert.equal(
-    (await harness.service.attempt("task-a", owner(), "attempt-orphan")).attempt.attemptId,
-    "attempt-orphan",
-  );
-});
-
-test("sent personnel state does not expose a stale active-attempt error", async () => {
-  const harness = serviceHarness({ resultUnknown: true });
-  harness.task.config.operationPersonnelTask.status = "sent";
-  harness.task.config.operationPersonnelTask.activeAttempt.status = "sent";
-  harness.task.config.operationPersonnelTask.activeAttempt.error = {
-    code: "PERSONNEL_OPERATION_CONFLICT",
-    message: "旧错误",
-  };
-
-  const result = await harness.service.get("task-a", owner());
-
-  assert.equal(result.state.status, "sent");
-  assert.equal(result.state.activeAttempt.error, null);
-});
-
-test("result_unknown blocks preview without inspection or persistence", async () => {
-  const harness = serviceHarness({ resultUnknown: true });
-  const before = structuredClone(harness.task.config.operationPersonnelTask);
-  await assert.rejects(
-    harness.service.preview("task-a", owner(), {}),
-    { code: "PERSONNEL_RESULT_UNKNOWN", status: 409 },
-  );
-  assert.deepEqual(harness.runnerCalls, []);
-  assert.deepEqual(harness.task.config.operationPersonnelTask, before);
-  assert.equal(harness.deferredJobs.length, 0);
-});
-
-test("recheck only runs for result_unknown and never invokes send", async () => {
-  const harness = serviceHarness({ resultUnknown: true });
-  await harness.service.recheck("task-a", owner());
-  assert.deepEqual(harness.runnerCalls, ["recheck"]);
-});
-
-test("recheck uses the irreversible submit checkpoint start time", async () => {
-  const harness = serviceHarness({
-    resultUnknown: true,
-    submitStartedAt: "2026-07-23T02:00:10.000Z",
-  });
-  await harness.service.recheck("task-a", owner());
-  assert.equal(
-    harness.recheckInstructions[0].attempt.startedAt,
-    "2026-07-23T02:00:10.000Z",
-  );
-});
-
-test("recheck reconciles a newly visible record without another send or attempt id", async () => {
-  const harness = serviceHarness({
-    resultUnknown: true,
-    recheckResult: {
-      status: "sent",
-      sendRecord: { type: "首次发送", sentAt: "2026-07-23T02:00:20.000Z" },
-      operationSnapshot: { batch: { published: true } },
-    },
-  });
-  harness.task.config.operationPersonnelTask.activeAttempt.error = {
-    code: "PERSONNEL_OPERATION_CONFLICT",
-    message: "旧错误",
-  };
-  const result = await harness.service.recheck("task-a", owner());
-  assert.equal(result.state.status, "sent");
-  assert.equal(result.state.sendHistory.length, 1);
-  assert.equal(result.state.sendHistory[0].attemptId, "attempt-orphan");
-  assert.equal(result.state.activeAttempt.attemptId, "attempt-orphan");
-  assert.equal(result.state.activeAttempt.error, null);
-  assert.deepEqual(result.state.confirmedEdits, {
+  const result = await service.preview(task.taskId, { role: "admin" }, {
     dates: {
-      start: "2026-07-23",
-      end: "2026-08-19",
-      nameListDue: "2026-08-19",
-    },
-    personnel: {
-      monitorRatio: "1:50",
-      monitorCount: 2,
+      start: "2026-08-06",
+      end: "2026-08-06",
+      nameListDue: "2026-08-06",
     },
   });
-  assert.deepEqual(harness.runnerCalls, ["recheck"]);
+
+  assert.equal(result.previewToken, "resume-preview-token");
+  assert.deepEqual(result.state.draft.dates, {
+    start: "2026-08-06",
+    end: "2026-08-06",
+    nameListDue: "2026-08-06",
+  });
 });
 
-test("recheck normalizes the real runner return shape into a resend baseline", async () => {
-  const sendRecord = { type: "首次发送", sentAt: "2026-07-23T02:00:20.000Z" };
-  const historical = { type: "首次发送", sentAt: "2026-07-22T02:00:20.000Z" };
-  const harness = serviceHarness({
-    resultUnknown: true,
-    recheckResult: {
-      status: "sent",
-      sendRecord,
-      sendRecords: [historical],
-    },
-  });
-  harness.task.config.operationPersonnelTask.activeAttempt.operationSnapshot = {
-    batch: { published: true },
+test("失败恢复只沿用可编辑人员基线，不回退当前批次日程", () => {
+  const current = {
+    batch: { code: "EZT260003" },
+    schedules: [{ scheduleCode: 1 }],
+    personnel: { monitorRatio: "1:40" },
+    dates: { start: "2026-08-06" },
+    requirements: [{ name: "监考比例", value: "1:40" }],
   };
-  const result = await harness.service.recheck("task-a", owner());
-  assert.equal(result.state.lastOperationSnapshot.batch.code, "EZT260003");
-  assert.equal(result.state.lastOperationSnapshot.personnel.platform, "悦站");
-  assert.deepEqual(result.state.lastOperationSnapshot.sendRecords, [sendRecord, historical]);
-  assert.deepEqual(
-    result.state.sendHistory[0].operationSnapshot,
-    result.state.lastOperationSnapshot,
-  );
+  const previous = {
+    schedules: [],
+    personnel: { monitorRatio: "1:34" },
+    dates: { start: "2026-08-05" },
+    requirements: [],
+  };
+
+  assert.deepEqual(operationPersonnelFailedResumeConflictBaseline(current, previous), {
+    batch: { code: "EZT260003" },
+    schedules: [{ scheduleCode: 1 }],
+    personnel: { monitorRatio: "1:34" },
+    dates: { start: "2026-08-05" },
+    requirements: [],
+  });
+});
+
+test("失败恢复优先使用上次检查的真实回读而不是计划目标", () => {
+  const observed = {
+    dates: { start: "2026-08-05", end: "2026-08-05", nameListDue: "2026-08-05" },
+    requirements: [],
+  };
+  const state = {
+    activeAttempt: {
+      baseline: {
+        dates: { start: "2026-08-06", end: "2026-08-06", nameListDue: "2026-08-06" },
+        requirements: [{ name: "监考比例", value: "1:34" }],
+      },
+    },
+    checkpoints: {
+      inspect_batch: { status: "completed", readback: observed },
+    },
+  };
+
+  assert.deepEqual(operationPersonnelFailedResumeObservedBaseline(state), observed);
+});
+
+test("失败尝试的终态优先于残留的处理中状态", async () => {
+  const task = baseTask();
+  task.config.operationPersonnelTask = {
+    status: "applying_config",
+    activeAttempt: {
+      attemptId: "failed-attempt",
+      status: "failed_resumable",
+      error: { code: "PERSONNEL_ATTEMPT_FAILED", message: "日期面板未恢复" },
+    },
+  };
+  const service = createOperationPersonnelTaskService({
+    readTask: async () => structuredClone(task),
+    coordinator: { acquireTask: () => () => {} },
+    environment: "test",
+  });
+
+  const result = await service.get(task.taskId, { role: "admin" });
+
+  assert.equal(result.state.status, "failed_resumable");
+  assert.equal(result.state.activeAttempt.status, "failed_resumable");
 });

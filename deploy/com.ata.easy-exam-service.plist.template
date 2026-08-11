@@ -9,11 +9,11 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/ata/Library/Application Support/easy-exam-automation/app/scripts/run_local_service.sh</string>
+    <string>__EASY_EXAM_APP_DIR__/scripts/run_local_service.sh</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/ata/Library/Application Support/easy-exam-automation/app</string>
+  <string>__EASY_EXAM_APP_DIR__</string>
 
   <key>RunAtLoad</key>
   <true/>
@@ -22,19 +22,19 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/ata/Library/Application Support/easy-exam-automation/runtime/logs/service.stdout.log</string>
+  <string>__EASY_EXAM_RUNTIME_DIR__/logs/service.stdout.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/ata/Library/Application Support/easy-exam-automation/runtime/logs/service.stderr.log</string>
+  <string>__EASY_EXAM_RUNTIME_DIR__/logs/service.stderr.log</string>
 
   <key>EnvironmentVariables</key>
   <dict>
     <key>PORT</key>
     <string>8765</string>
     <key>CODEX_NODE</key>
-    <string>/Users/ata/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node</string>
+    <string>__EASY_EXAM_NODE__</string>
     <key>CODEX_PYTHON</key>
-    <string>/Users/ata/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3</string>
+    <string>__EASY_EXAM_PYTHON__</string>
   </dict>
 </dict>
 </plist>

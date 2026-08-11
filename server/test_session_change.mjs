@@ -5,20 +5,26 @@ import {
   appendSessionChangeHistory,
   buildSessionChangeDiff,
   editableSessionFieldsFromDetail,
+  enrichTaskSessionRequirementChanges,
   featureEnabledForRuntime,
+  fetchTenantSessionDetailWithListFallback,
   localSessionFieldsForChange,
   mergeSessionChangePayload,
+  putTenantSessionDetail,
   sessionChangeBasePayloadFromTask,
   sessionChangeHistoryFromStep,
+  sessionChangeMatchesSuggested,
   sessionChangeSummary,
+  sessionRequirementChangeForTaskSession,
   tenantSessionChangeErrorMessage,
   validateSessionChangeRequest,
 } from "./session_change.mjs";
 
-test("feature gate is enabled for test runtime or explicit flag only", () => {
-  assert.equal(featureEnabledForRuntime("/app/.easy_exam_runtime", {}), false);
+test("feature is enabled by default and retains an emergency off switch", () => {
+  assert.equal(featureEnabledForRuntime("/app/.easy_exam_runtime", {}), true);
   assert.equal(featureEnabledForRuntime("/app/.easy_exam_runtime_test", {}), true);
   assert.equal(featureEnabledForRuntime("/app/runtime", { SESSION_CHANGE_ENABLED: "1" }), true);
+  assert.equal(featureEnabledForRuntime("/app/runtime", { SESSION_CHANGE_ENABLED: "0" }), false);
 });
 
 test("validation rejects unknown fields and invalid date ranges", () => {
@@ -56,7 +62,7 @@ test("validation normalizes allowed fields and permits clearing early/later", ()
   });
 });
 
-test("merge keeps only editable session change fields and removes cleared minute fields", () => {
+test("session change payload contains only fields whose values actually changed", () => {
   const original = {
     id: "10001",
     name: "旧场次",
@@ -80,17 +86,44 @@ test("merge keeps only editable session change fields and removes cleared minute
     message: "欢迎",
   });
 
-  assert.equal(merged.name, "新场次");
-  assert.equal(merged.start, "2026-07-20 09:00");
-  assert.equal(merged.end, "2026-07-20 11:00");
-  assert.deepEqual(merged.forms, ["F001"]);
-  assert.equal(merged.monitor, true);
-  assert.deepEqual(merged.personal, { full_name: { label: "姓名" } });
-  assert.equal(Object.hasOwn(merged, "id"), false);
-  assert.equal(Object.hasOwn(merged, "url"), false);
-  assert.equal(Object.hasOwn(merged, "extra"), false);
-  assert.equal(Object.hasOwn(merged, "early"), false);
-  assert.equal(Object.hasOwn(merged, "later"), false);
+  assert.deepEqual(merged, {
+    name: "新场次",
+    start: "2026-07-20 09:00",
+    end: "2026-07-20 11:00",
+    early: null,
+    later: null,
+    message: "欢迎",
+  });
+  assert.equal(Object.hasOwn(merged, "forms"), false);
+  assert.equal(Object.hasOwn(merged, "monitor"), false);
+  assert.equal(Object.hasOwn(merged, "personal"), false);
+});
+
+test("name-only tenant update cannot carry candidate or other session configuration", async () => {
+  const calls = [];
+  await putTenantSessionDetail({
+    apiBase: "https://eztest.cn/",
+    sessionId: "433541",
+    login: { tenantApiKey: "test" },
+    payload: {
+      name: "新场次名称",
+      personal: {},
+      forms: [],
+      monitor: false,
+      save_video: false,
+    },
+    requestJson: async (...args) => {
+      calls.push(args);
+      return { status: 0 };
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0][2], {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "新场次名称" }),
+  });
 });
 
 test("diff includes only changed fields with labels", () => {
@@ -103,6 +136,188 @@ test("diff includes only changed fields with labels", () => {
     { field: "name", label: "场次名称", before: "旧场次", after: "新场次" },
     { field: "message", label: "欢迎语", before: "", after: "欢迎" },
   ]);
+});
+
+test("requirement changes mark matching formal and trial sessions pending with suggested times", () => {
+  const task = {
+    config: {
+      examRequirements: [{
+        version: 2,
+        config: {
+          examName: "新正式考试",
+          startTimeDisplay: "2026/08/02 09:30",
+          endTimeDisplay: "2026/08/02 11:30",
+          mockExamName: "新正式考试-试考",
+          mockStartTimeDisplay: "2026/08/01 10:00",
+          mockEndTimeDisplay: "2026/08/01 17:00",
+        },
+      }],
+      projectSourceChangeHistory: [{
+        changeId: "change-time-1",
+        source: "examRequirement",
+        requirementIndex: 0,
+        changedAt: "2026-07-29T02:22:22.604Z",
+        changes: [
+          { field: "考试日期时间", before: "old", after: "new" },
+          { field: "试考日期时间", before: "old", after: "new" },
+        ],
+      }],
+    },
+    sessions: [
+      { session_id: "432821", sessionType: "formal", requirementIndex: 0 },
+      { session_id: "432822", sessionType: "trial", requirementIndex: 0 },
+    ],
+    steps: [],
+  };
+
+  const formal = sessionRequirementChangeForTaskSession(task, task.sessions[0]);
+  const trial = sessionRequirementChangeForTaskSession(task, task.sessions[1]);
+  assert.equal(formal.pending, true);
+  assert.equal(formal.label, "需求有变请确认");
+  assert.deepEqual(formal.suggestedChanges, {
+    start: "2026/08/02 09:30",
+    end: "2026/08/02 11:30",
+  });
+  assert.deepEqual(trial.suggestedChanges, {
+    start: "2026/08/01 10:00",
+    end: "2026/08/01 17:00",
+  });
+
+  const enriched = enrichTaskSessionRequirementChanges(task);
+  assert.equal(enriched.requirementChangeSummary.pendingCount, 2);
+  assert.equal(enriched.sessions[0].requirementChange.changeId, "change-time-1");
+});
+
+test("multiple unresolved requirement changes are merged for one session", () => {
+  const task = {
+    config: {
+      examRequirement: {
+        fields: {
+          "考试日期时间": "旧时间",
+          "考试名称": "旧名称",
+        },
+        config: {
+          examName: "新考试名称",
+          startTimeDisplay: "2026/08/06 10:00",
+          endTimeDisplay: "2026/08/06 22:00",
+        },
+      },
+      projectSourceChangeHistory: [
+        {
+          changeId: "change-time-1",
+          source: "examRequirement",
+          requirementIndex: 0,
+          changedAt: "2026-08-06T02:52:56.187Z",
+          changes: [{ field: "考试日期时间", before: "旧时间", after: "新时间" }],
+        },
+        {
+          changeId: "change-name-2",
+          source: "examRequirement",
+          requirementIndex: 0,
+          changedAt: "2026-08-06T03:19:09.889Z",
+          changes: [{ field: "考试名称", before: "旧名称", after: "新名称" }],
+        },
+      ],
+    },
+    sessions: [{
+      session_id: "432821",
+      sessionType: "formal",
+      requirementIndex: 0,
+      name: "旧名称",
+      start: "2026-08-07 14:00",
+      end: "2026-08-07 18:00",
+    }],
+    steps: [],
+  };
+
+  const change = sessionRequirementChangeForTaskSession(task, task.sessions[0]);
+  assert.equal(change.pending, true);
+  assert.equal(change.changeId, "change-name-2");
+  assert.deepEqual(change.changedFields, ["考试日期时间", "考试名称"]);
+  assert.deepEqual(change.suggestedChanges, {
+    name: "新考试名称",
+    start: "2026/08/06 10:00",
+    end: "2026/08/06 22:00",
+  });
+});
+
+test("an applied requirement change clears only the matching session reminder", () => {
+  const task = {
+    config: {
+      examRequirement: {
+        fields: { "考试日期时间": "new" },
+        config: { startTimeDisplay: "2026/08/02 09:30", endTimeDisplay: "2026/08/02 11:30" },
+      },
+      projectSourceChangeHistory: [{
+        changeId: "change-time-2",
+        source: "examRequirement",
+        changedAt: "2026-07-29T02:22:22.604Z",
+        changes: [{ field: "考试日期时间", before: "old", after: "new" }],
+      }],
+    },
+    sessions: [
+      { session_id: "432821", sessionType: "formal" },
+      { session_id: "432822", sessionType: "formal" },
+    ],
+    steps: [{
+      stepKey: "session_change",
+      result: {
+        history: [{
+          sessionId: "432821",
+          requirementChangeId: "change-time-2",
+          requirementChangeApplied: true,
+        }],
+      },
+    }],
+  };
+
+  const enriched = enrichTaskSessionRequirementChanges(task);
+  assert.equal(enriched.sessions[0].requirementChange.pending, false);
+  assert.equal(enriched.sessions[1].requirementChange.pending, true);
+  assert.equal(enriched.requirementChangeSummary.pendingCount, 1);
+});
+
+test("current session values matching the latest requirement clear the reminder without a history record", () => {
+  const task = {
+    config: {
+      examRequirement: {
+        config: {
+          mockExamName: "新试考",
+          mockStartTimeDisplay: "2026/08/01 10:00",
+          mockEndTimeDisplay: "2026/08/01 17:00",
+        },
+      },
+      projectSourceChangeHistory: [{
+        changeId: "change-trial-time",
+        source: "examRequirement",
+        changedAt: "2026-07-29T02:22:22.604Z",
+        changes: [{ field: "试考日期时间", before: "old", after: "new" }],
+      }],
+    },
+    sessions: [{
+      session_id: "432822",
+      sessionType: "trial",
+      name: "新试考",
+      start: "2026-08-01 10:00",
+      end: "2026-08-01 17:00",
+    }],
+    steps: [],
+  };
+
+  const enriched = enrichTaskSessionRequirementChanges(task);
+  assert.equal(enriched.sessions[0].requirementChange.pending, false);
+  assert.equal(enriched.requirementChangeSummary.pendingCount, 0);
+});
+
+test("suggested requirement values must match the submitted session change", () => {
+  assert.equal(sessionChangeMatchesSuggested(
+    { start: "2026-08-02 09:30:00", end: "2026-08-02 11:30:00" },
+    { start: "2026/08/02 09:30", end: "2026/08/02 11:30" },
+  ), true);
+  assert.equal(sessionChangeMatchesSuggested(
+    { start: "2026-08-02 10:00:00" },
+    { start: "2026/08/02 09:30" },
+  ), false);
 });
 
 test("editable fields expose the safe subset from tenant detail", () => {
@@ -136,7 +351,7 @@ test("local session fallback exposes basic editable fields", () => {
   });
 });
 
-test("task fallback payload avoids overwriting tenant-only prompts when detail lookup fails", () => {
+test("task fallback contains editable fields only when detail lookup fails", () => {
   const payload = sessionChangeBasePayloadFromTask(
     { config: { welcomeText: "欢迎", preLoginPrompt: "请提前登录", personal: { full_name: { required: true } } } },
     { name: "本地场次", start: "2026-07-09 16:20", end: "2026-07-09 17:20", early: 30 },
@@ -146,9 +361,12 @@ test("task fallback payload avoids overwriting tenant-only prompts when detail l
     name: "本地场次",
     start: "2026-07-09 16:20",
     end: "2026-07-09 17:20",
-    personal: { full_name: { required: true } },
     early: 30,
+    later: "",
+    message: "",
+    notice: "",
   });
+  assert.equal(Object.hasOwn(payload, "personal"), false);
 });
 
 test("task fallback payload preserves explicit local prompts when available", () => {
@@ -182,6 +400,46 @@ test("tenant session change errors use operator friendly messages", () => {
   assert.equal(tenantSessionChangeErrorMessage({ status: 500 }), "租户 API 修改场次失败：500");
 });
 
+test("session preview keeps the direct detail response when it succeeds", async () => {
+  const requests = [];
+  const detail = await fetchTenantSessionDetailWithListFallback({
+    apiBase: "https://eztest.cn/",
+    sessionId: "432821",
+    login: { tenantApiKey: "test" },
+    requestJson: async (_login, url) => {
+      requests.push(url);
+      return { id: 432821, name: "正式考试" };
+    },
+  });
+
+  assert.equal(detail.name, "正式考试");
+  assert.deepEqual(requests, ["https://eztest.cn/tenant/api/session/432821/"]);
+});
+
+test("session preview reads the matching list item when the detail endpoint fails", async () => {
+  const requests = [];
+  const detail = await fetchTenantSessionDetailWithListFallback({
+    apiBase: "https://eztest.cn",
+    sessionId: "432821",
+    login: { tenantApiKey: "test" },
+    requestJson: async (_login, url) => {
+      requests.push(url);
+      if (url.endsWith("/432821/")) {
+        const error = new Error("detail failed");
+        error.status = 500;
+        throw error;
+      }
+      return { sessions: [{ id: 432820 }, { id: 432821, name: "正式考试" }] };
+    },
+  });
+
+  assert.equal(detail.name, "正式考试");
+  assert.deepEqual(requests, [
+    "https://eztest.cn/tenant/api/session/432821/",
+    "https://eztest.cn/tenant/api/session/?session_ids=432821",
+  ]);
+});
+
 test("session change history appends newest record without losing older records", () => {
   const existing = [{ id: "old", sessionId: "10001", changedAt: "2026-07-08T09:00:00.000Z" }];
   const history = appendSessionChangeHistory(existing, {
@@ -205,6 +463,18 @@ test("session change history appends newest record without losing older records"
   assert.deepEqual(history[0].diff, [{ field: "name", label: "场次名称", before: "旧场次", after: "新场次" }]);
   assert.deepEqual(history[0].verifiedSession, { name: "新场次", start: "2026/07/17 10:30", end: "2026/07/17 11:30" });
   assert.equal(history[1], existing[0]);
+});
+
+test("session change history preserves the EasyExam pull-sync action", () => {
+  const history = appendSessionChangeHistory([], {
+    sessionId: "434324",
+    sessionType: "formal",
+    status: "success",
+    action: "sync_from_yikao",
+    diff: [{ field: "name", label: "场次名称", before: "旧名称", after: "新名称" }],
+  });
+
+  assert.equal(history[0].action, "sync_from_yikao");
 });
 
 test("legacy session change step diff can be displayed as history", () => {

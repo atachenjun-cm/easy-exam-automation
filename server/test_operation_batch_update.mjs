@@ -4,408 +4,145 @@ import test from "node:test";
 import {
   applyOperationBatchManagedResult,
   buildDesiredOperationBatchSnapshot,
+  buildFormalOperationBatchSnapshot,
+  normalizedOperationBatchManagedSnapshot,
   operationBatchManagedDiff,
   operationBatchUpdateState,
 } from "./operation_batch_update.mjs";
 
-function taskWithRequirements(items) {
+function taskFixture() {
   return {
-    taskId: "task-a",
-    config: {
-      operationBatchCode: "EZT260003",
-      businessRequirement: { batch_name: " 湖北邮政社招_2026年8月 " },
-      operationBatch: {},
-      examRequirements: items.map((item, index) => ({
-        id: `requirement-${index + 1}`,
-        fields: {
-          "考试名称": item.name,
-          "考试日期时间": item.range,
-          "科目信息": item.subjects || "",
-        },
-      })),
-    },
-  };
-}
-
-function taskWithAppliedCount(appliedCount, desiredCount) {
-  const task = taskWithRequirements(Array.from(
-    { length: desiredCount },
-    (_, index) => ({
-      name: `日程${index + 1}`,
-      range: `2026/08/${String(22 + index).padStart(2, "0")} 09:00 - 2026/08/${String(22 + index).padStart(2, "0")} 11:00`,
-    }),
-  ));
-  task.config.operationBatch.managedSnapshot = {
-    batchName: "湖北邮政社招_2026年8月",
-    examStartDate: "2026-08-22",
-    examEndDate: `2026-08-${String(21 + appliedCount).padStart(2, "0")}`,
-    schedules: Array.from({ length: appliedCount }, (_, requirementIndex) => ({
-      requirementIndex,
-      name: `日程${requirementIndex + 1}`,
-      start: `2026-08-${String(22 + requirementIndex).padStart(2, "0")}T09:00:00`,
-      end: `2026-08-${String(22 + requirementIndex).padStart(2, "0")}T11:00:00`,
-    })),
-  };
-  return task;
-}
-
-test("builds indexed schedules and overview date range", () => {
-  const desired = buildDesiredOperationBatchSnapshot(taskWithRequirements([
-    { name: "日程二", range: "2026/08/23 09:00 - 2026/08/23 11:00" },
-    { name: " 日程一 ", range: "2026/08/22 15:00 - 2026/08/24 01:00" },
-  ]));
-
-  assert.equal(desired.complete, true);
-  assert.equal(desired.snapshot.batchName, "湖北邮政社招_2026年8月");
-  assert.equal(desired.snapshot.examStartDate, "2026-08-22");
-  assert.equal(desired.snapshot.examEndDate, "2026-08-24");
-  assert.deepEqual(desired.snapshot.schedules, [
-    {
-      requirementIndex: 0,
-      name: "日程二",
-      start: "2026-08-23T09:00:00",
-      end: "2026-08-23T11:00:00",
-    },
-    {
-      requirementIndex: 1,
-      name: "日程一",
-      start: "2026-08-22T15:00:00",
-      end: "2026-08-24T01:00:00",
-    },
-  ]);
-});
-
-test("one incomplete requirement suppresses the complete schedule set", () => {
-  const desired = buildDesiredOperationBatchSnapshot(taskWithRequirements([
-    { name: "完整", range: "2026/08/22 09:00 - 2026/08/22 11:00" },
-    { name: "缺时间", range: "" },
-  ]));
-
-  assert.equal(desired.complete, false);
-  assert.deepEqual(desired.snapshot, {
-    batchName: "湖北邮政社招_2026年8月",
-    examStartDate: "",
-    examEndDate: "",
-    schedules: [],
-  });
-  assert.deepEqual(desired.missing, [{ requirementIndex: 1, fields: ["考试日期时间"] }]);
-});
-
-test("strict date parsing rejects impossible and reversed ranges", () => {
-  const desired = buildDesiredOperationBatchSnapshot(taskWithRequirements([
-    { name: "不存在日期", range: "2026/02/29 09:00 - 2026/02/29 11:00" },
-    { name: "反向日期", range: "2026/08/22 11:00 - 2026/08/22 09:00" },
-  ]));
-
-  assert.equal(desired.complete, false);
-  assert.deepEqual(desired.missing, [
-    { requirementIndex: 0, fields: ["考试日期时间"] },
-    { requirementIndex: 1, fields: ["考试日期时间"] },
-  ]);
-  assert.deepEqual(desired.snapshot.schedules, []);
-});
-
-test("zero-duration requirement remains incomplete and waits for a valid schedule", () => {
-  const task = taskWithRequirements([
-    { name: "零时长日程", range: "2026/08/22 09:00 - 2026/08/22 09:00" },
-  ]);
-
-  const desired = buildDesiredOperationBatchSnapshot(task);
-
-  assert.equal(desired.complete, false);
-  assert.deepEqual(desired.missing, [{
-    requirementIndex: 0,
-    fields: ["考试日期时间"],
-  }]);
-  assert.deepEqual(desired.snapshot.schedules, []);
-  assert.equal(operationBatchUpdateState(task).status, "waiting_schedule");
-});
-
-test("reports every missing managed schedule field in stable order", () => {
-  const desired = buildDesiredOperationBatchSnapshot(taskWithRequirements([
-    { name: "", range: "" },
-  ]));
-
-  assert.deepEqual(desired.missing, [{
-    requirementIndex: 0,
-    fields: ["考试名称", "考试日期时间"],
-  }]);
-});
-
-test("subject-only changes do not produce managed changes", () => {
-  const before = taskWithRequirements([{
-    name: "考试",
-    range: "2026/08/22 09:00 - 2026/08/22 11:00",
-    subjects: "语文",
-  }]);
-  const after = taskWithRequirements([{
-    name: "考试",
-    range: "2026/08/22 09:00 - 2026/08/22 11:00",
-    subjects: "数学",
-  }]);
-  const beforeSnapshot = buildDesiredOperationBatchSnapshot(before).snapshot;
-  const afterSnapshot = buildDesiredOperationBatchSnapshot(after).snapshot;
-
-  assert.deepEqual(beforeSnapshot, afterSnapshot);
-  assert.deepEqual(operationBatchManagedDiff(beforeSnapshot, afterSnapshot), []);
-});
-
-test("managed diff compares normalized values by schedule index", () => {
-  const before = {
-    batchName: " 批次 ",
-    examStartDate: "2026-08-22",
-    examEndDate: "2026-08-22",
-    schedules: [{
-      requirementIndex: 0,
-      name: " 日程 ",
-      start: "2026-08-22T09:00:00",
-      end: "2026-08-22T11:00:00",
-      subjects: "语文",
-    }],
-  };
-  const after = {
-    batchName: "批次",
-    examStartDate: "2026-08-22",
-    examEndDate: "2026-08-22",
-    schedules: [{
-      requirementIndex: 0,
-      name: "日程",
-      start: "2026-08-22T09:00:00",
-      end: "2026-08-22T11:00:00",
-      subjects: "数学",
-    }],
-  };
-
-  assert.deepEqual(operationBatchManagedDiff(before, after), []);
-});
-
-test("schedule count decrease is a conflict and increase is append-only", () => {
-  assert.equal(operationBatchUpdateState(taskWithAppliedCount(2, 1)).status, "update_conflict");
-
-  const appendState = operationBatchUpdateState(taskWithAppliedCount(1, 2));
-  assert.equal(appendState.status, "update_available");
-  const appendedScheduleChanges = appendState.changes.filter((change) => change.path.startsWith("schedules["));
-  assert.equal(appendedScheduleChanges.length, 3);
-  assert.equal(appendedScheduleChanges.every((change) => change.requirementIndex === 1), true);
-});
-
-test("a changed applied schedule index is a conflict", () => {
-  const task = taskWithAppliedCount(1, 1);
-  task.config.operationBatch.managedSnapshot.schedules[0].requirementIndex = 1;
-
-  assert.equal(operationBatchUpdateState(task).status, "update_conflict");
-});
-
-test("status priority favors conflicts, then incomplete schedules, then managed differences", () => {
-  const conflict = taskWithAppliedCount(2, 1);
-  conflict.config.examRequirements[0].fields["考试日期时间"] = "";
-  assert.equal(operationBatchUpdateState(conflict).status, "update_conflict");
-
-  const waiting = taskWithAppliedCount(1, 2);
-  waiting.config.examRequirements[1].fields["考试日期时间"] = "";
-  assert.equal(operationBatchUpdateState(waiting).status, "waiting_schedule");
-
-  const changed = taskWithAppliedCount(1, 1);
-  changed.config.examRequirements[0].fields["考试名称"] = "新日程";
-  assert.equal(operationBatchUpdateState(changed).status, "update_available");
-
-  assert.equal(operationBatchUpdateState(taskWithAppliedCount(1, 1)).status, "success");
-});
-
-test("valid legacy batch without a managed snapshot requires a read-only baseline", () => {
-  const task = taskWithRequirements([{
-    name: "日程",
-    range: "2026/08/22 09:00 - 2026/08/22 11:00",
-  }]);
-  task.config.operationBatch.draft = {
-    fields: {
-      batchName: { value: "历史创建草稿" },
-      examStartDate: { value: "2020-01-01" },
-      examEndDate: { value: "2020-01-02" },
-    },
-  };
-
-  const state = operationBatchUpdateState(task);
-
-  assert.equal(state.baselineRequired, true);
-  assert.notDeepEqual(
-    state.changes.map((change) => change.before),
-    ["历史创建草稿", "2020-01-01", "2020-01-02"],
-  );
-});
-
-test("an incomplete legacy batch still waits for all schedules", () => {
-  const task = taskWithRequirements([
-    { name: "完整", range: "2026/08/22 09:00 - 2026/08/22 11:00" },
-    { name: "不完整", range: "" },
-  ]);
-
-  const state = operationBatchUpdateState(task);
-
-  assert.equal(state.status, "waiting_schedule");
-  assert.equal(state.baselineRequired, true);
-  assert.deepEqual(state.missing, [{ requirementIndex: 1, fields: ["考试日期时间"] }]);
-});
-
-test("without a valid batch code the existing creation status is preserved", () => {
-  const task = taskWithRequirements([{
-    name: "日程",
-    range: "2026/08/22 09:00 - 2026/08/22 11:00",
-  }]);
-  task.config.operationBatchCode = "";
-  task.config.operationBatch.status = "reconciliation_required";
-
-  assert.equal(operationBatchUpdateState(task).status, "reconciliation_required");
-});
-
-test("persists only a normalized read-back-verified managed result", () => {
-  const task = taskWithAppliedCount(1, 1);
-  task.config.operationBatch.managedSnapshotVersion = 2;
-  task.config.operationBatch.code = "EZT260003";
-  task.config.operationBatch.managedEvents = [{ type: "managed_sync", at: "2026-08-01T00:00:00.000Z" }];
-
-  assert.throws(
-    () => applyOperationBatchManagedResult(task, {
-      verified: false,
-      snapshot: task.config.operationBatch.managedSnapshot,
-    }),
-    /回读验证/,
-  );
-
-  const patch = applyOperationBatchManagedResult(task, {
-    verified: true,
-    snapshot: {
-      batchName: " 湖北邮政社招_2026年8月 ",
-      examStartDate: "2026/08/22",
-      examEndDate: "2026/08/22",
-      schedules: [{
+    sessions: [
+      {
+        sessionType: "trial",
+        name: "试考",
+        start: "2026-08-05T09:00:00",
+        end: "2026-08-05T10:00:00",
         requirementIndex: 0,
-        name: " 日程1 ",
-        start: "2026/08/22 09:00",
-        end: "2026/08/22 11:00",
-        subjects: "不应持久化",
+      },
+      {
+        sessionType: "formal",
+        name: "正式考试最终名称",
+        start: "2026-08-06T09:00:00+08:00",
+        end: "2026-08-06T10:30:00+08:00",
+        requirementIndex: 0,
+      },
+    ],
+    config: {
+      businessRequirement: { batch_name: "泛微旧批次名" },
+      operationBatch: {
+        batchName: "运控已确认批次名",
+        draft: { fields: { batchName: { value: "运控已确认批次名" } } },
+      },
+      examRequirements: [{
+        fields: {
+          "考试名称": "需求单旧名称",
+          "考试日期时间": "2026-08-01 08:00 - 2026-08-01 09:00",
+          "提前登录时间": "30分钟",
+          "备注": "正式考试日程",
+        },
       }],
     },
-    syncedAt: "2026-08-02T03:04:05.000Z",
-    action: "update",
-    detailUrl: " https://operation.example/batches/EZT260003 ",
-    checkpoints: ["overview_saved", "schedule_verified"],
-  });
+  };
+}
 
-  assert.deepEqual(patch.operationBatch.managedSnapshot, {
-    batchName: "湖北邮政社招_2026年8月",
-    examStartDate: "2026-08-22",
-    examEndDate: "2026-08-22",
+test("archive schedule snapshot uses formal sessions and excludes trial sessions", () => {
+  const desired = buildFormalOperationBatchSnapshot(taskFixture());
+  assert.equal(desired.complete, true);
+  assert.deepEqual(desired.snapshot, {
+    batchName: "运控已确认批次名",
+    examStartDate: "2026-08-06",
+    examEndDate: "2026-08-06",
     schedules: [{
       requirementIndex: 0,
-      name: "日程1",
-      start: "2026-08-22T09:00:00",
-      end: "2026-08-22T11:00:00",
+      scene: "1",
+      code: "1",
+      name: "正式考试最终名称",
+      start: "2026-08-06T09:00:00",
+      end: "2026-08-06T10:30:00",
+      timezone: "东8区",
+      durationMinutes: "90",
+      earlyLoginMinutes: "30",
+      trial: false,
+      remark: "正式考试日程",
     }],
   });
-  assert.equal(patch.operationBatch.code, "EZT260003");
-  assert.equal(patch.operationBatch.managedSnapshotVersion, 3);
-  assert.equal(patch.operationBatch.lastManagedSyncAt, "2026-08-02T03:04:05.000Z");
-  assert.deepEqual(patch.operationBatch.managedEvents, [
-    { type: "managed_sync", at: "2026-08-01T00:00:00.000Z" },
-    {
-      type: "operation_batch_managed_sync",
-      action: "update",
-      at: "2026-08-02T03:04:05.000Z",
-      version: 3,
-      detailUrl: "https://operation.example/batches/EZT260003",
-      checkpoints: ["overview_saved", "schedule_verified"],
-    },
+  assert.deepEqual(normalizedOperationBatchManagedSnapshot(desired.snapshot), desired.snapshot);
+});
+
+test("formal schedule diff includes every missing operation-console column", () => {
+  const desired = buildFormalOperationBatchSnapshot(taskFixture()).snapshot;
+  const changes = operationBatchManagedDiff({
+    batchName: desired.batchName,
+    examStartDate: desired.examStartDate,
+    examEndDate: desired.examEndDate,
+    schedules: [],
+  }, desired);
+  assert.deepEqual(changes.map((change) => change.path), [
+    "schedules[0].scene",
+    "schedules[0].code",
+    "schedules[0].name",
+    "schedules[0].start",
+    "schedules[0].end",
+    "schedules[0].timezone",
+    "schedules[0].durationMinutes",
+    "schedules[0].earlyLoginMinutes",
+    "schedules[0].remark",
   ]);
 });
 
-test("rejects an invalid verified managed snapshot", () => {
-  const task = taskWithRequirements([]);
-
-  assert.throws(
-    () => applyOperationBatchManagedResult(task, {
-      verified: true,
-      snapshot: {
-        batchName: "批次",
-        examStartDate: "2026-08-22",
-        examEndDate: "2026-08-22",
-        schedules: [{
-          requirementIndex: 0,
-          name: "日程",
-          start: "2026-08-22T11:00:00",
-          end: "2026-08-22T09:00:00",
-        }],
-      },
-    }),
-    /受管快照/,
-  );
+test("archive schedule blocks when no formal session exists", () => {
+  const task = taskFixture();
+  task.sessions = task.sessions.filter((session) => session.sessionType === "trial");
+  const desired = buildFormalOperationBatchSnapshot(task);
+  assert.equal(desired.complete, false);
+  assert.deepEqual(desired.snapshot.schedules, []);
 });
 
-test("rejects a zero-duration verified managed schedule", () => {
-  const task = taskWithRequirements([]);
+test("batch update state exposes only fields changed after the confirmed snapshot", () => {
+  const task = taskFixture();
+  const applied = buildDesiredOperationBatchSnapshot(task).snapshot;
+  task.config.operationBatchCode = "EZT261018";
+  task.config.operationBatch.managedSnapshot = structuredClone(applied);
 
-  assert.throws(
-    () => applyOperationBatchManagedResult(task, {
-      verified: true,
-      snapshot: {
-        batchName: "批次",
-        examStartDate: "2026-08-22",
-        examEndDate: "2026-08-22",
-        schedules: [{
-          requirementIndex: 0,
-          name: "零时长日程",
-          start: "2026-08-22T09:00:00",
-          end: "2026-08-22T09:00:00",
-        }],
-      },
-    }),
-    /受管快照/,
-  );
+  const unchanged = operationBatchUpdateState(task);
+  assert.equal(unchanged.status, "success");
+  assert.equal(unchanged.baselineRequired, false);
+  assert.deepEqual(unchanged.changes, []);
+
+  task.config.examRequirements[0].fields["考试名称"] = "需求单更新后的名称";
+  const changed = operationBatchUpdateState(task);
+  assert.equal(changed.status, "update_available");
+  assert.equal(changed.baselineRequired, false);
+  assert.deepEqual(changed.changes, [{
+    path: "schedules[0].name",
+    label: "日程1考试名称",
+    before: "需求单旧名称",
+    after: "需求单更新后的名称",
+    requirementIndex: 0,
+  }]);
 });
 
-test("rejects verified overview dates that do not match schedule extrema", () => {
-  const task = taskWithRequirements([]);
+test("a newly created batch can store a verified empty schedule baseline", () => {
+  const result = applyOperationBatchManagedResult({
+    config: { operationBatch: { code: "EZT261018" } },
+  }, {
+    verified: true,
+    allowEmptySchedules: true,
+    action: "create_baseline",
+    snapshot: {
+      batchName: "已建批次",
+      examStartDate: "2026-08-06",
+      examEndDate: "2026-08-06",
+      schedules: [],
+    },
+  });
 
-  assert.throws(
-    () => applyOperationBatchManagedResult(task, {
-      verified: true,
-      snapshot: {
-        batchName: "批次",
-        examStartDate: "2026-08-23",
-        examEndDate: "2026-08-23",
-        schedules: [
-          {
-            requirementIndex: 0,
-            name: "第二场",
-            start: "2026-08-23T09:00:00",
-            end: "2026-08-23T11:00:00",
-          },
-          {
-            requirementIndex: 1,
-            name: "跨日场",
-            start: "2026-08-22T15:00:00",
-            end: "2026-08-24T01:00:00",
-          },
-        ],
-      },
-    }),
-    /概况日期/,
-  );
-});
-
-test("rejects a verified managed snapshot without schedules", () => {
-  const task = taskWithRequirements([]);
-
-  assert.throws(
-    () => applyOperationBatchManagedResult(task, {
-      verified: true,
-      snapshot: {
-        batchName: "批次",
-        examStartDate: "2026-08-22",
-        examEndDate: "2026-08-22",
-        schedules: [],
-      },
-    }),
-    /至少一条完整日程/,
-  );
+  assert.deepEqual(result.operationBatch.managedSnapshot, {
+    batchName: "已建批次",
+    examStartDate: "2026-08-06",
+    examEndDate: "2026-08-06",
+    schedules: [],
+  });
+  assert.equal(result.operationBatch.managedSnapshotVersion, 1);
 });

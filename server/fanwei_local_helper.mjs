@@ -26,10 +26,37 @@ import {
 } from "./score_stamp_application.mjs";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
-const KNOWN_PATHS = new Set(["/health", "/chrome/ensure", "/fanwei/read", "/score-stamp/start"]);
+const KNOWN_PATHS = new Set([
+  "/health",
+  "/chrome/ensure",
+  "/fanwei/read",
+  "/score-stamp/start",
+  "/operation-batch/create",
+  "/operation-batch/reconcile",
+  "/operation-batch/inspect",
+  "/operation-batch/update",
+  "/operation-archive/inspect",
+  "/operation-archive/submit",
+  "/operation-content/sync",
+]);
 const DEFAULT_JSON_BODY_LIMIT_BYTES = 64 * 1024;
 const SCORE_STAMP_JSON_BODY_LIMIT_BYTES = 160 * 1024 * 1024;
 const SCORE_STAMP_ARCHIVE_LIMIT_BYTES = 100 * 1024 * 1024;
+const OPERATION_ARCHIVE_ATTACHMENT_LIMIT_BYTES = 300 * 1024;
+const OPERATION_ARCHIVE_ATTACHMENT_COUNT_LIMIT = 10;
+const OPERATION_BATCH_REQUEST_TTL_MS = 30 * 60 * 1000;
+
+export const FANWEI_LOCAL_HELPER_VERSION = 8;
+export const FANWEI_LOCAL_HELPER_CAPABILITIES = Object.freeze({
+  fanweiRead: true,
+  scoreStampApplication: true,
+  operationBatchCreate: true,
+  operationBatchReconcile: true,
+  operationBatchInspect: true,
+  operationBatchUpdate: true,
+  operationArchive: true,
+  operationContentSync: true,
+});
 
 class HelperError extends Error {
   constructor(code, message, status = 500) {
@@ -122,6 +149,44 @@ function scoreStampError(error) {
   return new HelperError("score_stamp_failed", error?.message || String(error), 502);
 }
 
+function operationConsoleBaseUrl(value = "") {
+  try {
+    const url = new URL(String(value || "https://dashboard.ata.net.cn").trim());
+    if (url.protocol !== "https:"
+      || url.hostname !== "dashboard.ata.net.cn"
+      || url.port
+      || !["", "/"].includes(url.pathname)
+      || url.username
+      || url.password
+      || url.search
+      || url.hash) {
+      throw new Error("invalid operation console URL");
+    }
+    return url.origin;
+  } catch {
+    throw new HelperError(
+      "operation_batch_url_invalid",
+      "运控建批次地址必须为 https://dashboard.ata.net.cn。",
+      400,
+    );
+  }
+}
+
+function operationBatchFailure(error, fallbackCode = "operation_batch_failed") {
+  return {
+    errorCode: String(error?.code || fallbackCode),
+    errorMessage: error?.message || String(error),
+  };
+}
+
+function operationBatchRequestId(value = "") {
+  const requestId = String(value || "").trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
+    throw new HelperError("operation_batch_request_invalid", "缺少有效的本机建批次请求编号。", 400);
+  }
+  return requestId;
+}
+
 export function createFanweiLocalHelperServer({
   allowedOrigins,
   host = "127.0.0.1",
@@ -133,6 +198,16 @@ export function createFanweiLocalHelperServer({
   webSocketFactory,
   spawnImpl = spawn,
   existsSync = fsExistsSync,
+  connectOperationBrowserImpl,
+  runOperationBatchCreationImpl,
+  runOperationBatchReconciliationImpl,
+  runOperationBatchScheduleInitializationImpl,
+  inspectOperationBatchManagedSnapshotImpl,
+  runOperationBatchManagedUpdateImpl,
+  synchronizeOperationBatchScheduleForArchiveImpl,
+  inspectOperationArchiveImpl,
+  submitOperationArchiveImpl,
+  syncOperationContentImpl,
 } = {}) {
   if (!LOOPBACK_HOSTS.has(host)) {
     throw new TypeError("Fanwei local helper host must be loopback-only");
@@ -141,6 +216,8 @@ export function createFanweiLocalHelperServer({
   const helperRuntimeDir = runtimeDir || path.join(os.homedir(), ".yikao-local-helper");
   const supportedPlatform = platform === "darwin" || platform === "win32";
   let ensurePromise = null;
+  let operationBrowserPromise = null;
+  const operationBatchRequests = new Map();
 
   async function chromeStatus() {
     if (typeof fetchImpl !== "function") {
@@ -228,6 +305,679 @@ export function createFanweiLocalHelperServer({
       });
     }
     return await ensurePromise;
+  }
+
+  async function connectOperationBrowser() {
+    if (operationBrowserPromise) return await operationBrowserPromise;
+    operationBrowserPromise = (async () => {
+      if (typeof connectOperationBrowserImpl === "function") {
+        return await connectOperationBrowserImpl({ chromePort });
+      }
+      let chromium;
+      try {
+        ({ chromium } = await import("playwright"));
+      } catch (error) {
+        throw new HelperError(
+          "operation_batch_playwright_missing",
+          "本机助手版本缺少运控自动化组件，请重新下载安装本机助手。",
+          503,
+        );
+      }
+      return await chromium.connectOverCDP(`http://127.0.0.1:${chromePort}`);
+    })().then((browser) => {
+      browser?.once?.("disconnected", () => { operationBrowserPromise = null; });
+      return browser;
+    }).catch((error) => {
+      operationBrowserPromise = null;
+      throw error;
+    });
+    return await operationBrowserPromise;
+  }
+
+  async function operationBatchRunners() {
+    const operationBatchRunner = await import("./operation_batch_runner.mjs");
+    const creation = typeof runOperationBatchCreationImpl === "function"
+      ? runOperationBatchCreationImpl
+      : operationBatchRunner.runOperationBatchCreation;
+    const reconciliation = typeof runOperationBatchReconciliationImpl === "function"
+      ? runOperationBatchReconciliationImpl
+      : operationBatchRunner.runOperationBatchReconciliation;
+    let initialize = runOperationBatchScheduleInitializationImpl;
+    if (typeof initialize !== "function") {
+      try {
+        initialize = (await import("./operation_batch_update_runner.mjs"))
+          .runOperationBatchScheduleInitialization;
+      } catch {
+        initialize = null;
+      }
+    }
+    return { creation, reconciliation, initialize };
+  }
+
+  async function operationBatchManagedRunners() {
+    const runner = await import("./operation_batch_update_runner.mjs");
+    return {
+      inspect: typeof inspectOperationBatchManagedSnapshotImpl === "function"
+        ? inspectOperationBatchManagedSnapshotImpl
+        : runner.inspectOperationBatchManagedSnapshot,
+      update: typeof runOperationBatchManagedUpdateImpl === "function"
+        ? runOperationBatchManagedUpdateImpl
+        : runner.runOperationBatchManagedUpdate,
+      syncForArchive: typeof synchronizeOperationBatchScheduleForArchiveImpl === "function"
+        ? synchronizeOperationBatchScheduleForArchiveImpl
+        : runner.synchronizeOperationBatchScheduleForArchive,
+    };
+  }
+
+  async function inspectOperationBatchBaseline(operationBatchCode, baseUrl, context) {
+    const runners = await operationBatchManagedRunners();
+    const snapshot = await runners.inspect({
+      batch: { code: operationBatchCode },
+    }, {
+      baseUrl,
+      context,
+      closeContext: false,
+      headless: false,
+    });
+    return {
+      verified: true,
+      snapshot,
+      action: "baseline",
+      checkpoints: ["created_batch_inspected"],
+      allowEmptySchedules: true,
+    };
+  }
+
+  async function operationArchiveRunners() {
+    const runner = await import("./operation_archive_runner.mjs");
+    return {
+      inspect: typeof inspectOperationArchiveImpl === "function"
+        ? inspectOperationArchiveImpl
+        : runner.prepareOperationArchive,
+      submit: typeof submitOperationArchiveImpl === "function"
+        ? submitOperationArchiveImpl
+        : runner.submitOperationArchive,
+    };
+  }
+
+  async function operationContentRunner() {
+    if (typeof syncOperationContentImpl === "function") return syncOperationContentImpl;
+    return (await import("./operation_content_runner.mjs")).syncOperationContent;
+  }
+
+  async function executeOperationContent(payload = {}) {
+    const draft = payload?.draft;
+    if (!draft?.batch?.code || !draft?.batch?.name || !draft?.batch?.detailUrl) {
+      throw new HelperError("operation_content_payload_invalid", "缺少完整的运控内容同步参数。", 400);
+    }
+    const baseUrl = operationConsoleBaseUrl(payload?.baseUrl);
+    await ensureChromeOnce();
+    const browser = await connectOperationBrowser();
+    const context = browser?.contexts?.()[0];
+    if (!context) {
+      throw new HelperError("operation_content_chrome_context_missing", "未取得本机专用 Chrome 登录环境，请关闭专用 Chrome 后重试。", 503);
+    }
+    try {
+      const sync = await operationContentRunner();
+      return await sync(draft, {
+        baseUrl,
+        context,
+        closeContext: false,
+        headless: false,
+      });
+    } catch (error) {
+      throw new HelperError(
+        String(error?.code || "operation_content_sync_failed"),
+        error?.message || String(error),
+        Number(error?.status || 409),
+      );
+    }
+  }
+
+  function operationArchiveAttachmentName(value = "", index = 0) {
+    const baseName = path.basename(String(value || `归档凭证-${index + 1}.png`).replace(/\\/g, "/"));
+    const safeName = baseName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").trim();
+    return safeName || `归档凭证-${index + 1}.png`;
+  }
+
+  async function materializeOperationArchiveAttachments(payload = {}, requestId = "") {
+    const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+    if (attachments.length > OPERATION_ARCHIVE_ATTACHMENT_COUNT_LIMIT) {
+      throw new HelperError("operation_archive_attachment_count", "归档凭证最多上传 10 张。", 400);
+    }
+    if (payload?.draft?.attachmentsRequired !== false && !attachments.length) {
+      throw new HelperError("operation_archive_attachment_required", "请至少选择一张归档凭证图片。", 400);
+    }
+    if (!attachments.length) return { tempDir: "", filePaths: [] };
+    const tempDir = path.join(helperRuntimeDir, "operation-archive", requestId);
+    await rm(tempDir, { recursive: true, force: true });
+    await mkdir(tempDir, { recursive: true });
+    const filePaths = [];
+    try {
+      for (let index = 0; index < attachments.length; index += 1) {
+        const attachment = attachments[index] || {};
+        const mimeType = String(attachment.mimeType || "").toLowerCase();
+        if (!new Set(["image/png", "image/jpeg", "image/webp"]).has(mimeType)) {
+          throw new HelperError("operation_archive_attachment_type", "归档凭证仅支持 PNG、JPG 或 WebP 图片。", 400);
+        }
+        const base64 = String(attachment.base64 || "").replace(/^data:[^,]+,/, "").replace(/\s+/g, "");
+        if (!base64 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) {
+          throw new HelperError("operation_archive_attachment_invalid", "归档凭证不是有效的图片数据。", 400);
+        }
+        const buffer = Buffer.from(base64, "base64");
+        if (!buffer.length || buffer.length >= OPERATION_ARCHIVE_ATTACHMENT_LIMIT_BYTES) {
+          throw new HelperError("operation_archive_attachment_size", "每张归档凭证必须小于 300KB。", 400);
+        }
+        const filePath = path.join(tempDir, `${index + 1}-${operationArchiveAttachmentName(attachment.fileName, index)}`);
+        await writeFile(filePath, buffer);
+        filePaths.push(filePath);
+      }
+    } catch (error) {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
+    return { tempDir, filePaths };
+  }
+
+  async function executeOperationArchive(payload = {}, mode = "inspect") {
+    const draft = payload?.draft;
+    if (!draft?.fields || typeof draft.fields !== "object") {
+      throw new HelperError("operation_archive_payload_invalid", "缺少有效的运控归档参数。", 400);
+    }
+    const baseUrl = operationConsoleBaseUrl(payload?.baseUrl);
+    await ensureChromeOnce();
+    const browser = await connectOperationBrowser();
+    const context = browser?.contexts?.()[0];
+    if (!context) {
+      throw new HelperError("operation_archive_chrome_context_missing", "未取得本机专用 Chrome 登录环境，请关闭专用 Chrome 后重试。", 503);
+    }
+    const runners = await operationArchiveRunners();
+    const requestId = operationBatchRequestId(payload?.requestId);
+    let materialized = { tempDir: "", filePaths: [] };
+    try {
+      let scheduleSynchronization = null;
+      if (mode === "submit") {
+        materialized = await materializeOperationArchiveAttachments(payload, requestId);
+      }
+      const runner = mode === "submit" ? runners.submit : runners.inspect;
+      const runArchive = () => runner(draft, {
+          baseUrl,
+          batchDetailUrl: String(payload?.batchDetailUrl || "").trim(),
+          context,
+          closeContext: false,
+          headless: false,
+          attachmentPaths: materialized.filePaths,
+        });
+      const reusePreparedArchiveForm = mode === "submit" && payload.reusePreparedArchiveForm === true;
+      let result;
+      try {
+        result = await runArchive();
+      } catch (error) {
+        const scheduleFallbackCodes = new Set([
+          "OPERATION_ARCHIVE_ACTION_NOT_FOUND",
+          "OPERATION_ARCHIVE_SCHEDULE_REQUIRED",
+        ]);
+        if (reusePreparedArchiveForm || !scheduleFallbackCodes.has(String(error?.code || ""))) throw error;
+        if (!payload.scheduleInstruction?.desiredSnapshot) {
+          throw new HelperError("operation_archive_schedule_required", "缺少可核验的正式考试日程，不能进入归档。", 400);
+        }
+        const managedRunners = await operationBatchManagedRunners();
+        scheduleSynchronization = await managedRunners.syncForArchive(payload.scheduleInstruction, {
+          baseUrl,
+          context,
+          closeContext: false,
+          headless: false,
+        });
+        if (scheduleSynchronization?.verified !== true) {
+          throw new HelperError("operation_archive_schedule_unverified", "运营批次考试日程未通过回读验证，不能进入归档。", 409);
+        }
+        result = await runArchive();
+      }
+      const normalizedResult = mode === "inspect" && result?.status === "prepared"
+        ? { ...result, status: "ready", formPrepared: true }
+        : result;
+      return {
+        ...normalizedResult,
+        ...(scheduleSynchronization ? { scheduleSynchronization } : {}),
+      };
+    } catch (error) {
+      if (error instanceof HelperError) throw error;
+      throw new HelperError(
+        String(error?.code || (mode === "submit" ? "operation_archive_submit_failed" : "operation_archive_inspect_failed")),
+        error?.message || String(error),
+        Number(error?.status || 409),
+      );
+    } finally {
+      if (materialized.tempDir) await rm(materialized.tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  async function executeOperationBatchApplication(payload = {}) {
+    const draft = payload?.draft;
+    if (!draft?.fields || typeof draft.fields !== "object") {
+      throw new HelperError("operation_batch_payload_invalid", "缺少有效的运控建批次参数。", 400);
+    }
+    const baseUrl = operationConsoleBaseUrl(payload?.baseUrl);
+    const desired = payload?.desired && typeof payload.desired === "object"
+      ? payload.desired
+      : { complete: false };
+    await ensureChromeOnce();
+    const browser = await connectOperationBrowser();
+    const context = browser?.contexts?.()[0];
+    if (!context) {
+      throw new HelperError(
+        "operation_batch_chrome_context_missing",
+        "未取得本机专用 Chrome 登录环境，请关闭专用 Chrome 后重试。",
+        503,
+      );
+    }
+    const runners = await operationBatchRunners();
+    const runnerOptions = {
+      baseUrl,
+      context,
+      closeContext: false,
+      headless: false,
+      allowTaskMismatch: false,
+      publishAfterCreate: false,
+    };
+    let created;
+    let reconciled = false;
+    try {
+      created = await runners.creation(draft, runnerOptions);
+    } catch (error) {
+      if (error?.code === "OPERATION_BATCH_RECONCILIATION_REQUIRED") {
+        try {
+          created = await runners.reconciliation(draft, runnerOptions);
+          reconciled = true;
+        } catch {
+          // Keep the explicit confirmation state when the external list is still inconclusive.
+        }
+        if (!created?.operationBatchCode) {
+          return {
+            status: "reconciliation_required",
+            externalBatchConfirmed: true,
+            ...operationBatchFailure(error, "OPERATION_BATCH_RECONCILIATION_REQUIRED"),
+          };
+        }
+      } else {
+        throw new HelperError(
+          String(error?.code || "operation_batch_create_failed"),
+          error?.message || String(error),
+          Number(error?.status || 502),
+        );
+      }
+    }
+    const publishCreatedBatch = () => runners.reconciliation(draft, {
+      ...runnerOptions,
+      operationBatchCode: created?.operationBatchCode || "",
+      publishAfterCreate: true,
+    });
+    if (!desired.complete) {
+      try {
+        const published = await publishCreatedBatch();
+        let managedResult = null;
+        try {
+          managedResult = await inspectOperationBatchBaseline(
+            published?.operationBatchCode || created?.operationBatchCode || "",
+            baseUrl,
+            context,
+          );
+        } catch {
+          // Publishing remains successful even when the optional baseline readback is unavailable.
+        }
+        return {
+          status: "waiting_schedule",
+          operationBatchCode: published?.operationBatchCode || created?.operationBatchCode || "",
+          created: published,
+          initialCreated: created,
+          ...(managedResult ? { managedResult } : {}),
+          reconciled,
+        };
+      } catch (error) {
+        return {
+          status: "update_failed",
+          operationBatchCode: created?.operationBatchCode || "",
+          created: { ...created, status: "created_unpublished" },
+          reconciled,
+          ...operationBatchFailure(error, "operation_batch_publish_failed"),
+        };
+      }
+    }
+    if (typeof runners.initialize !== "function") {
+      let published = created;
+      let publishError = null;
+      try {
+        published = await publishCreatedBatch();
+      } catch (error) {
+        publishError = error;
+      }
+      return {
+        status: "update_failed",
+        operationBatchCode: created?.operationBatchCode || "",
+        created: publishError ? { ...created, status: "created_unpublished" } : published,
+        errorCode: "operation_batch_initializer_missing",
+        errorMessage: publishError
+          ? `本机助手版本缺少批次日程初始化组件，且自动发布失败：${publishError?.message || String(publishError)}`
+          : "本机助手版本缺少批次日程初始化组件，请重新下载安装本机助手。",
+      };
+    }
+    let managedResult;
+    try {
+      managedResult = await runners.initialize({
+        batch: { code: created?.operationBatchCode || "" },
+        desiredSnapshot: desired.snapshot,
+      }, runnerOptions);
+    } catch (error) {
+      let published = created;
+      let publishError = null;
+      try {
+        published = await publishCreatedBatch();
+      } catch (candidate) {
+        publishError = candidate;
+      }
+      return {
+        status: "update_failed",
+        operationBatchCode: created?.operationBatchCode || "",
+        created: publishError ? { ...created, status: "created_unpublished" } : published,
+        ...operationBatchFailure(
+          error,
+          publishError ? "operation_batch_initialize_and_publish_failed" : "operation_batch_initialize_failed",
+        ),
+        ...(publishError ? {
+          errorMessage: `${error?.message || String(error)}；自动发布失败：${publishError?.message || String(publishError)}`,
+        } : {}),
+      };
+    }
+    try {
+      const published = await publishCreatedBatch();
+      return {
+        status: "success",
+        operationBatchCode: published?.operationBatchCode || created?.operationBatchCode || "",
+        created: published,
+        initialCreated: created,
+        managedResult,
+        reconciled,
+      };
+    } catch (error) {
+      return {
+        status: "update_failed",
+        operationBatchCode: created?.operationBatchCode || "",
+        created: { ...created, status: "created_unpublished" },
+        managedResult,
+        reconciled,
+        ...operationBatchFailure(error, "operation_batch_publish_failed"),
+      };
+    }
+  }
+
+  async function runOperationBatchApplication(payload = {}) {
+    const requestId = operationBatchRequestId(payload?.requestId);
+    const now = Date.now();
+    for (const [id, request] of operationBatchRequests) {
+      if (request.expiresAt <= now) operationBatchRequests.delete(id);
+    }
+    const existing = operationBatchRequests.get(requestId);
+    if (existing) return await existing.promise;
+    const promise = executeOperationBatchApplication(payload);
+    operationBatchRequests.set(requestId, {
+      promise,
+      expiresAt: now + OPERATION_BATCH_REQUEST_TTL_MS,
+    });
+    return await promise;
+  }
+
+  async function executeOperationBatchReconciliation(payload = {}) {
+    const draft = payload?.draft;
+    if (!draft?.fields || typeof draft.fields !== "object") {
+      throw new HelperError("operation_batch_payload_invalid", "缺少有效的运控批次回查参数。", 400);
+    }
+    const baseUrl = operationConsoleBaseUrl(payload?.baseUrl);
+    await ensureChromeOnce();
+    const browser = await connectOperationBrowser();
+    const context = browser?.contexts?.()[0];
+    if (!context) {
+      throw new HelperError("operation_batch_chrome_context_missing", "未取得本机专用 Chrome 登录环境，请关闭专用 Chrome 后重试。", 503);
+    }
+    const runners = await operationBatchRunners();
+    try {
+      const created = await runners.reconciliation(draft, {
+        baseUrl,
+        context,
+        closeContext: false,
+        headless: false,
+        operationBatchCode: String(payload.operationBatchCode || "").trim(),
+        publishAfterCreate: false,
+      });
+      if (!created?.operationBatchCode) throw new Error("运营批次回查没有返回批次代码");
+      if (!payload.desired?.complete) {
+        try {
+          const published = await runners.reconciliation(draft, {
+            baseUrl,
+            context,
+            closeContext: false,
+            headless: false,
+            operationBatchCode: created.operationBatchCode,
+            publishAfterCreate: true,
+          });
+          let managedResult = null;
+          try {
+            managedResult = await inspectOperationBatchBaseline(
+              published.operationBatchCode || created.operationBatchCode,
+              baseUrl,
+              context,
+            );
+          } catch {
+            // Publishing remains successful even when the optional baseline readback is unavailable.
+          }
+          return {
+            status: "waiting_schedule",
+            operationBatchCode: published.operationBatchCode || created.operationBatchCode,
+            created: published,
+            initialCreated: created,
+            ...(managedResult ? { managedResult } : {}),
+            reconciled: true,
+          };
+        } catch (error) {
+          return {
+            status: "update_failed",
+            operationBatchCode: created.operationBatchCode,
+            created: { ...created, status: "created_unpublished" },
+            reconciled: true,
+            ...operationBatchFailure(error, "operation_batch_publish_failed"),
+          };
+        }
+      }
+      const managedRunners = await operationBatchManagedRunners();
+      let managedResult;
+      try {
+        managedResult = await managedRunners.syncForArchive({
+          batch: { code: created.operationBatchCode },
+          desiredSnapshot: payload.desired.snapshot,
+        }, {
+          baseUrl,
+          context,
+          closeContext: false,
+          headless: false,
+        });
+      } catch (error) {
+        let published = created;
+        let publishError = null;
+        try {
+          published = await runners.reconciliation(draft, {
+            baseUrl,
+            context,
+            closeContext: false,
+            headless: false,
+            operationBatchCode: created.operationBatchCode,
+            publishAfterCreate: true,
+          });
+        } catch (candidate) {
+          publishError = candidate;
+        }
+        return {
+          status: "update_failed",
+          operationBatchCode: created.operationBatchCode,
+          created: publishError ? { ...created, status: "created_unpublished" } : published,
+          reconciled: true,
+          ...operationBatchFailure(
+            error,
+            publishError ? "operation_batch_initialize_and_publish_failed" : "operation_batch_initialize_failed",
+          ),
+          ...(publishError ? {
+            errorMessage: `${error?.message || String(error)}；自动发布失败：${publishError?.message || String(publishError)}`,
+          } : {}),
+        };
+      }
+      let published;
+      try {
+        published = await runners.reconciliation(draft, {
+          baseUrl,
+          context,
+          closeContext: false,
+          headless: false,
+          operationBatchCode: created.operationBatchCode,
+          publishAfterCreate: true,
+        });
+      } catch (error) {
+        return {
+          status: "update_failed",
+          operationBatchCode: created.operationBatchCode,
+          created: { ...created, status: "created_unpublished" },
+          managedResult,
+          reconciled: true,
+          ...operationBatchFailure(error, "operation_batch_publish_failed"),
+        };
+      }
+      return {
+        status: "success",
+        operationBatchCode: published.operationBatchCode || created.operationBatchCode,
+        created: published,
+        initialCreated: created,
+        managedResult,
+        reconciled: true,
+      };
+    } catch (error) {
+      if (error?.code === "OPERATION_BATCH_RECONCILIATION_REQUIRED") {
+        return {
+          status: "reconciliation_required",
+          externalBatchConfirmed: true,
+          ...operationBatchFailure(error, "OPERATION_BATCH_RECONCILIATION_REQUIRED"),
+        };
+      }
+      throw new HelperError(
+        String(error?.code || "operation_batch_reconcile_failed"),
+        error?.message || String(error),
+        Number(error?.status || 502),
+      );
+    }
+  }
+
+  async function runOperationBatchReconciliationApplication(payload = {}) {
+    const requestId = operationBatchRequestId(payload?.requestId);
+    const now = Date.now();
+    for (const [id, request] of operationBatchRequests) {
+      if (request.expiresAt <= now) operationBatchRequests.delete(id);
+    }
+    const existing = operationBatchRequests.get(requestId);
+    if (existing) return await existing.promise;
+    const promise = executeOperationBatchReconciliation(payload);
+    operationBatchRequests.set(requestId, { promise, expiresAt: now + OPERATION_BATCH_REQUEST_TTL_MS });
+    return await promise;
+  }
+
+  async function operationBatchManagedContext(payload = {}) {
+    const instruction = payload?.instruction;
+    if (!instruction?.batch || typeof instruction.batch !== "object") {
+      throw new HelperError("operation_batch_payload_invalid", "缺少有效的运营批次更新参数。", 400);
+    }
+    const baseUrl = operationConsoleBaseUrl(payload?.baseUrl);
+    await ensureChromeOnce();
+    const browser = await connectOperationBrowser();
+    const context = browser?.contexts?.()[0];
+    if (!context) {
+      throw new HelperError(
+        "operation_batch_chrome_context_missing",
+        "未取得本机专用 Chrome 登录环境，请关闭专用 Chrome 后重试。",
+        503,
+      );
+    }
+    return {
+      instruction,
+      runners: await operationBatchManagedRunners(),
+      runnerOptions: {
+        baseUrl,
+        context,
+        closeContext: false,
+        headless: false,
+      },
+    };
+  }
+
+  async function executeOperationBatchInspection(payload = {}) {
+    const { instruction, runners, runnerOptions } = await operationBatchManagedContext(payload);
+    try {
+      const snapshot = await runners.inspect(instruction, runnerOptions);
+      return {
+        status: "success",
+        snapshot,
+        checkpoints: ["opened_exact_batch", "managed_fields_read"],
+      };
+    } catch (error) {
+      throw new HelperError(
+        String(error?.code || "").trim() || "operation_batch_inspection_failed",
+        error?.message || String(error),
+        Number(error?.status || 409),
+      );
+    }
+  }
+
+  async function executeOperationBatchManagedUpdate(payload = {}) {
+    const { instruction, runners, runnerOptions } = await operationBatchManagedContext(payload);
+    try {
+      const result = await runners.update(instruction, runnerOptions);
+      return { status: "success", ...result };
+    } catch (error) {
+      let inspectedAfter = null;
+      try {
+        inspectedAfter = await runners.inspect({ batch: instruction.batch }, runnerOptions);
+      } catch {
+        // Keep the original update failure when exact readback is unavailable.
+      }
+      const desired = instruction.desiredSnapshot;
+      const expected = instruction.batch?.expectedAppliedSnapshot;
+      if (inspectedAfter && JSON.stringify(inspectedAfter) === JSON.stringify(desired)) {
+        return {
+          status: "success",
+          verified: true,
+          snapshot: inspectedAfter,
+          checkpoints: ["reconciled_exact_readback"],
+        };
+      }
+      const unchanged = inspectedAfter
+        && JSON.stringify(inspectedAfter) === JSON.stringify(expected);
+      return {
+        status: unchanged ? "failed" : inspectedAfter ? "conflict" : "failed",
+        errorCode: String(error?.code || "").trim() || "operation_batch_update_failed",
+        errorMessage: error?.message || String(error),
+        ...(inspectedAfter ? { inspectedAfter } : {}),
+      };
+    }
+  }
+
+  async function runManagedOperationRequest(payload, operation) {
+    const requestId = operationBatchRequestId(payload?.requestId);
+    const now = Date.now();
+    for (const [id, request] of operationBatchRequests) {
+      if (request.expiresAt <= now) operationBatchRequests.delete(id);
+    }
+    const existing = operationBatchRequests.get(requestId);
+    if (existing) return await existing.promise;
+    const promise = operation(payload);
+    operationBatchRequests.set(requestId, {
+      promise,
+      expiresAt: now + OPERATION_BATCH_REQUEST_TTL_MS,
+    });
+    return await promise;
   }
 
   async function resolveCreatedChromeTab(tab, workflowUrl) {
@@ -472,6 +1222,8 @@ export function createFanweiLocalHelperServer({
         sendJson(res, 200, {
           available: supportedPlatform,
           platform,
+          helperVersion: FANWEI_LOCAL_HELPER_VERSION,
+          capabilities: FANWEI_LOCAL_HELPER_CAPABILITIES,
           ...status,
         }, origin);
         return;
@@ -531,6 +1283,61 @@ export function createFanweiLocalHelperServer({
           throw scoreStampError(error);
         }
         sendJson(res, 200, { ok: true, stampApplication }, origin);
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/operation-batch/create") {
+        const payload = await readJsonBody(req);
+        const operationBatch = await runOperationBatchApplication(payload);
+        sendJson(res, 200, { ok: true, operationBatch }, origin);
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/operation-batch/reconcile") {
+        const payload = await readJsonBody(req);
+        const operationBatch = await runOperationBatchReconciliationApplication(payload);
+        sendJson(res, 200, { ok: true, operationBatch }, origin);
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/operation-batch/inspect") {
+        const payload = await readJsonBody(req);
+        const operationBatchInspection = await runManagedOperationRequest(
+          payload,
+          executeOperationBatchInspection,
+        );
+        sendJson(res, 200, { ok: true, operationBatchInspection }, origin);
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/operation-batch/update") {
+        const payload = await readJsonBody(req);
+        const operationBatchUpdate = await runManagedOperationRequest(
+          payload,
+          executeOperationBatchManagedUpdate,
+        );
+        sendJson(res, 200, { ok: true, operationBatchUpdate }, origin);
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/operation-archive/inspect") {
+        const payload = await readJsonBody(req);
+        const operationArchiveInspection = await runManagedOperationRequest(
+          payload,
+          (value) => executeOperationArchive(value, "inspect"),
+        );
+        sendJson(res, 200, { ok: true, operationArchiveInspection }, origin);
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/operation-archive/submit") {
+        const payload = await readJsonBody(req, { maxBytes: 5 * 1024 * 1024 });
+        const operationArchiveSubmission = await runManagedOperationRequest(
+          payload,
+          (value) => executeOperationArchive(value, "submit"),
+        );
+        sendJson(res, 200, { ok: true, operationArchiveSubmission }, origin);
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/operation-content/sync") {
+        const payload = await readJsonBody(req);
+        const operationContentSync = await runManagedOperationRequest(payload, executeOperationContent);
+        sendJson(res, 200, { ok: true, operationContentSync }, origin);
         return;
       }
 

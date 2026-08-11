@@ -8,6 +8,14 @@ function compactText(value) {
   return text(value).replace(/\s+/g, "");
 }
 
+export const DEFAULT_OPERATION_CONSOLE_BASE_URL = "https://dashboard.ata.net.cn";
+
+export function operationConsoleBatchListUrl(options = {}) {
+  const env = options.env || process.env;
+  const baseUrl = text(options.baseUrl || env.OPERATION_CONSOLE_BASE_URL || DEFAULT_OPERATION_CONSOLE_BASE_URL);
+  return `${baseUrl.replace(/\/$/, "")}/batch/batchList`;
+}
+
 function draftValue(draft, key) {
   return text(draft?.fields?.[key]?.value);
 }
@@ -28,8 +36,6 @@ const operationFieldIds = new Map([
   ["备注", "memo"],
 ]);
 
-export const OPERATION_BATCH_RECONCILIATION_REQUIRED = "OPERATION_BATCH_RECONCILIATION_REQUIRED";
-
 export function operationFieldId(label) {
   return operationFieldIds.get(text(label)) || "";
 }
@@ -42,6 +48,8 @@ export function operationDateTitle(value) {
 
 export function operationServiceButtonLabels(fields = {}) {
   const labels = [];
+  const contentService = text(fields.contentService);
+  if (contentService && !/(不配置|不需要)/.test(contentService)) labels.push("内容");
   if (text(fields.serviceExam)) labels.push("考试");
   const personnel = text(fields.servicePersonnel);
   if (personnel && !personnel.includes("不需要")) labels.push("人员");
@@ -50,6 +58,10 @@ export function operationServiceButtonLabels(fields = {}) {
 
 export function operationConfigServiceSelections(fields = {}) {
   const selections = [];
+  const contentService = text(fields.contentService);
+  if (contentService && !/(不配置|不需要)/.test(contentService)) {
+    selections.push({ category: "内容", option: contentService });
+  }
   const serviceExam = text(fields.serviceExam);
   const servicePersonnel = text(fields.servicePersonnel);
   if (serviceExam) selections.push({ category: "考试", option: serviceExam });
@@ -91,16 +103,8 @@ export function operationConsoleNeedsLogin(urlValue = "") {
   return value.includes("/oauth2/authorize") || value.includes("/loginwaiting") || value.includes("/login");
 }
 
-function operationConsoleOriginMatches(urlValue, batchListUrl) {
-  try {
-    return new URL(text(urlValue)).origin === new URL(text(batchListUrl)).origin;
-  } catch {
-    return false;
-  }
-}
-
 export function operationConsoleLoginMessage(minutes) {
-  return `运营控制台需要登录。请在自动化浏览器中完成登录，系统会等待最多 ${minutes} 分钟；登录完成后会继续当前批次操作。`;
+  return `运营控制台需要登录。请在自动化浏览器中完成登录，系统会等待最多 ${minutes} 分钟；登录完成后会继续创建并发布批次。`;
 }
 
 export function operationTaskSearchInputSelector() {
@@ -115,6 +119,10 @@ export function operationDropdownValueCandidates(label, value) {
   const normalizedLabel = text(label);
   const normalizedValue = text(value);
   if (!normalizedValue) return [];
+  if (normalizedLabel === "业务部归属"
+    && (normalizedValue.includes("办事处") || normalizedValue.includes("代表处"))) {
+    return [normalizedValue, "地方业务中心"];
+  }
   const aliases = {
     结算依据: {
       按报名科次结算: ["按开考科次结算"],
@@ -127,49 +135,19 @@ export function operationBatchCodeFromText(value) {
   return text(value).match(/\b[A-Z]{3}\d{6}\b/)?.[0] || "";
 }
 
-export function operationBatchDetailIdentity(urlValue, batchListUrl) {
-  try {
-    const url = new URL(text(urlValue));
-    const expectedOrigin = new URL(text(batchListUrl)).origin;
-    const batchGuid = text(url.searchParams.get("batch_guid"));
-    if (url.pathname !== "/batch/batchDetail"
-      || url.origin !== expectedOrigin
-      || !batchGuid) return null;
-    return { detailUrl: url.toString(), batchGuid };
-  } catch {
-    return null;
-  }
-}
-
-export function operationBatchListResultFromRows(rowTexts, batchName, detailUrl) {
-  const normalizedName = text(batchName);
-  if (!normalizedName) {
-    throw reconciliationRequiredError(new Error("批次名称为空，无法确认唯一批次代码"));
-  }
-  const matchingRows = (rowTexts || [])
-    .map((rowValue) => Array.isArray(rowValue)
-      ? rowValue.map((cell) => text(cell))
-      : String(rowValue ?? "").split(/\t|\r?\n/).map((cell) => text(cell)))
-    .filter((cells) => cells.some((cell) => cell === normalizedName));
-  const codes = matchingRows.length === 1
-    ? matchingRows[0].flatMap((cell) => cell.match(/\b[A-Z]{3}\d{6}\b/g) || [])
-    : [];
-  if (matchingRows.length !== 1 || codes.length !== 1) {
-    throw reconciliationRequiredError(new Error("批次列表存在零个或多个批次代码或匹配行，无法确认唯一批次代码"));
-  }
-  return {
-    operationBatchCode: codes[0],
-    batchGuid: "",
-    detailUrl: text(detailUrl),
-    status: "created_unpublished",
-  };
+function reconciliationRequiredError(cause) {
+  const error = new Error(cause?.message || String(cause || "运营批次需要人工回查确认"));
+  error.code = "OPERATION_BATCH_RECONCILIATION_REQUIRED";
+  error.status = 409;
+  if (cause && cause !== error) error.cause = cause;
+  return error;
 }
 
 async function clickByText(page, textValue) {
   await page.getByText(textValue, { exact: false }).first().click();
 }
 
-export async function formItemByLabel(page, label) {
+async function formItemByLabel(page, label) {
   const labelNode = page.locator(`label[title^="${label}"]`).first();
   await labelNode.waitFor({ state: "visible", timeout: 30000 });
   return labelNode.locator("xpath=ancestor::*[contains(@class,'ant-form-item')][1]");
@@ -220,7 +198,7 @@ async function chooseDropdownValue(page, label, value) {
       await page.keyboard.press("Escape").catch(() => {});
     }
   }
-  throw lastError || new Error(`下拉选项不存在：${label}=${value}`);
+  throw new Error(`运营控制台下拉选项不存在：${label}=${value}`, lastError ? { cause: lastError } : undefined);
 }
 
 async function chooseDateRange(page, startDate, endDate) {
@@ -306,674 +284,447 @@ async function selectOperationTask(page, serial) {
   await modal.getByRole("button", { name: /确\s*定/ }).click();
 }
 
-export async function waitForOperationBatchConfirmation(page, draft, options = {}) {
-  const timeout = Number(options.confirmationWaitMs || 30000);
-  const serial = draftValue(draft, "operationTaskSerial");
-  const batchName = draftValue(draft, "batchName");
-  const modals = page.locator(".ant-modal:visible");
-  const modal = modals.last();
-  await modal.waitFor({ state: "visible", timeout });
-  const modalCount = await modals.count();
-  if (modalCount !== 1) {
-    throw new Error(`运营批次最终确认页必须唯一，实际 ${modalCount} 个`);
-  }
-  await modal.getByText(serial, { exact: true }).waitFor({ state: "visible", timeout });
-  await modal.getByText(batchName, { exact: true }).waitFor({ state: "visible", timeout });
-  const completeButton = modal.getByRole("button", { name: /^完\s*成$/ });
-  await completeButton.waitFor({ state: "visible", timeout });
-  const completeButtonCount = await completeButton.count();
-  if (completeButtonCount !== 1) {
-    throw new Error(`运营批次最终确认页“完成”按钮必须唯一，实际 ${completeButtonCount} 个`);
-  }
-  return completeButton;
-}
-
-export async function ensureBatchListReady(page, batchListUrl, options = {}) {
+async function ensureBatchListReady(page, batchListUrl, options = {}) {
   const loginWaitMinutes = Number(options.loginWaitMinutes || process.env.OPERATION_CONSOLE_LOGIN_WAIT_MINUTES || 10);
   const waitMs = Math.max(1, loginWaitMinutes) * 60 * 1000;
   const createButton = page.getByRole("button", { name: /创建批次/ });
-  let ready = false;
   try {
     await createButton.waitFor({ state: "visible", timeout: 10000 });
-    ready = true;
+    return;
   } catch {}
 
-  if (!ready) {
-    const currentUrl = page.url();
-    if (operationConsoleNeedsLogin(currentUrl)) {
-      // Keep the headed browser open so the user can finish SSO login manually.
-      await page.waitForURL((url) => !operationConsoleNeedsLogin(String(url)), { timeout: waitMs }).catch(() => {
-        throw new Error(operationConsoleLoginMessage(loginWaitMinutes));
-      });
-    } else if (!operationConsoleOriginMatches(currentUrl, batchListUrl)) {
-      throw new Error(`未找到“创建批次”按钮，当前页面：${page.url()}`);
-    }
-
-    await page.goto(batchListUrl, { waitUntil: "domcontentloaded" });
-    await createButton.waitFor({ state: "visible", timeout: 30000 });
+  if (!operationConsoleNeedsLogin(page.url())) {
+    throw new Error(`未找到“创建批次”按钮，当前页面：${page.url()}`);
   }
-  assertOperationBatchListPage(page, batchListUrl);
+
+  // Keep the headed browser open so the user can finish SSO login manually.
+  await page.waitForURL((url) => !operationConsoleNeedsLogin(String(url)), { timeout: waitMs }).catch(() => {
+    throw new Error(operationConsoleLoginMessage(loginWaitMinutes));
+  });
+  await page.goto(batchListUrl, { waitUntil: "domcontentloaded" });
+  await createButton.waitFor({ state: "visible", timeout: 30000 });
 }
 
-function operationBatchListPageMatches(urlValue, batchListUrl) {
+async function operationConsolePage(context, batchListUrl) {
+  const pages = typeof context?.pages === "function" ? context.pages() : [];
+  let expectedOrigin = "";
   try {
-    const actual = new URL(text(urlValue));
-    const expected = new URL(text(batchListUrl));
-    return actual.origin === expected.origin && actual.pathname === expected.pathname;
-  } catch {
-    return false;
-  }
-}
-
-function assertOperationBatchListPage(page, batchListUrl) {
-  if (!operationBatchListPageMatches(page.url(), batchListUrl)) {
-    throw reconciliationRequiredError(new Error(`批次列表最终地址不可信：${page.url()}`));
-  }
-}
-
-function operationBatchListEndpoint(urlValue, pageUrl) {
-  const pathname = new URL(urlValue, pageUrl).pathname;
-  return /^\/(?:api\/)?batch\/(?:list|query|search|page|getBatchList|get_batch_list|queryBatchList|batchList)\/?$/i
-    .test(pathname);
-}
-
-function operationBatchSearchValues(urlValue, postData, pageUrl) {
-  const acceptedFields = new Set(["batchName", "batch_name", "condition"]);
-  const values = [];
-  const url = new URL(urlValue, pageUrl);
-  for (const [key, value] of url.searchParams) {
-    if (acceptedFields.has(key)) values.push(text(value));
-  }
-  const body = String(postData ?? "").trim();
-  if (!body) return values;
-  try {
-    const parsed = JSON.parse(body);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      for (const [key, value] of Object.entries(parsed)) {
-        if (acceptedFields.has(key)) values.push(text(value));
-      }
-    }
-  } catch {
-    for (const [key, value] of new URLSearchParams(body)) {
-      if (acceptedFields.has(key)) values.push(text(value));
-    }
-  }
-  return values;
-}
-
-export function operationBatchTableResponseMatches(response, pageUrl, options = {}) {
-  try {
-    const request = response.request();
-    const resourceType = request.resourceType();
-    const pageOrigin = new URL(pageUrl).origin;
-    const responseUrl = response.url();
-    const requestUrl = request.url?.() || responseUrl;
-    const method = text(request.method?.()).toUpperCase();
-    if ((resourceType !== "xhr" && resourceType !== "fetch")
-      || (method !== "GET" && method !== "POST")
-      || new URL(responseUrl, pageUrl).origin !== pageOrigin
-      || new URL(requestUrl, pageUrl).origin !== pageOrigin
-      || !operationBatchListEndpoint(responseUrl, pageUrl)
-      || !operationBatchListEndpoint(requestUrl, pageUrl)) {
+    expectedOrigin = new URL(batchListUrl).origin;
+  } catch {}
+  const isExpectedConsolePage = (candidate) => {
+    const currentUrl = text(candidate?.url?.());
+    if (!currentUrl) return false;
+    try {
+      return new URL(currentUrl).origin === expectedOrigin;
+    } catch {
       return false;
     }
-    const expectedBatchName = text(options.expectedBatchName);
-    if (!expectedBatchName) return true;
-    return operationBatchSearchValues(requestUrl, request.postData?.(), pageUrl)
-      .some((value) => value === expectedBatchName);
-  } catch {
-    return false;
-  }
-}
-
-export async function operationBatchTableRows(page) {
-  const rows = await page.locator("tbody tr").all();
-  return Promise.all(rows.map(async (row) => (
-    (await row.locator("td").allInnerTexts()).map((cell) => text(cell))
-  )));
-}
-
-async function operationBatchCardEntries(page) {
-  const cards = await page.locator(".ant-list:has(.same-batch-title) .ant-list-item").all();
-  return Promise.all(cards.map(async (card) => {
-    const code = card.locator(":scope > div:first-child > div:first-child > span:first-child");
-    const name = card.locator(".same-batch-title");
-    const codeCount = await code.count();
-    const nameCount = await name.count();
-    if (codeCount !== 1 || nameCount !== 1) {
-      throw reconciliationRequiredError(new Error(
-        `批次卡片必须有唯一代码和名称节点，实际代码 ${codeCount} 个、名称 ${nameCount} 个`,
-      ));
-    }
-    return {
-      locator: card,
-      cells: [text(await code.innerText()), text(await name.innerText())],
-    };
-  }));
-}
-
-export async function openExactOperationBatchCard(page, batchCode) {
-  const normalizedCode = text(batchCode);
-  const matches = (await operationBatchCardEntries(page))
-    .filter((card) => card.cells[0] === normalizedCode);
-  if (matches.length !== 1) {
-    throw reconciliationRequiredError(new Error(
-      `批次代码 ${normalizedCode} 精确匹配到 ${matches.length} 张卡片`,
-    ));
-  }
-  const listUrl = new URL(page.url());
-  const detailWait = page.waitForURL((value) => {
-    const detailUrl = new URL(String(value));
-    return detailUrl.origin === listUrl.origin
-      && detailUrl.pathname === "/batch/batchDetail"
-      && Boolean(text(detailUrl.searchParams.get("batch_guid")));
-  }, { timeout: 30000 });
-  detailWait.catch(() => {});
-  try {
-    await matches[0].locator.click();
-    await detailWait;
-    await page.waitForFunction((expectedCode) => {
-      const visible = (node) => Boolean(
-        node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length),
-      );
-      const titles = [...document.querySelectorAll(".header-title")].filter(visible);
-      if (titles.length !== 1) return false;
-      const code = titles[0].querySelector(":scope > span")?.textContent?.trim();
-      const name = titles[0].querySelector(":scope > label")?.textContent?.trim();
-      const info = titles[0].parentElement?.querySelector(".header-info");
-      const projectLinks = info
-        ? [...info.querySelectorAll(".hover-link")].filter(visible)
-        : [];
-      return code === expectedCode && Boolean(name) && projectLinks.length === 2;
-    }, normalizedCode, { timeout: 30000 });
-  } catch (error) {
-    throw reconciliationRequiredError(error);
-  }
-}
-
-export async function operationBatchListSnapshot(page) {
-  const headers = (await page.locator("thead th").allInnerTexts()).map(text);
-  const rows = await operationBatchTableRows(page);
-  const listCount = await page.locator(".ant-list:has(.same-batch-title)").count();
-  if (headers.length) {
-    if (listCount) {
-      throw reconciliationRequiredError(new Error("批次列表同时出现表格和卡片结果，无法确认唯一列表布局"));
-    }
-    return { layout: "table", headers, rows };
-  }
-  if (!listCount && await page.locator(".ant-list").count()) {
-    return { layout: "pending", headers: [], rows: [] };
-  }
-  if (listCount !== 1) {
-    throw reconciliationRequiredError(new Error(`批次卡片列表必须有唯一容器，实际 ${listCount} 个`));
-  }
-  const cards = await operationBatchCardEntries(page);
-  return {
-    layout: "cards",
-    headers: ["批次代码", "批次名称"],
-    rows: cards.map((card) => card.cells),
   };
+  const consolePage = pages.find(isExpectedConsolePage)
+    || pages.find((candidate) => operationConsoleNeedsLogin(text(candidate?.url?.())));
+  return consolePage || pages[0] || await context.newPage();
 }
 
-function operationBatchIdentityText(value) {
-  return text(value).replace(/\s+/g, " ");
-}
-
-function operationBatchSnapshotIdentities(snapshot) {
-  const codeIndex = snapshot.headers.indexOf("批次代码");
-  const nameIndex = snapshot.headers.indexOf("批次名称");
-  if (codeIndex < 0 || nameIndex < 0) return null;
-  return snapshot.rows.map((row) => [
-    operationBatchIdentityText(row[codeIndex]),
-    operationBatchIdentityText(row[nameIndex]),
-  ]);
-}
-
-async function operationBatchResponseIdentities(response) {
-  if (typeof response?.json !== "function") return null;
-  try {
-    const items = (await response.json())?.data?._items;
-    if (!Array.isArray(items) || !items.length) return null;
-    const identities = items.map((item) => [
-      operationBatchIdentityText(item?.batch_code),
-      operationBatchIdentityText(item?.batch_name),
-    ]);
-    return identities.every(([code, name]) => code && name) ? identities : null;
-  } catch {
-    return null;
+async function uniqueOperationBatchResult(page, batchName, batchCode = "") {
+  const normalizedName = text(batchName);
+  const titleMatches = page.locator(".same-batch-title:visible").filter({ hasText: normalizedName });
+  const titleCount = await titleMatches.count();
+  if (titleCount > 1) {
+    throw reconciliationRequiredError(new Error(`批次名称未找到唯一结果：${normalizedName}，实际 ${titleCount} 条`));
   }
+  if (titleCount === 1) return titleMatches.first();
+
+  let rowMatches = page.locator("tbody tr:visible").filter({ hasText: normalizedName });
+  if (batchCode) rowMatches = rowMatches.filter({ hasText: batchCode });
+  const rowCount = await rowMatches.count();
+  if (rowCount > 1) {
+    throw reconciliationRequiredError(new Error(`批次名称未找到唯一结果：${normalizedName}，实际 ${rowCount} 条`));
+  }
+  if (rowCount === 1) return rowMatches.first();
+  throw reconciliationRequiredError(new Error(`按批次名称未找到批次：${normalizedName}`));
 }
 
-async function waitForStableOperationBatchRows(page, options = {}, expectedIdentities = null) {
-  const stablePollMs = Math.max(0, Number(options.tableStablePollMs ?? 100));
-  const maxChecks = Math.max(2, Number(options.tableStableMaxChecks || 50));
+async function waitForOperationBatchListSettle(page, options = {}) {
+  const maxChecks = Math.max(2, Number(options.tableStableMaxChecks || 30));
+  const pollMs = Math.max(0, Number(options.tableStablePollMs ?? 100));
   let previousSignature = "";
   for (let attempt = 0; attempt < maxChecks; attempt += 1) {
-    const snapshot = await operationBatchListSnapshot(page);
-    if (snapshot.layout === "pending") {
-      previousSignature = "";
-      await page.waitForTimeout(stablePollMs);
-      continue;
-    }
-    if (expectedIdentities
-      && JSON.stringify(operationBatchSnapshotIdentities(snapshot)) !== JSON.stringify(expectedIdentities)) {
-      previousSignature = "";
-      await page.waitForTimeout(stablePollMs);
-      continue;
-    }
-    const signature = JSON.stringify(snapshot);
-    if (attempt > 0 && signature === previousSignature) return snapshot.rows;
+    const loadingCount = await page.locator(".ant-spin-spinning").count();
+    const bodyText = await page.locator("body").innerText().catch(() => "");
+    const signature = bodyText.replace(/\s+/g, " ").trim();
+    if (!loadingCount && attempt > 0 && signature === previousSignature) return;
     previousSignature = signature;
-    await page.waitForTimeout(stablePollMs);
+    await page.waitForTimeout(pollMs);
   }
   throw reconciliationRequiredError(new Error("批次列表在安全等待时间内未稳定，无法确认完整查询结果"));
 }
 
-async function waitForStableExactOperationBatchSearch(page, expectedBatchName, options = {}) {
-  const stablePollMs = Math.max(0, Number(options.tableStablePollMs ?? 100));
-  const maxChecks = Math.max(2, Number(options.tableStableMaxChecks || 50));
-  const expected = operationBatchIdentityText(expectedBatchName);
-  let previousSignature = "";
-  for (let attempt = 0; attempt < maxChecks; attempt += 1) {
-    const snapshot = await operationBatchListSnapshot(page);
-    const identities = operationBatchSnapshotIdentities(snapshot);
-    const exact = identities?.filter(([code, name]) => code === expected || name === expected) || [];
-    const signature = JSON.stringify(snapshot);
-    if (snapshot.rows.length === 1 && exact.length === 1
-      && attempt > 0 && signature === previousSignature) {
-      return snapshot.rows;
-    }
-    previousSignature = snapshot.layout === "pending" ? "" : signature;
-    await page.waitForTimeout(stablePollMs);
-  }
-  throw reconciliationRequiredError(new Error(
-    `批次列表未稳定显示唯一精确结果：${expected}`,
-  ));
-}
-
-export async function performOperationBatchTableAction(page, action, options = {}, responseOptions = {}) {
-  const batchListUrl = text(responseOptions.batchListUrl);
-  assertOperationBatchListPage(page, batchListUrl);
-  const loading = page
-    .locator(".ant-table-wrapper .ant-spin-spinning, .ant-table .ant-spin-spinning")
-    .first();
-  const responseWait = page.waitForResponse(
-    (response) => operationBatchTableResponseMatches(response, batchListUrl, responseOptions),
-    { timeout: Number(options.batchListResponseWaitMs || 30000) },
-  );
-  responseWait.catch(() => {});
-  try {
-    await action();
-    const expectedBatchName = text(responseOptions.expectedBatchName);
-    const visibleProof = expectedBatchName
-      ? waitForStableExactOperationBatchSearch(page, expectedBatchName, options)
-        .then((rows) => ({ rows }))
-        .catch(() => new Promise(() => {}))
-      : new Promise(() => {});
-    const outcome = await Promise.race([
-      responseWait.then((response) => ({ response })),
-      visibleProof,
-    ]);
-    if (outcome.rows) {
-      assertOperationBatchListPage(page, batchListUrl);
-      return outcome.rows;
-    }
-    const response = outcome.response;
-    if (typeof response.ok === "function" && !response.ok()) {
-      throw new Error(`批次列表查询请求失败：${response.url()}`);
-    }
-    const responseError = await response.finished();
-    if (responseError) throw responseError;
-    await loading.waitFor({ state: "hidden", timeout: Number(options.batchListLoadingWaitMs || 30000) });
-    const expectedIdentities = await operationBatchResponseIdentities(response);
-    const rows = await waitForStableOperationBatchRows(page, options, expectedIdentities);
-    assertOperationBatchListPage(page, batchListUrl);
-    return rows;
-  } catch (error) {
-    throw reconciliationRequiredError(error);
-  }
-}
-
-export async function operationBatchActivePage(page) {
-  const activeLocator = page.locator(".ant-pagination-item-active");
-  if (await activeLocator.count() !== 1) {
-    throw reconciliationRequiredError(new Error("批次列表缺少唯一的 Ant 当前页标记，无法证明分页进度"));
-  }
-  const active = activeLocator.first();
-  const value = text(await active.getAttribute("title")) || text(await active.innerText());
-  if (!/^\d+$/.test(value) || Number(value) < 1) {
-    throw reconciliationRequiredError(new Error("批次列表 Ant 当前页无有效页码，无法证明分页进度"));
-  }
-  return Number(value);
-}
-
-export async function advanceOperationBatchListPage(
-  page,
-  currentPage,
-  previousPageRows,
-  batchListUrl,
-  options = {},
-) {
-  const maxPages = Math.max(1, Number(options.maxBatchListPages || 100));
-  assertOperationBatchListPage(page, batchListUrl);
-  const pagination = page.locator(".ant-pagination");
-  const paginationCount = await pagination.count();
-  if (paginationCount === 0) return null;
-  if (paginationCount !== 1) {
-    throw reconciliationRequiredError(new Error("批次列表存在多个 Ant 分页控件，无法证明结果完整"));
-  }
-  const nextLocator = page.locator(".ant-pagination .ant-pagination-next");
-  if (await nextLocator.count() !== 1) {
-    throw reconciliationRequiredError(new Error("批次列表分页缺少唯一的 Ant 下一页控件，无法证明结果完整"));
-  }
-  const next = nextLocator.first();
-  const activePage = await operationBatchActivePage(page);
-  if (activePage !== currentPage) {
-    throw reconciliationRequiredError(new Error(`批次列表当前页 ${activePage} 与预期页 ${currentPage} 不一致，无法证明分页连续`));
-  }
-  const classes = text(await next.getAttribute("class"));
-  const ariaDisabled = text(await next.getAttribute("aria-disabled"));
-  if (classes.split(/\s+/).includes("ant-pagination-disabled") || ariaDisabled === "true") return null;
-  if (currentPage >= maxPages) {
-    throw reconciliationRequiredError(new Error(`批次列表超过安全分页上限 ${maxPages}，无法确认完整结果`));
-  }
-  const control = next.locator("button, a").first();
-  if (await control.count() !== 1) {
-    throw reconciliationRequiredError(new Error("批次列表下一页控件不可操作，无法证明结果完整"));
-  }
-  const rows = await performOperationBatchTableAction(
-    page,
-    () => control.evaluate((element) => element.click()),
-    options,
-    { batchListUrl },
-  );
-  const nextActivePage = await operationBatchActivePage(page);
-  if (nextActivePage !== activePage + 1) {
-    throw reconciliationRequiredError(new Error(`批次列表点击下一页后未推进：仍为第 ${nextActivePage} 页`));
-  }
-  if (JSON.stringify(rows) === JSON.stringify(previousPageRows)) {
-    throw reconciliationRequiredError(new Error("批次列表点击下一页后行数据未变化，无法证明已读取新页"));
-  }
-  return rows;
-}
-
-export async function collectOperationBatchListPages(page, initialRows, batchListUrl, options = {}) {
-  const pages = [initialRows];
-  let rows = initialRows;
-  for (let pageNumber = 1; ; pageNumber += 1) {
-    rows = await advanceOperationBatchListPage(page, pageNumber, rows, batchListUrl, options);
-    if (!rows) return pages;
-    pages.push(rows);
-  }
-}
-
-async function collectOperationBatchListRows(page, initialRows, batchListUrl, options = {}) {
-  return (await collectOperationBatchListPages(page, initialRows, batchListUrl, options)).flat();
-}
-
-export async function startOperationBatchListSearch(page, batchListUrl, query, options = {}) {
-  const normalizedQuery = text(query);
-  if (!normalizedQuery) {
-    throw reconciliationRequiredError(new Error("批次列表查询值为空"));
-  }
-  const loginWaitMinutes = Number(
-    options.loginWaitMinutes
-    || process.env.OPERATION_CONSOLE_LOGIN_WAIT_MINUTES
-    || 10,
-  );
-  const initialResponseWait = page.waitForResponse(
-    (response) => operationBatchTableResponseMatches(response, batchListUrl),
-    {
-      timeout: Math.max(30_000, Math.max(1, loginWaitMinutes) * 60 * 1000 + 30_000),
-    },
-  );
-  initialResponseWait.catch(() => {});
+async function findCreatedBatchFromList(page, batchListUrl, batchName, options = {}) {
+  const normalizedName = text(batchName);
+  if (!normalizedName) return null;
   await page.goto(batchListUrl, { waitUntil: "domcontentloaded" });
   await ensureBatchListReady(page, batchListUrl, options);
-  const initialResponse = await initialResponseWait;
-  if (typeof initialResponse.ok === "function" && !initialResponse.ok()) {
-    throw reconciliationRequiredError(new Error(`批次列表初始请求失败：${initialResponse.url()}`));
-  }
-  const initialResponseError = await initialResponse.finished();
-  if (initialResponseError) throw reconciliationRequiredError(initialResponseError);
-  await waitForStableOperationBatchRows(
-    page,
-    options,
-    await operationBatchResponseIdentities(initialResponse),
-  );
-  const searchInput = page.locator("input[placeholder*=批次代码], input[placeholder*=批次名称]").first();
-  await searchInput.waitFor({ state: "visible", timeout: 30000 });
-  await searchInput.fill(normalizedQuery);
-  const rows = await performOperationBatchTableAction(
-    page,
-    () => searchInput.press("Enter"),
-    options,
-    { batchListUrl, expectedBatchName: normalizedQuery },
-  );
-  const snapshot = await operationBatchListSnapshot(page);
-  if (JSON.stringify(snapshot.rows) !== JSON.stringify(rows)) {
-    throw reconciliationRequiredError(new Error("批次列表稳定结果与最终可见结果不一致"));
-  }
-  return { ...snapshot, rows };
-}
-
-export async function searchOperationBatchListPages(page, batchListUrl, query, options = {}) {
-  const { headers, rows } = await startOperationBatchListSearch(page, batchListUrl, query, options);
-  return {
-    headers,
-    pages: await collectOperationBatchListPages(page, rows, batchListUrl, options),
-  };
-}
-
-export function operationBatchExactCodeLocation(result = {}, batchCode) {
-  const normalizedCode = text(batchCode);
-  const codeColumns = (result.headers || [])
-    .map((header, index) => ({ header: text(header), index }))
-    .filter((item) => item.header === "批次代码");
-  if (codeColumns.length !== 1) {
-    throw reconciliationRequiredError(new Error(
-      `批次列表必须有唯一“批次代码”列，实际 ${codeColumns.length} 列`,
-    ));
-  }
-  const codeColumn = codeColumns[0].index;
-  const matches = (result.pages || []).flatMap((rows, pageIndex) =>
-    (rows || []).map((cells, rowIndex) => ({
-      cells: (cells || []).map(text),
-      pageNumber: pageIndex + 1,
-      rowNumber: rowIndex + 1,
-    })))
-    .filter((row) => row.cells[codeColumn] === normalizedCode);
-  if (matches.length !== 1) {
-    throw reconciliationRequiredError(new Error(
-      `批次代码 ${normalizedCode} 精确匹配到 ${matches.length} 行`,
-    ));
-  }
-  return {
-    pageNumber: matches[0].pageNumber,
-    rowNumber: matches[0].rowNumber,
-    codeColumn,
-  };
-}
-
-export async function findCreatedBatchFromList(page, batchListUrl, batchName, options = {}) {
-  const normalizedName = text(batchName);
-  if (!normalizedName) {
-    throw reconciliationRequiredError(new Error("批次名称为空，无法查询运营批次"));
-  }
-  await page.goto(batchListUrl, { waitUntil: "domcontentloaded" });
-  assertOperationBatchListPage(page, batchListUrl);
-  await page.getByRole("button", { name: /创建批次/ }).waitFor({ state: "visible", timeout: 30000 });
+  await waitForOperationBatchListSettle(page, options);
   const searchInput = page.locator("input[placeholder*=批次代码], input[placeholder*=批次名称]").first();
   await searchInput.waitFor({ state: "visible", timeout: 30000 });
   await searchInput.fill(normalizedName);
-  const firstPageRows = await performOperationBatchTableAction(
-    page,
-    () => searchInput.press("Enter"),
-    options,
-    { batchListUrl, expectedBatchName: normalizedName },
-  );
-  const allRows = await collectOperationBatchListRows(page, firstPageRows, batchListUrl, options);
-  return operationBatchListResultFromRows(allRows, normalizedName, batchListUrl);
+  await searchInput.press("Enter");
+  await page.waitForFunction((expectedName) => document.body?.innerText?.includes(expectedName), normalizedName, { timeout: 30000 });
+  const target = await uniqueOperationBatchResult(page, normalizedName, text(options.operationBatchCode));
+  const targetText = await target.innerText().catch(() => "");
+  const bodyText = await page.locator("body").innerText();
+  const code = operationBatchCodeFromText(targetText) || operationBatchCodeFromText(bodyText);
+  if (!code) return null;
+  return {
+    operationBatchCode: code,
+    batchName: normalizedName,
+    batchGuid: "",
+    detailUrl: page.url(),
+    status: "created_unpublished",
+  };
 }
 
-export async function resolveSubmittedOperationBatch(page, options = {}) {
-  const detailCodeWaitMs = Number(options.detailCodeWaitMs || 60000);
-  const detail = operationBatchDetailIdentity(page.url(), options.batchListUrl);
-  if (detail) {
-    try {
-      await page.waitForFunction(
-        () => /\b[A-Z]{3}\d{6}\b/.test(document.body?.innerText || ""),
-        null,
-        { timeout: detailCodeWaitMs },
-      );
-      const bodyText = await page.locator("body").innerText();
-      const hasExactBatchName = String(bodyText ?? "")
-        .split(/\r?\n/)
-        .some((line) => text(line) === text(options.batchName));
-      const codes = String(bodyText ?? "").match(/\b[A-Z]{3}\d{6}\b/g) || [];
-      if (hasExactBatchName && codes.length === 1) {
-        return {
-          operationBatchCode: codes[0],
-          batchGuid: detail.batchGuid,
-          detailUrl: detail.detailUrl,
-          status: "created_unpublished",
-        };
-      }
-    } catch {}
+async function operationBatchActionButton(page, labelPattern, roleName, description) {
+  const candidates = [];
+  if (typeof page.locator === "function") {
+    const modal = page.locator(".ant-modal:visible").last();
+    candidates.push(modal.locator("button").filter({ hasText: labelPattern }));
+    candidates.push(page.locator("button:visible").filter({ hasText: labelPattern }));
+    candidates.push(page.locator('[role="button"]:visible').filter({ hasText: labelPattern }));
   }
-  const findFromList = options.findFromList || ((batchListUrl, batchName) => findCreatedBatchFromList(page, batchListUrl, batchName, options));
-  const maxAttempts = Math.max(1, Number(options.submittedListLookupMaxAttempts || 3));
-  const retryMs = Math.max(0, Number(options.submittedListLookupRetryMs ?? 1000));
+  if (typeof page.getByRole === "function") {
+    candidates.push(page.getByRole("button", { name: roleName, exact: true }));
+  }
+
   let lastError;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  for (const candidate of candidates) {
     try {
-      const result = await findFromList(options.batchListUrl, options.batchName);
-      if (result) return result;
-      lastError = reconciliationRequiredError(
-        new Error("创建已提交，但详情页和批次列表均未找到批次代码"),
-      );
+      const count = await candidate.count();
+      if (count === 1) {
+        await candidate.waitFor({ state: "visible", timeout: 30000 });
+        return candidate;
+      }
+      if (count > 1) {
+        lastError = new Error(`${description}数量异常：${count}`);
+      }
     } catch (error) {
-      if (error?.code !== OPERATION_BATCH_RECONCILIATION_REQUIRED) throw error;
       lastError = error;
     }
-    if (attempt + 1 < maxAttempts) {
-      await new Promise((resolve) => setTimeout(resolve, retryMs));
-    }
   }
-  throw lastError;
+
+  const delayedCandidate = candidates[0];
+  if (delayedCandidate && typeof delayedCandidate.waitFor === "function") {
+    await delayedCandidate.waitFor({ state: "visible", timeout: 30000 });
+    const count = await delayedCandidate.count();
+    if (count === 1) return delayedCandidate;
+    throw new Error(`${description}数量异常：${count}`);
+  }
+  if (lastError) throw lastError;
+  throw new Error(`未找到${description}`);
 }
 
-function reconciliationRequiredError(error) {
-  const wrapped = error instanceof Error ? error : new Error(String(error));
-  wrapped.code = OPERATION_BATCH_RECONCILIATION_REQUIRED;
-  wrapped.status = 409;
-  return wrapped;
-}
-
-export async function launchOperationBatchContext(userDataDir, headless, options = {}) {
-  if (typeof options.launchPersistentContext === "function") {
-    return options.launchPersistentContext(userDataDir, { headless, viewport: null });
-  }
-  const { chromium } = await import("playwright").catch((error) => {
-    const message = error?.code === "ERR_MODULE_NOT_FOUND"
-      ? "未安装 Playwright，不能启动运营控制台浏览器自动化。请先执行 npm install。"
-      : (error instanceof Error ? error.message : String(error));
-    throw new Error(message);
+export async function assignFirstOperationProjectGroup(page, options = {}) {
+  const modal = page.locator(".ant-modal:visible")
+    .filter({ hasText: "新项目指定项目组" });
+  await modal.waitFor({
+    state: "visible",
+    timeout: Number(options.projectGroupDialogWaitMs || 30000),
   });
-  return chromium.launchPersistentContext(userDataDir, { headless, viewport: null });
-}
+  const modalCount = await modal.count();
+  if (modalCount !== 1) {
+    throw new Error(`“新项目指定项目组”弹窗数量异常：${modalCount}`);
+  }
 
-export async function runWithOperationBatchContext(context, operation, options = {}) {
-  let result;
-  let primaryError;
-  try {
-    const page = context.pages()[0] || await context.newPage();
-    result = await operation(page);
-  } catch (error) {
-    primaryError = error;
-  }
-  let closeError;
-  try {
-    await context.close();
-  } catch (error) {
-    closeError = error;
-  }
-  if (primaryError) throw primaryError;
-  if (closeError) {
-    if (options.closeFailureRequiresReconciliation?.()) {
-      throw reconciliationRequiredError(closeError);
+  const plusCandidates = [
+    modal.locator(".anticon-plus:visible, [data-icon='plus']:visible"),
+    modal.locator("[aria-label*='plus']:visible"),
+    modal.locator("button:visible, [role='button']:visible, a:visible")
+      .filter({ hasText: /^\s*\+\s*$/ }),
+  ];
+  let firstAddButton = null;
+  for (const candidate of plusCandidates) {
+    if (await candidate.count()) {
+      firstAddButton = candidate.first();
+      break;
     }
-    if (!options.preserveResultOnCloseFailure) throw closeError;
   }
-  return result;
-}
+  if (!firstAddButton) throw new Error("“新项目指定项目组”弹窗中未找到可选项目组的 + 按钮");
+  if (typeof firstAddButton.scrollIntoViewIfNeeded === "function") {
+    await firstAddButton.scrollIntoViewIfNeeded();
+  }
+  await firstAddButton.click();
 
-export async function runOperationBatchCreation(draft, options = {}) {
-  const baseUrl = text(options.baseUrl || process.env.OPERATION_CONSOLE_BASE_URL || "http://172.16.18.198:8020");
-  const userDataDir = text(options.userDataDir || process.env.OPERATION_CONSOLE_USER_DATA_DIR || path.join(process.cwd(), ".easy_exam_runtime", "operation-console-profile"));
-  const headless = options.headless ?? process.env.OPERATION_CONSOLE_HEADLESS === "1";
-  const context = await launchOperationBatchContext(userDataDir, headless, options);
-  let submissionStarted = false;
-  return runWithOperationBatchContext(context, async (page) => {
-    try {
-      const batchListUrl = `${baseUrl.replace(/\/$/, "")}/batch/batchList`;
-      await page.goto(batchListUrl, { waitUntil: "domcontentloaded" });
-      await ensureBatchListReady(page, batchListUrl, options);
-      await page.getByRole("button", { name: /创建批次/ }).click();
-      await page.getByRole("button", { name: /选\s*择/ }).click();
-      const serial = draftValue(draft, "operationTaskSerial");
-      if (!serial) throw new Error("缺少考试需求任务单流水号");
-      await selectOperationTask(page, serial);
-      await assertSelectedTaskMatchesDraft(page, draft, options);
-
-      await chooseDropdownValue(page, "业务部归属", draftValue(draft, "businessDepartment"));
-      await fillInputNearLabel(page, "批次名称", draftValue(draft, "batchName"));
-      await chooseDropdownValue(page, "项目部归属", draftValue(draft, "projectDepartment"));
-      await chooseDateRange(page, draftValue(draft, "examStartDate"), draftValue(draft, "examEndDate"));
-      for (const selection of operationConfigServiceSelections({
-        serviceExam: draftValue(draft, "serviceExam"),
-        servicePersonnel: draftValue(draft, "servicePersonnel"),
-      })) {
-        await chooseConfigService(page, selection);
-      }
-      await page.getByRole("button", { name: /下一步/ }).click();
-
-      await fillInputNearLabel(page, "预估总考量", draftValue(draft, "estimatedTotalSubjectCount"));
-      await fillInputNearLabel(page, "预估单场最大科次数", draftValue(draft, "estimatedMaxSubjectCount"));
-      await fillInputNearLabel(page, "预估城市数", draftValue(draft, "estimatedCityCount"));
-      await chooseDropdownValue(page, "系统类型", draftValue(draft, "systemType"));
-      await chooseDropdownValue(page, "使用考站情况", draftValue(draft, "stationUsage"));
-      await chooseDropdownValue(page, "编排服务", draftValue(draft, "arrangementService"));
-      await chooseDropdownValue(page, "在线结算编排来源", draftValue(draft, "onlineSettlementArrangementSource"));
-      await chooseDropdownValue(page, "结算依据", draftValue(draft, "billingBasis"));
-      await fillInputNearLabel(page, "备注", draftValue(draft, "remark"));
-      await page.getByRole("button", { name: /下一步/ }).click();
-      const completeButton = await waitForOperationBatchConfirmation(page, draft, options);
-      submissionStarted = true;
-      await completeButton.click();
-      return await resolveSubmittedOperationBatch(page, {
-        ...options,
-        batchListUrl,
-        batchName: draftValue(draft, "batchName"),
-      });
-    } catch (error) {
-      if (submissionStarted) throw reconciliationRequiredError(error);
-      throw error;
-    }
-  }, {
-    closeFailureRequiresReconciliation: () => submissionStarted,
+  const confirmButton = modal.locator("button:visible")
+    .filter({ hasText: /^\s*确\s*定\s*$/ });
+  const confirmCount = await confirmButton.count();
+  if (confirmCount !== 1) {
+    throw new Error(`“新项目指定项目组”弹窗确定按钮数量异常：${confirmCount}`);
+  }
+  await confirmButton.click();
+  await modal.waitFor({
+    state: "hidden",
+    timeout: Number(options.projectGroupConfirmWaitMs || 30000),
   });
+  return { projectGroupAssigned: true };
+}
+
+export async function clickOperationBatchComplete(page, options = {}) {
+  const completeButton = await operationBatchActionButton(
+    page,
+    /^\s*完\s*成\s*$/,
+    "完成",
+    "运营控制台最终确认页“完成”按钮",
+  );
+  if (typeof completeButton.scrollIntoViewIfNeeded === "function") {
+    await completeButton.scrollIntoViewIfNeeded();
+  }
+  await completeButton.click({ force: true });
+  if (options.assignProjectGroup === false) return { projectGroupAssigned: false };
+
+  if (/batchDetail/.test(page.url())) return { projectGroupAssigned: false };
+  const waitMs = Number(options.projectGroupDialogWaitMs || 30000);
+  const projectGroupModal = page.locator(".ant-modal:visible")
+    .filter({ hasText: "新项目指定项目组" });
+  let outcome;
+  try {
+    outcome = await Promise.any([
+      page.waitForURL(/batchDetail/, { timeout: waitMs }).then(() => "detail"),
+      projectGroupModal.waitFor({ state: "visible", timeout: waitMs }).then(() => "project_group"),
+    ]);
+  } catch {
+    throw new Error("点击“完成”后既未进入批次详情页，也未出现“新项目指定项目组”弹窗");
+  }
+  if (outcome === "detail") return { projectGroupAssigned: false };
+  return await assignFirstOperationProjectGroup(page, options);
+}
+
+export function operationBatchIsPublishedText(value) {
+  const bodyText = compactText(value);
+  return bodyText.includes("批次状态")
+    && bodyText.includes("已发布")
+    && !bodyText.includes("未发布");
+}
+
+export function operationBatchPublishStateFromTags(values = []) {
+  const tags = (values || []).map(compactText);
+  const published = tags.filter((value) => value === "已发布").length;
+  const unpublished = tags.filter((value) => (
+    value === "未发布" || value === "撤销发布"
+  )).length;
+  if (published === 1 && unpublished === 0) return "published";
+  if (published === 0 && unpublished === 1) return "unpublished";
+  return "";
+}
+
+async function waitForOperationBatchPublishState(page, options = {}) {
+  await page.waitForFunction(() => {
+    const values = [...document.querySelectorAll(".ant-tag")]
+      .filter((node) => Boolean(
+        node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length),
+      ))
+      .map((node) => String(node.textContent || "").replace(/\s+/g, ""));
+    const published = values.filter((value) => value === "已发布").length;
+    const unpublished = values.filter((value) => (
+      value === "未发布" || value === "撤销发布"
+    )).length;
+    return (published === 1 && unpublished === 0)
+      || (published === 0 && unpublished === 1);
+  }, null, { timeout: Number(options.publishWaitMs || 30000) });
+  const state = operationBatchPublishStateFromTags(
+    await page.locator(".ant-tag:visible").allInnerTexts(),
+  );
+  if (!state) throw new Error("批次发布状态标签不唯一或尚未加载");
+  return state;
 }
 
 export async function runOperationBatchReconciliation(draft, options = {}) {
-  const baseUrl = text(options.baseUrl || process.env.OPERATION_CONSOLE_BASE_URL || "http://172.16.18.198:8020");
   const userDataDir = text(options.userDataDir || process.env.OPERATION_CONSOLE_USER_DATA_DIR || path.join(process.cwd(), ".easy_exam_runtime", "operation-console-profile"));
   const headless = options.headless ?? process.env.OPERATION_CONSOLE_HEADLESS === "1";
-  const context = await launchOperationBatchContext(userDataDir, headless, options);
-  return runWithOperationBatchContext(context, async (page) => {
-    const batchListUrl = `${baseUrl.replace(/\/$/, "")}/batch/batchList`;
+  let context = options.context;
+  if (!context) {
+    const { chromium } = await import("playwright").catch((error) => {
+      const message = error?.code === "ERR_MODULE_NOT_FOUND"
+        ? "未安装 Playwright，不能启动运营控制台浏览器自动化。请先执行 npm install。"
+        : (error instanceof Error ? error.message : String(error));
+      throw new Error(message);
+    });
+    context = await chromium.launchPersistentContext(userDataDir, {
+      headless,
+      viewport: null,
+    });
+  }
+  const batchListUrl = operationConsoleBatchListUrl({ baseUrl: options.baseUrl });
+  const page = await operationConsolePage(context, batchListUrl);
+  try {
     await page.goto(batchListUrl, { waitUntil: "domcontentloaded" });
     await ensureBatchListReady(page, batchListUrl, options);
-    return await findCreatedBatchFromList(page, batchListUrl, draftValue(draft, "batchName"), options);
-  }, { preserveResultOnCloseFailure: true });
+    const batchName = draftValue(draft, "batchName");
+    if (options.publishAfterCreate === false) {
+      return await findCreatedBatchFromList(page, batchListUrl, batchName, options);
+    }
+    return await publishOperationBatchFromList(page, batchListUrl, batchName, options);
+  } finally {
+    if (options.closeContext !== false) await context.close();
+  }
+}
+
+export async function clickOperationBatchPublish(page, options = {}) {
+  if (await waitForOperationBatchPublishState(page, options) === "published") {
+    return { status: "published", detailUrl: page.url(), alreadyPublished: true };
+  }
+  const publishButton = await operationBatchActionButton(
+    page,
+    /^\s*发\s*布\s*$/,
+    "发布",
+    "批次详情页“发布”按钮",
+  );
+  const modalCountBefore = await page.locator(".ant-modal:visible").count();
+  await publishButton.click();
+  await page.waitForTimeout(Number(options.publishDialogWaitMs ?? 300));
+  const modals = page.locator(".ant-modal:visible");
+  if (await modals.count() > modalCountBefore) {
+    const modal = modals.last();
+    const buttons = await modal.locator("button").all();
+    const confirmationButton = (await Promise.all(buttons.map(async (button) => ({
+      button,
+      label: compactText(await button.innerText().catch(() => "")),
+    })))).find(({ label }) => ["确定", "确认", "确认发布", "发布"].includes(label))?.button;
+    if (!confirmationButton) throw new Error("发布确认框缺少唯一确认按钮");
+    await confirmationButton.click();
+  }
+  await page.waitForFunction(() => [...document.querySelectorAll(".ant-tag")]
+    .filter((node) => Boolean(
+      node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length),
+    ))
+    .map((node) => String(node.textContent || "").replace(/\s+/g, ""))
+    .includes("已发布"), null, { timeout: Number(options.publishWaitMs || 30000) });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  if (await waitForOperationBatchPublishState(page, options) !== "published") {
+    throw new Error("点击发布后刷新回读仍为未发布");
+  }
+  return { status: "published", detailUrl: page.url() };
+}
+
+export async function publishOperationBatchFromList(page, batchListUrl, batchName, options = {}) {
+  const normalizedName = text(batchName);
+  await page.goto(batchListUrl, { waitUntil: "domcontentloaded" });
+  await ensureBatchListReady(page, batchListUrl, options);
+  await waitForOperationBatchListSettle(page, options);
+  const searchInput = page.locator("input[placeholder*=批次代码], input[placeholder*=批次名称]").first();
+  await searchInput.waitFor({ state: "visible", timeout: 30000 });
+  await searchInput.fill(normalizedName);
+  await searchInput.press("Enter");
+  await page.waitForFunction((expectedName) => document.body?.innerText?.includes(expectedName), normalizedName, { timeout: 30000 });
+  const target = await uniqueOperationBatchResult(page, normalizedName, text(options.operationBatchCode));
+  const targetText = await target.innerText().catch(() => "");
+  const code = operationBatchCodeFromText(targetText)
+    || operationBatchCodeFromText(await page.locator("body").innerText());
+  if (!code) throw new Error(`按批次名称未找到批次代码：${normalizedName}`);
+  const detailWait = page.waitForURL(/batchDetail/, { timeout: 30000 });
+  await target.click();
+  await detailWait;
+  const published = await clickOperationBatchPublish(page, options);
+  return {
+    operationBatchCode: code,
+    batchName: normalizedName,
+    batchGuid: new URL(page.url()).searchParams.get("batch_guid") || "",
+    detailUrl: published.detailUrl,
+    status: published.status,
+  };
+}
+
+export async function runOperationBatchCreation(draft, options = {}) {
+  const userDataDir = text(options.userDataDir || process.env.OPERATION_CONSOLE_USER_DATA_DIR || path.join(process.cwd(), ".easy_exam_runtime", "operation-console-profile"));
+  const headless = options.headless ?? process.env.OPERATION_CONSOLE_HEADLESS === "1";
+  let context = options.context;
+  if (!context) {
+    const { chromium } = await import("playwright").catch((error) => {
+      const message = error?.code === "ERR_MODULE_NOT_FOUND"
+        ? "未安装 Playwright，不能启动运营控制台浏览器自动化。请先执行 npm install。"
+        : (error instanceof Error ? error.message : String(error));
+      throw new Error(message);
+    });
+    context = await chromium.launchPersistentContext(userDataDir, {
+      headless,
+      viewport: null,
+    });
+  }
+  const batchListUrl = operationConsoleBatchListUrl({ baseUrl: options.baseUrl });
+  const page = await operationConsolePage(context, batchListUrl);
+  try {
+    await page.goto(batchListUrl, { waitUntil: "domcontentloaded" });
+    await ensureBatchListReady(page, batchListUrl, options);
+    await page.getByRole("button", { name: /创建批次/ }).click();
+    await page.getByRole("button", { name: /选\s*择/ }).click();
+    const serial = draftValue(draft, "operationTaskSerial");
+    if (!serial) throw new Error("缺少考试需求任务单流水号");
+    await selectOperationTask(page, serial);
+
+    await chooseDropdownValue(page, "业务部归属", draftValue(draft, "businessDepartment"));
+    await fillInputNearLabel(page, "批次名称", draftValue(draft, "batchName"));
+    await chooseDropdownValue(page, "项目部归属", draftValue(draft, "projectDepartment"));
+    await chooseDateRange(page, draftValue(draft, "examStartDate"), draftValue(draft, "examEndDate"));
+    for (const selection of operationConfigServiceSelections({
+      contentService: draftValue(draft, "contentService"),
+      serviceExam: draftValue(draft, "serviceExam"),
+      servicePersonnel: draftValue(draft, "servicePersonnel"),
+    })) {
+      await chooseConfigService(page, selection);
+    }
+    await page.getByRole("button", { name: /下一步/ }).click();
+
+    await fillInputNearLabel(page, "预估总考量", draftValue(draft, "estimatedTotalSubjectCount"));
+    await fillInputNearLabel(page, "预估单场最大科次数", draftValue(draft, "estimatedMaxSubjectCount"));
+    await fillInputNearLabel(page, "预估城市数", draftValue(draft, "estimatedCityCount"));
+    await chooseDropdownValue(page, "系统类型", draftValue(draft, "systemType"));
+    await chooseDropdownValue(page, "使用考站情况", draftValue(draft, "stationUsage"));
+    await chooseDropdownValue(page, "编排服务", draftValue(draft, "arrangementService"));
+    await chooseDropdownValue(page, "在线结算编排来源", draftValue(draft, "onlineSettlementArrangementSource"));
+    await chooseDropdownValue(page, "结算依据", draftValue(draft, "billingBasis"));
+    await fillInputNearLabel(page, "备注", draftValue(draft, "remark"));
+    await page.getByRole("button", { name: /下一步/ }).click();
+    try {
+      await clickOperationBatchComplete(page, options);
+    } catch (error) {
+      throw reconciliationRequiredError(error);
+    }
+    const batchName = draftValue(draft, "batchName");
+    let created;
+    const detailOpened = /batchDetail/.test(page.url())
+      || await page.waitForURL(/batchDetail/, { timeout: 60000 })
+        .then(() => true)
+        .catch(() => false);
+    if (detailOpened) {
+      const bodyText = await page.locator("body").innerText();
+      const code = operationBatchCodeFromText(bodyText);
+      if (!code) throw reconciliationRequiredError(new Error("创建完成，但未能从详情页读取批次代码"));
+      const detailUrl = page.url();
+      created = {
+        operationBatchCode: code,
+        batchName,
+        batchGuid: new URL(detailUrl).searchParams.get("batch_guid") || "",
+        detailUrl,
+        status: "created_unpublished",
+      };
+    } else {
+      created = await findCreatedBatchFromList(page, batchListUrl, batchName, options);
+      if (!created) {
+        throw reconciliationRequiredError(new Error("创建已提交，但未跳转详情页，也未能在批次列表按批次名称找到新批次"));
+      }
+    }
+    if (options.publishAfterCreate === false) return created;
+    try {
+      return await publishOperationBatchFromList(page, batchListUrl, batchName, options);
+    } catch (error) {
+      // The batch was already submitted. Return its code so the platform can sync it even when publish needs a follow-up.
+      return {
+        ...created,
+        status: "created_unpublished",
+        errorCode: String(error?.code || "OPERATION_BATCH_PUBLISH_FAILED"),
+        errorMessage: error?.message || String(error),
+      };
+    }
+  } finally {
+    if (options.closeContext !== false) await context.close();
+  }
 }

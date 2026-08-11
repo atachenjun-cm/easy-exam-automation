@@ -115,6 +115,98 @@ test("omits trial instructions when the requirement has no trial exam", () => {
   assert.match(row[29], /客户端下载地址：.* 。打开考试客户端/);
 });
 
+test("SMS uses the latest formal and trial session times after schedule changes", () => {
+  const changedSessions = [
+    {
+      ...created[0],
+      sessionType: "formal",
+      requirementIndex: 0,
+      start: "2026-08-02 09:30",
+      end: "2026-08-02 11:30",
+    },
+    {
+      ...created[1],
+      sessionType: "trial",
+      requirementIndex: 0,
+      start: "2026-08-01 10:00",
+      end: "2026-08-01 17:00",
+    },
+  ];
+
+  const rows = buildTencentDocRows({ config, created: changedSessions });
+
+  for (const row of rows) {
+    assert.match(row[29], /北京时间2026年8月2日\(周日\)09:30-11:30举行/);
+    assert.match(row[29], /试考时间为2026年8月1日10:00-8月1日17:00/);
+    assert.doesNotMatch(row[29], /2026年7月1日/);
+    assert.doesNotMatch(row[29], /2026年6月30日/);
+  }
+});
+
+test("SMS uses the requirement exam name after the task-level name becomes stale", () => {
+  const latestExamName = "四川公路桥梁建设集团有限公司公路隧道分公司2026年新员工笔试";
+  const rows = buildTencentDocRows({
+    config: {
+      ...config,
+      examName: "四川公路桥梁建设集团有限公司公路隧道分公司TBM管理岗笔试",
+      notificationContent: "考生您好！旧任务短信不应继续写入在线表。",
+      examRequirements: [{
+        config: {
+          ...config,
+          examName: latestExamName,
+          notificationContent: undefined,
+        },
+      }],
+    },
+    created: [
+      {
+        sessionType: "formal",
+        requirementIndex: 0,
+        session_id: "433540",
+        name: latestExamName,
+        start: "2026-08-03 14:00",
+        end: "2026-08-03 16:00",
+      },
+      {
+        sessionType: "trial",
+        requirementIndex: 0,
+        session_id: "433541",
+        name: `${latestExamName}-试考`,
+        start: "2026-08-03 10:00",
+        end: "2026-08-03 13:00",
+      },
+    ],
+  });
+
+  assert.deepEqual(rows.map((row) => row[0]), [latestExamName, `${latestExamName}-试考`]);
+  assert.deepEqual(rows.map((row) => row[1]), ["F0000462", "F0000462"]);
+  for (const row of rows) {
+    assert.match(row[29], new RegExp(`考生您好！${latestExamName}将于北京时间`));
+    assert.doesNotMatch(row[29], /TBM管理岗笔试|旧任务短信/);
+  }
+});
+
+test("SMS resolves the latest exam name independently for each requirement", () => {
+  const rows = buildTencentDocRows({
+    config: {
+      ...config,
+      examRequirements: [
+        { config: { ...config, examName: "第一场最新名称" } },
+        { config: { ...config, examName: "第二场最新名称" } },
+      ],
+    },
+    created: [
+      { sessionType: "formal", requirementIndex: 0, session_id: "431603", name: "第一场最新名称", start: "2026-07-21 14:30", end: "2026-07-21 16:30" },
+      { sessionType: "formal", requirementIndex: 1, session_id: "431605", name: "第二场最新名称", start: "2026-07-22 14:30", end: "2026-07-22 16:30" },
+    ],
+  });
+
+  assert.match(rows[0][29], /考生您好！第一场最新名称将于北京时间/);
+  assert.match(rows[1][29], /考生您好！第二场最新名称将于北京时间/);
+  assert.doesNotMatch(rows[0][29], /第二场最新名称/);
+  assert.doesNotMatch(rows[1][29], /第一场最新名称/);
+});
+
 test("client exam L column uses client login limit instead of web leave limit", () => {
   const [row] = buildTencentDocRows({
     config: {

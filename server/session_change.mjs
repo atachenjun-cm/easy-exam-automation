@@ -1,5 +1,3 @@
-import path from "node:path";
-
 const fieldLabels = {
   name: "场次名称",
   start: "开始时间",
@@ -12,53 +10,9 @@ const fieldLabels = {
 
 export const allowedSessionChangeFields = ["name", "start", "end", "early", "later", "message", "notice"];
 const allowedSet = new Set(allowedSessionChangeFields);
-const putSessionFieldSet = new Set([
-  "name",
-  "start",
-  "end",
-  "forms",
-  "allow_anonymous",
-  "unified_exam_address",
-  "face_detection",
-  "face_detection_dur",
-  "face_detection_review",
-  "police_detection",
-  "police_detection_after",
-  "app_required",
-  "publish_permit",
-  "ip_white_list",
-  "public_score",
-  "show_score_detail",
-  "publish_score",
-  "send_result_email",
-  "manual_score",
-  "new_mark",
-  "practice_mode",
-  "monitor",
-  "monitor_replay",
-  "anonymous_monitor",
-  "audio_monitor",
-  "eagle_eye",
-  "watermark",
-  "copy_item_unable",
-  "message",
-  "notice",
-  "nda",
-  "nda_notice",
-  "personal",
-  "save_video",
-  "early",
-  "later",
-  "client_required",
-  "lock_screen",
-  "exclusive_network",
-  "login_times",
-  "auto_add_time",
-  "later_deduction",
-]);
 
-export function featureEnabledForRuntime(runtimeDir, env = process.env) {
-  return env.SESSION_CHANGE_ENABLED === "1" || path.basename(String(runtimeDir || "")) === ".easy_exam_runtime_test";
+export function featureEnabledForRuntime(_runtimeDir, env = process.env) {
+  return env.SESSION_CHANGE_ENABLED !== "0";
 }
 
 function text(value) {
@@ -139,39 +93,41 @@ export function localSessionFieldsForChange(session = {}) {
 }
 
 export function sessionChangeBasePayloadFromTask(task = {}, session = {}) {
-  const config = task?.config || {};
   const common = task?.config?.sessionChangeBase || {};
-  return {
-    ...common,
-    name: session.name ?? "",
-    start: session.start ?? "",
-    end: session.end ?? "",
-    personal: common.personal || config.personal || {},
-    ...(session.message !== undefined && session.message !== "" ? { message: session.message } : {}),
-    ...(session.notice !== undefined && session.notice !== "" ? { notice: session.notice } : {}),
-    ...(session.early !== undefined && session.early !== "" ? { early: session.early } : {}),
-    ...(session.later !== undefined && session.later !== "" ? { later: session.later } : {}),
-  };
+  return localSessionFieldsForChange(Object.fromEntries(
+    allowedSessionChangeFields.map((field) => [field, session[field] ?? common[field] ?? ""]),
+  ));
+}
+
+export function sessionChangePatchPayload(changes = {}) {
+  const source = changes && typeof changes === "object" && !Array.isArray(changes) ? changes : {};
+  return Object.fromEntries(
+    allowedSessionChangeFields
+      .filter((field) => Object.hasOwn(source, field))
+      .map((field) => [field, source[field]]),
+  );
+}
+
+function sameSessionChangeValue(field, left, right) {
+  if (field === "start" || field === "end") {
+    const leftTime = parseDateLike(left);
+    const rightTime = parseDateLike(right);
+    if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) return leftTime === rightTime;
+  }
+  if (field === "early" || field === "later") {
+    const leftValue = left === "" || left === null || left === undefined ? null : Number(left);
+    const rightValue = right === "" || right === null || right === undefined ? null : Number(right);
+    return leftValue === rightValue;
+  }
+  return String(left ?? "") === String(right ?? "");
 }
 
 export function mergeSessionChangePayload(original = {}, changes = {}) {
   const source = original && typeof original === "object" && !Array.isArray(original) ? original : {};
-  const payload = {};
-  for (const [field, value] of Object.entries(source)) {
-    if (putSessionFieldSet.has(field)) payload[field] = value;
-  }
-  for (const field of ["name", "start", "end"]) {
-    if (!Object.hasOwn(payload, field)) payload[field] = "";
-  }
-  for (const field of allowedSessionChangeFields) {
-    if (!Object.hasOwn(changes, field)) continue;
-    if ((field === "early" || field === "later") && changes[field] === null) {
-      delete payload[field];
-      continue;
-    }
-    payload[field] = changes[field];
-  }
-  return payload;
+  return Object.fromEntries(
+    Object.entries(sessionChangePatchPayload(changes))
+      .filter(([field, value]) => !sameSessionChangeValue(field, source[field], value)),
+  );
 }
 
 export function buildSessionChangeDiff(before = {}, after = {}) {
@@ -179,10 +135,174 @@ export function buildSessionChangeDiff(before = {}, after = {}) {
   for (const field of allowedSessionChangeFields) {
     const oldValue = before[field] ?? "";
     const newValue = after[field] ?? "";
-    if (String(oldValue) === String(newValue)) continue;
+    if (sameSessionChangeValue(field, oldValue, newValue)) continue;
     rows.push({ field, label: fieldLabels[field], before: oldValue, after: newValue });
   }
   return rows;
+}
+
+const formalRequirementFields = new Set([
+  "考试名称",
+  "考试日期时间",
+  "提前登录时间",
+  "限制迟到时间",
+  "欢迎语",
+  "考前等待提示",
+]);
+const trialRequirementFields = new Set([
+  "考试名称",
+  "试考日期时间",
+]);
+
+function taskExamRequirements(task = {}) {
+  const requirements = task.config?.examRequirements;
+  if (Array.isArray(requirements) && requirements.length) return requirements;
+  return task.config?.examRequirement?.fields ? [task.config.examRequirement] : [];
+}
+
+function sessionRequirement(task = {}, session = {}) {
+  const requirements = taskExamRequirements(task);
+  const index = Math.max(Number(session.requirementIndex || 0), 0);
+  return requirements[index] || requirements[0] || {};
+}
+
+function sessionRequirementFields(session = {}) {
+  return session.sessionType === "trial" ? trialRequirementFields : formalRequirementFields;
+}
+
+function sessionChangeStep(task = {}) {
+  return (Array.isArray(task.steps) ? task.steps : []).find((step) => step.stepKey === "session_change") || {};
+}
+
+function appliedRequirementChangeIds(task = {}, session = {}) {
+  const sessionId = text(session.session_id || session.id);
+  return new Set(sessionChangeHistoryFromStep(sessionChangeStep(task))
+    .filter((record) => text(record.sessionId) === sessionId && record.requirementChangeApplied)
+    .map((record) => text(record.requirementChangeId))
+    .filter(Boolean));
+}
+
+function relevantSourceChanges(task = {}, session = {}) {
+  const requirementIndex = Math.max(Number(session.requirementIndex || 0), 0);
+  const relevantFields = sessionRequirementFields(session);
+  const history = Array.isArray(task.config?.projectSourceChangeHistory)
+    ? task.config.projectSourceChangeHistory
+    : Array.isArray(task.config?.examRequirementChangeHistory)
+      ? task.config.examRequirementChangeHistory
+      : [];
+  return history.filter((record) => {
+    if (!["examRequirement", "project_requirement_editor"].includes(text(record.source))) return false;
+    if (Math.max(Number(record.requirementIndex || 0), 0) !== requirementIndex) return false;
+    return (Array.isArray(record.changes) ? record.changes : []).some((change) => relevantFields.has(text(change.field)));
+  });
+}
+
+function pendingWechatRequirementChange(task = {}, session = {}) {
+  const sync = task.config?.wechatRequirementSync || {};
+  if (sync.status !== "pending_session_sync") return null;
+  const sessionId = text(session.session_id || session.id);
+  const affected = Array.isArray(sync.affectedSessionIds) ? sync.affectedSessionIds.map(text).filter(Boolean) : [];
+  if (affected.length && !affected.includes(sessionId)) return null;
+  const synced = Array.isArray(sync.syncedSessionIds) ? sync.syncedSessionIds.map(text).filter(Boolean) : [];
+  if (synced.includes(sessionId)) return null;
+  return {
+    changeId: text(sync.changeId) || `requirement-v${Number(sync.requirementVersion || 0)}`,
+    changedAt: sync.reviewedAt || "",
+    changes: Array.isArray(sync.changes) ? sync.changes : [],
+    requirementVersion: Number(sync.requirementVersion || 0),
+    source: "wechat",
+  };
+}
+
+function setSuggestedChange(suggested, field, value) {
+  if (value === undefined || value === null) return;
+  suggested[field] = value;
+}
+
+function suggestedChangesFromRequirement(task = {}, session = {}, changedFields = []) {
+  const config = sessionRequirement(task, session).config || {};
+  const fields = new Set(changedFields.map(text).filter(Boolean));
+  const includes = (field) => fields.size === 0 || fields.has(field);
+  const suggested = {};
+  if (session.sessionType === "trial") {
+    if (includes("考试名称")) setSuggestedChange(suggested, "name", config.mockExamName);
+    if (includes("试考日期时间")) {
+      setSuggestedChange(suggested, "start", config.mockStartTimeDisplay);
+      setSuggestedChange(suggested, "end", config.mockEndTimeDisplay);
+    }
+    return suggested;
+  }
+  if (includes("考试名称")) setSuggestedChange(suggested, "name", config.examName);
+  if (includes("考试日期时间")) {
+    setSuggestedChange(suggested, "start", config.startTimeDisplay);
+    setSuggestedChange(suggested, "end", config.endTimeDisplay);
+  }
+  if (includes("提前登录时间")) setSuggestedChange(suggested, "early", config.earlyLoginMinutes);
+  if (includes("限制迟到时间")) setSuggestedChange(suggested, "later", config.lateLimitMinutes);
+  if (includes("欢迎语")) setSuggestedChange(suggested, "message", config.welcomeText);
+  if (includes("考前等待提示")) setSuggestedChange(suggested, "notice", config.preLoginPrompt);
+  return suggested;
+}
+
+export function sessionRequirementChangeForTaskSession(task = {}, session = {}) {
+  const appliedIds = appliedRequirementChangeIds(task, session);
+  const manualChanges = relevantSourceChanges(task, session)
+    .filter((record) => !appliedIds.has(text(record.changeId)));
+  const wechat = pendingWechatRequirementChange(task, session);
+  const candidates = [...manualChanges, ...(wechat ? [wechat] : [])];
+  if (!candidates.length) return { pending: false, label: "", suggestedChanges: {} };
+  const latest = [...candidates].reverse().sort((left, right) => (
+    Date.parse(right.changedAt || "") - Date.parse(left.changedAt || "")
+  ))[0] || candidates[candidates.length - 1];
+  const changedFields = [...new Set(candidates.flatMap((record) => (
+    Array.isArray(record.changes) ? record.changes : []
+  ).map((change) => text(change.field)).filter(Boolean)))];
+  const suggestedChanges = suggestedChangesFromRequirement(task, session, changedFields);
+  const changeId = text(latest.changeId);
+  if (!Object.keys(suggestedChanges).length) return { pending: false, label: "", changeId, suggestedChanges: {} };
+  if (sessionChangeMatchesSuggested(session, suggestedChanges)) {
+    return { pending: false, label: "", changeId, suggestedChanges: {} };
+  }
+  return {
+    pending: true,
+    label: "需求有变请确认",
+    changeId,
+    changedAt: latest.changedAt || "",
+    changedFields,
+    requirementVersion: Number(latest.requirementVersion || 0),
+    source: latest.source || "",
+    suggestedChanges,
+  };
+}
+
+export function enrichTaskSessionRequirementChanges(task = {}) {
+  const sessions = (Array.isArray(task.sessions) ? task.sessions : []).map((session) => ({
+    ...session,
+    requirementChange: sessionRequirementChangeForTaskSession(task, session),
+  }));
+  const pendingCount = sessions.filter((session) => session.requirementChange?.pending).length;
+  return {
+    ...task,
+    sessions,
+    requirementChangeSummary: {
+      pending: pendingCount > 0,
+      pendingCount,
+      label: pendingCount ? "需求有变请确认" : "",
+    },
+  };
+}
+
+export function sessionChangeMatchesSuggested(after = {}, suggested = {}) {
+  return Object.entries(suggested).every(([field, expected]) => {
+    const actual = after[field];
+    if (field === "start" || field === "end") {
+      const actualTime = parseDateLike(actual);
+      const expectedTime = parseDateLike(expected);
+      return Number.isFinite(actualTime) && Number.isFinite(expectedTime) && actualTime === expectedTime;
+    }
+    if (field === "early" || field === "later") return Number(actual) === Number(expected);
+    return String(actual ?? "") === String(expected ?? "");
+  });
 }
 
 export function sessionChangeSummary(body) {
@@ -215,6 +335,13 @@ export function appendSessionChangeHistory(existing = [], record = {}) {
     tenantResponseSummary: record.tenantResponseSummary || {},
     verifiedSession: record.verifiedSession || null,
     warning: record.warning || null,
+    requirementChangeId: text(record.requirementChangeId),
+    requirementChangeApplied: Boolean(record.requirementChangeApplied),
+    courseRequirementIndex: Math.max(Number(record.courseRequirementIndex || 0), 0),
+    courseRequirementChangeId: text(record.courseRequirementChangeId),
+    courseRequirementChangeApplied: Boolean(record.courseRequirementChangeApplied),
+    verifiedCourses: Array.isArray(record.verifiedCourses) ? record.verifiedCourses : [],
+    action: text(record.action),
   };
   return [item, ...base].slice(0, 50);
 }
@@ -235,6 +362,12 @@ export function sessionChangeHistoryFromStep(step = {}) {
     diff: step.result.diff,
     tenantResponseSummary: step.result.tenantResponseSummary || {},
     verifiedSession: step.result.verifiedSession || null,
+    requirementChangeId: step.result.requirementChangeId || "",
+    requirementChangeApplied: Boolean(step.result.requirementChangeApplied),
+    courseRequirementIndex: Number(step.result.requirementIndex || 0),
+    courseRequirementChangeId: step.result.courseRequirementChangeId || "",
+    courseRequirementChangeApplied: Boolean(step.result.courseRequirementChangeApplied),
+    verifiedCourses: step.result.courses || [],
   });
 }
 
@@ -256,15 +389,47 @@ export async function fetchTenantSessionDetail({ apiBase, sessionId, requestJson
   );
 }
 
+function tenantSessionId(value = {}) {
+  return String(value?.id ?? value?.session_id ?? value?.sessionId ?? "").trim();
+}
+
+function tenantSessionList(payload) {
+  if (Array.isArray(payload)) return payload;
+  for (const key of ["sessions", "results", "data", "items"]) {
+    if (Array.isArray(payload?.[key])) return payload[key];
+  }
+  return [];
+}
+
+export async function fetchTenantSessionDetailWithListFallback(options = {}) {
+  try {
+    return await fetchTenantSessionDetail(options);
+  } catch (detailError) {
+    const base = String(options.apiBase || "").replace(/\/+$/, "");
+    const sessionId = String(options.sessionId || "").trim();
+    const payload = await options.requestJson(
+      options.login,
+      `${base}/tenant/api/session/?session_ids=${encodeURIComponent(sessionId)}`,
+      { method: "GET" },
+      `从场次列表读取 ${sessionId}`,
+    );
+    const detail = tenantSessionList(payload).find((item) => tenantSessionId(item) === sessionId);
+    if (detail) return detail;
+    throw detailError;
+  }
+}
+
 export async function putTenantSessionDetail({ apiBase, sessionId, payload, requestJson, login }) {
   const base = String(apiBase || "").replace(/\/+$/, "");
+  const safePayload = sessionChangePatchPayload(payload);
+  if (!Object.keys(safePayload).length) throw new Error("修改场次信息失败：没有可提交的变更字段");
   return await requestJson(
     login,
     `${base}/tenant/api/session/${encodeURIComponent(sessionId)}/`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(safePayload),
     },
     `修改场次信息 ${sessionId}`,
   );

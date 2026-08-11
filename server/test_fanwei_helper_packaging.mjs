@@ -78,6 +78,8 @@ test("macOS installer uses Application Support and bootstraps its own LaunchAgen
 
   assert.match(install, /Library\/Application Support\/YikaoFanweiHelper/);
   assert.match(install, /Library\/LaunchAgents\/com\.ata\.yikao-fanwei-helper\.plist/);
+  assert.match(install, /cp -R "\$SOURCE_DIR\/node_modules\/playwright" "\$INSTALL_DIR\/node_modules\/"/);
+  assert.match(install, /cp -R "\$SOURCE_DIR\/node_modules\/playwright-core" "\$INSTALL_DIR\/node_modules\/"/);
   assert.match(install, /launchctl bootstrap "gui\/\$UID"/);
   assert.match(install, /launchctl kickstart -k "gui\/\$UID\/com\.ata\.yikao-fanwei-helper"/);
   assert.match(install, /CONFIG_SOURCE="\$SOURCE_DIR\/config\.env"/);
@@ -102,7 +104,15 @@ for (const platform of ["win-x64", "darwin-x64", "darwin-arm64"]) {
         "server/fanwei_auto_read.mjs",
         "server/fanwei_local_helper.mjs",
         "server/fanwei_local_helper_cli.mjs",
+        "server/operation_batch_runner.mjs",
+        "server/operation_batch_update_runner.mjs",
+        "server/operation_personnel_console_runner.mjs",
+        "server/operation_archive_runner.mjs",
+        "server/operation_content.mjs",
+        "server/operation_content_runner.mjs",
         "server/score_stamp_application.mjs",
+        "node_modules/playwright/package.json",
+        "node_modules/playwright-core/package.json",
       ];
       for (const relative of expectedFiles) {
         assert.equal(fs.existsSync(path.join(packageDir, relative)), true, `${relative} is missing`);

@@ -5,15 +5,14 @@ import {
   formItemByLabel,
   launchOperationBatchContext,
   openExactOperationBatchCard,
+  operationConsoleBaseUrl,
   operationBatchDetailIdentity,
   operationDateTitle,
   operationBatchExactCodeLocation,
   runWithOperationBatchContext,
   searchOperationBatchListPages,
   startOperationBatchListSearch,
-} from "./operation_batch_runner.mjs";
-
-const DEFAULT_BASE_URL = "http://172.16.18.198:8020";
+} from "./operation_personnel_console_runner.mjs";
 
 function text(value) {
   return String(value ?? "").trim();
@@ -63,6 +62,22 @@ function visibleDateTime(value) {
   return parts
     ? `${dateString(parts)} ${pad(parts[3])}:${pad(parts[4])}`
     : "";
+}
+
+function numberText(value) {
+  const match = text(value).replace(/分钟/g, "").match(/\d+(?:\.\d+)?/);
+  return match ? String(Number(match[0])) : "";
+}
+
+function booleanValue(value) {
+  return value === true || /^(?:是|true|1)$/i.test(text(value));
+}
+
+function elapsedMinutes(startParts, endParts) {
+  if (!startParts || !endParts) return "";
+  const start = Date.UTC(startParts[0], startParts[1] - 1, startParts[2], startParts[3], startParts[4], startParts[5]);
+  const end = Date.UTC(endParts[0], endParts[1] - 1, endParts[2], endParts[3], endParts[4], endParts[5]);
+  return end > start ? String(Math.round((end - start) / 60000)) : "";
 }
 
 function visibleDateValues(value) {
@@ -126,10 +141,17 @@ export function operationBatchVisibleOverviewFromRaw(raw = {}) {
 export function operationBatchVisibleSchedulesFromRaw(raw = {}) {
   const matching = (raw.tables || []).filter((table) => {
     const headers = (table.headers || []).map(text);
-    return ["日程代码", "日程", "考试名称"].every((header) => (
+    const fixedHeadersPresent = ["场次", "日程代码", "日程", "时区", "时长(分钟)", "考试名称", "考生提前登录(分钟)", "备注"].every((header) => (
       headers.filter((item) => item === header).length === 1
     ));
+    const trialHeaders = headers.filter((item) => (
+      item === "试考" || item === "自定义考试配置"
+    ));
+    return fixedHeadersPresent && trialHeaders.length === 1;
   });
+  if (matching.length === 0 && raw.emptyScheduleVisible === true) {
+    return [];
+  }
   if (matching.length !== 1 || matching[0].hasMore) {
     throw errorWithCode(
       matching[0]?.hasMore
@@ -142,6 +164,15 @@ export function operationBatchVisibleSchedulesFromRaw(raw = {}) {
   const headers = table.headers.map(text);
   const dateIndex = headers.indexOf("日程");
   const nameIndex = headers.indexOf("考试名称");
+  const sceneIndex = headers.indexOf("场次");
+  const codeIndex = headers.indexOf("日程代码");
+  const timezoneIndex = headers.indexOf("时区");
+  const durationIndex = headers.indexOf("时长(分钟)");
+  const earlyLoginIndex = headers.indexOf("考生提前登录(分钟)");
+  const trialIndex = headers.findIndex((header) => (
+    header === "试考" || header === "自定义考试配置"
+  ));
+  const remarkIndex = headers.indexOf("备注");
   const rows = (table.rows || []).filter((row) => (
     Array.isArray(row)
     && row.length === headers.length
@@ -150,16 +181,29 @@ export function operationBatchVisibleSchedulesFromRaw(raw = {}) {
   return rows.map((row, index) => {
     const values = visibleDateTimeValues(row[dateIndex]);
     const name = text(row[nameIndex]);
-    if (values.length !== 2 || !name) {
+    const expectedDuration = values.length === 2
+      ? elapsedMinutes(dateTimeParts(values[0]), dateTimeParts(values[1]))
+      : "";
+    const visibleDuration = numberText(row[durationIndex]);
+    if (values.length !== 2 || !name || !text(row[sceneIndex]) || !text(row[codeIndex])
+      || !text(row[timezoneIndex]) || !numberText(row[earlyLoginIndex]) && numberText(row[earlyLoginIndex]) !== "0"
+      || (visibleDuration && visibleDuration !== expectedDuration)) {
       throw errorWithCode(
         `运控批次可见日程 ${index + 1} 缺少考试名称或完整起止时间`,
         "OPERATION_BATCH_INSPECTION_BLOCKED",
       );
     }
     return {
+      scene: text(row[sceneIndex]),
+      code: text(row[codeIndex]),
       name,
       start: values[0],
       end: values[1],
+      timezone: text(row[timezoneIndex]),
+      durationMinutes: expectedDuration,
+      earlyLoginMinutes: numberText(row[earlyLoginIndex]) || "0",
+      trial: booleanValue(row[trialIndex]),
+      remark: text(row[remarkIndex]),
     };
   });
 }
@@ -189,6 +233,8 @@ function normalizeSnapshot(raw = {}, {
   const schedules = rawSchedules.map((schedule, index) => {
     const requirementIndex = Number(schedule?.requirementIndex ?? index);
     const name = text(schedule?.name);
+    const scene = text(schedule?.scene);
+    const scheduleCode = text(schedule?.code);
     const startParts = dateTimeParts(schedule?.start);
     const endParts = dateTimeParts(schedule?.end);
     const startValue = startParts ? Date.UTC(
@@ -209,6 +255,8 @@ function normalizeSnapshot(raw = {}, {
     ) : Number.NaN;
     if (
       requirementIndex !== index
+      || !scene
+      || !scheduleCode
       || !name
       || !startParts
       || !endParts
@@ -218,9 +266,16 @@ function normalizeSnapshot(raw = {}, {
     }
     return {
       requirementIndex: index,
+      scene,
+      code: scheduleCode,
       name,
       start: dateTimeString(startParts),
       end: dateTimeString(endParts),
+      timezone: text(schedule?.timezone),
+      durationMinutes: numberText(schedule?.durationMinutes) || elapsedMinutes(startParts, endParts),
+      earlyLoginMinutes: numberText(schedule?.earlyLoginMinutes) || "0",
+      trial: booleanValue(schedule?.trial),
+      remark: text(schedule?.remark),
     };
   });
   const examStartDate = dateString(examStartParts);
@@ -250,11 +305,7 @@ function snapshotsEqual(left, right) {
 }
 
 function batchListUrl(options = {}) {
-  const baseUrl = text(
-    options.baseUrl
-    || process.env.OPERATION_CONSOLE_BASE_URL
-    || DEFAULT_BASE_URL,
-  );
+  const baseUrl = operationConsoleBaseUrl(options);
   return `${baseUrl.replace(/\/$/, "")}/batch/batchList`;
 }
 
@@ -564,10 +615,40 @@ async function editScheduleTable(page) {
             "日程",
             "OPERATION_BATCH_UPDATE_CONFLICT",
           ),
+          timezone: exactScheduleColumn(
+            headers,
+            ["时区"],
+            "时区",
+            "OPERATION_BATCH_UPDATE_CONFLICT",
+          ),
+          durationMinutes: exactScheduleColumn(
+            headers,
+            ["时长(分钟)"],
+            "时长(分钟)",
+            "OPERATION_BATCH_UPDATE_CONFLICT",
+          ),
           name: exactScheduleColumn(
             headers,
             ["考试名称"],
             "考试名称",
+            "OPERATION_BATCH_UPDATE_CONFLICT",
+          ),
+          earlyLoginMinutes: exactScheduleColumn(
+            headers,
+            ["考生提前登录(分钟)"],
+            "考生提前登录(分钟)",
+            "OPERATION_BATCH_UPDATE_CONFLICT",
+          ),
+          trial: exactScheduleColumn(
+            headers,
+            ["试考"],
+            "试考",
+            "OPERATION_BATCH_UPDATE_CONFLICT",
+          ),
+          remark: exactScheduleColumn(
+            headers,
+            ["备注"],
+            "备注",
             "OPERATION_BATCH_UPDATE_CONFLICT",
           ),
         },
@@ -607,6 +688,26 @@ async function fillSingleScheduleCell(row, column, value, label) {
     );
   }
   await inputs.first().fill(text(value));
+}
+
+async function chooseScheduleSelect(page, row, column, value, label) {
+  const cell = row.locator("td").nth(column);
+  const control = await uniqueControl(
+    cell.locator(".ant-select-selection:visible,.ant-select-selector:visible,[role=combobox]:visible"),
+    `${label}下拉框`,
+  );
+  await control.click();
+  const dropdown = await uniqueControl(page.locator(".ant-select-dropdown:visible"), `${label}选项列表`);
+  const option = await uniqueControl(dropdown.getByText(text(value), { exact: true }), `${label}选项“${text(value)}”`);
+  await option.click();
+}
+
+async function setScheduleCheckbox(row, column, checked, label) {
+  const input = await uniqueControl(
+    row.locator("td").nth(column).locator('input[type="checkbox"]'),
+    `${label}复选框`,
+  );
+  if (Boolean(await input.isChecked()) !== Boolean(checked)) await input.click();
 }
 
 export async function fillRangeInputs(
@@ -687,8 +788,11 @@ async function writeVisibleScheduleFields(
     );
   }
   if (appended) {
-    await fillSingleScheduleCell(row, columns.scene, requirementIndex + 1, "场次");
-    await fillSingleScheduleCell(row, columns.code, requirementIndex + 1, "日程代码");
+    await fillSingleScheduleCell(row, columns.scene, schedule.scene, "场次");
+    await fillSingleScheduleCell(row, columns.code, schedule.code, "日程代码");
+  } else {
+    if (changed.has("scene")) await fillSingleScheduleCell(row, columns.scene, schedule.scene, "场次");
+    if (changed.has("code")) await fillSingleScheduleCell(row, columns.code, schedule.code, "日程代码");
   }
   if (appended || changed.has("name")) {
     await fillSingleScheduleCell(row, columns.name, schedule.name, "考试名称");
@@ -702,6 +806,18 @@ async function writeVisibleScheduleFields(
       visibleDateTime(schedule.start),
       visibleDateTime(schedule.end),
     );
+  }
+  if (appended || changed.has("timezone")) {
+    await chooseScheduleSelect(page, row, columns.timezone, schedule.timezone, "时区");
+  }
+  if (appended || changed.has("earlyLoginMinutes")) {
+    await fillSingleScheduleCell(row, columns.earlyLoginMinutes, schedule.earlyLoginMinutes, "考生提前登录(分钟)");
+  }
+  if (appended || changed.has("trial")) {
+    await setScheduleCheckbox(row, columns.trial, schedule.trial, "试考");
+  }
+  if (appended || changed.has("remark")) {
+    await fillSingleScheduleCell(row, columns.remark, schedule.remark, "备注");
   }
 }
 
@@ -752,6 +868,12 @@ const visiblePageAdapter = {
   },
   async readSchedules(page) {
     await openVisibleEztestSchedulePage(page);
+    const scheduleSection = await visibleSection(
+      page,
+      "考试日程",
+      "OPERATION_BATCH_INSPECTION_BLOCKED",
+    );
+    const emptyScheduleVisible = text(await scheduleSection.innerText()).includes("暂无数据");
     const raw = await page.evaluate(() => {
       const clean = (value) => String(value ?? "").trim().replace(/\s+/g, " ");
       const visible = (node) => Boolean(
@@ -776,7 +898,7 @@ const visiblePageAdapter = {
         }),
       };
     });
-    return operationBatchVisibleSchedulesFromRaw(raw);
+    return operationBatchVisibleSchedulesFromRaw({ ...raw, emptyScheduleVisible });
   },
   async beginOverviewEdit(page) {
     await selectVisibleTab(page, "概况");
@@ -839,9 +961,16 @@ async function readManagedSnapshot(page, pageAdapter) {
     examEndDate: overview?.examEndDate,
     schedules: schedules.map((schedule, requirementIndex) => ({
       requirementIndex,
+      scene: schedule?.scene,
+      code: schedule?.code,
       name: schedule?.name,
       start: schedule?.start,
       end: schedule?.end,
+      timezone: schedule?.timezone,
+      durationMinutes: schedule?.durationMinutes,
+      earlyLoginMinutes: schedule?.earlyLoginMinutes,
+      trial: schedule?.trial,
+      remark: schedule?.remark,
     })),
   });
 }
@@ -872,6 +1001,10 @@ async function withPage(options, operation) {
   );
   const context = options.context
     || await launchOperationBatchContext(userDataDir, false, options);
+  if (options.context || options.closeContext === false) {
+    const page = context.pages()[0] || await context.newPage();
+    return operation(page);
+  }
   return runWithOperationBatchContext(context, operation);
 }
 
@@ -1027,9 +1160,16 @@ const overviewFields = [
 ];
 
 const scheduleFields = [
+  ["scene", "场次"],
+  ["code", "日程代码"],
   ["name", "考试名称"],
   ["start", "开始时间"],
   ["end", "结束时间"],
+  ["timezone", "时区"],
+  ["durationMinutes", "时长(分钟)"],
+  ["earlyLoginMinutes", "考生提前登录(分钟)"],
+  ["trial", "试考"],
+  ["remark", "备注"],
 ];
 
 async function writeManagedChanges(
@@ -1097,9 +1237,10 @@ async function writeManagedChanges(
     } else {
       for (const [field, label] of scheduleFields) {
         if (!fieldsToWrite.has(field)) continue;
-        const value = field === "name"
-          ? desired.schedules[index][field]
-          : visibleDateTime(desired.schedules[index][field]);
+        const rawValue = desired.schedules[index][field];
+        const value = ["start", "end"].includes(field)
+          ? visibleDateTime(rawValue)
+          : field === "trial" ? (rawValue ? "是" : "否") : rawValue;
         await pageAdapter.writeSchedule(page, index, field, label, value);
         writeCount += 1;
       }
@@ -1222,6 +1363,80 @@ export async function runOperationBatchScheduleInitialization(instruction, optio
         "managed_fields_saved",
         "reentered_exact_batch",
         "exact_readback_verified",
+      ],
+    };
+  });
+}
+
+export async function synchronizeOperationBatchScheduleForArchive(instruction, options = {}) {
+  batchCode(instruction);
+  const desired = completeDesiredSnapshot(instruction, true);
+  return withPage(options, async (page) => {
+    const inspected = await inspectOnPage(page, instruction, options);
+    const current = inspected.snapshot;
+    if (current.batchName !== desired.batchName) {
+      throw errorWithCode(
+        `运营批次名称不一致：期望 ${desired.batchName}，实际 ${current.batchName}`,
+        "OPERATION_ARCHIVE_BATCH_IDENTITY_MISMATCH",
+        { expectedBatchName: desired.batchName, actualBatchName: current.batchName },
+      );
+    }
+    if (current.schedules.length > desired.schedules.length) {
+      throw errorWithCode(
+        "运营批次现有日程多于正式考试日程，已停止自动归档",
+        "OPERATION_BATCH_SCHEDULE_COUNT_DECREASE",
+        { currentCount: current.schedules.length, desiredCount: desired.schedules.length },
+      );
+    }
+    if (snapshotsEqual(current, desired)) {
+      return {
+        status: "success",
+        verified: true,
+        action: "none",
+        snapshot: current,
+        detailUrl: inspected.detailUrl,
+        checkpoints: ["opened_exact_batch", "exact_schedule_already_present"],
+      };
+    }
+    const fields = {
+      overview: new Set(
+        overviewFields
+          .filter(([field]) => field !== "batchName" && current[field] !== desired[field])
+          .map(([field]) => field),
+      ),
+      schedules: new Map(),
+      appended: new Set(),
+    };
+    for (let index = 0; index < desired.schedules.length; index += 1) {
+      if (index >= current.schedules.length) {
+        fields.appended.add(index);
+        fields.schedules.set(index, new Set(scheduleFields.map(([field]) => field)));
+        continue;
+      }
+      const changed = scheduleFields
+        .map(([field]) => field)
+        .filter((field) => current.schedules[index][field] !== desired.schedules[index][field]);
+      if (changed.length) fields.schedules.set(index, new Set(changed));
+    }
+    const writeCount = await writeManagedChanges(
+      page,
+      inspected.pageAdapter,
+      current,
+      desired,
+      fields,
+    );
+    const verified = await verifyReadback(page, instruction, options, desired);
+    return {
+      status: "success",
+      verified: true,
+      action: current.schedules.length ? "update" : "initialize",
+      snapshot: verified.snapshot,
+      detailUrl: verified.detailUrl,
+      checkpoints: [
+        "opened_exact_batch",
+        current.schedules.length ? "existing_schedule_verified" : "empty_schedule_set_verified",
+        ...(writeCount ? ["managed_schedule_saved"] : []),
+        "exact_schedule_readback_verified",
       ],
     };
   });

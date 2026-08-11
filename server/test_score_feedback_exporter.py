@@ -28,7 +28,7 @@ class ScoreFeedbackExporterTest(unittest.TestCase):
                         "course": "四川省通川工程技术开发有限公司校招笔试" if index == 0 else "综合能力",
                         "permit": f"000{index + 1}",
                         "exam_status": "已完成" if index == 0 else ("未开考" if index == 1 else "异常状态"),
-                        "score": "" if index == 1 else 80 + index,
+                        "score": "" if index == 1 else 85 - index,
                         "violation": "" if index != 2 else "作弊",
                     }
                 )
@@ -125,7 +125,7 @@ class ScoreFeedbackExporterTest(unittest.TestCase):
             ))
             self.assertEqual(sheet["A7"].value, "考生1")
             self.assertEqual(sheet["H7"].value, "参考")
-            self.assertEqual(sheet["H8"].value, "缺考")
+            self.assertEqual(sheet["H12"].value, "缺考")
             self.assertEqual(sheet["J7"].value, "无")
             self.assertEqual(sheet["C7"].number_format, "@")
             self.assertEqual(sheet["D7"].number_format, "@")
@@ -199,6 +199,89 @@ class ScoreFeedbackExporterTest(unittest.TestCase):
             sheet = load_workbook(output).active
             self.assertEqual(sheet["H7"].value, "缺考")
             self.assertEqual(sheet["I7"].value, "--")
+
+    def test_sorts_scores_descending_and_places_absent_candidates_last(self):
+        root = Path(__file__).resolve().parents[1]
+        template = root / "template" / "成绩单模板.xlsx"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            payload = temp / "payload.json"
+            output = temp / "sorted-score.xlsx"
+            payload.write_text(
+                json.dumps(
+                    {
+                        "examName": "成绩排序测试",
+                        "rows": [
+                            {"name": "缺考甲", "exam_status": "未开考", "score": ""},
+                            {"name": "考生乙", "exam_status": "已完成", "score": 72},
+                            {"name": "缺考乙", "exam_status": "valid", "score": ""},
+                            {"name": "考生甲", "exam_status": "已完成", "score": 96.5},
+                            {"name": "考生丙", "exam_status": "已完成", "score": "88"},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                "utf-8",
+            )
+
+            result = export_score_feedback(template, payload, output)
+
+            self.assertTrue(result["ok"])
+            sheet = load_workbook(output).active
+            self.assertEqual(
+                [sheet.cell(row, 1).value for row in range(7, 12)],
+                ["考生甲", "考生丙", "考生乙", "缺考甲", "缺考乙"],
+            )
+            self.assertEqual(
+                [sheet.cell(row, 9).value for row in range(7, 12)],
+                [96.5, 88, 72, "--", "--"],
+            )
+            self.assertEqual(
+                [sheet.cell(row, 8).value for row in range(10, 12)],
+                ["缺考", "缺考"],
+            )
+
+    def test_groups_multiple_courses_before_sorting_each_course(self):
+        root = Path(__file__).resolve().parents[1]
+        template = root / "template" / "成绩单模板.xlsx"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            payload = temp / "payload.json"
+            output = temp / "multi-course-score.xlsx"
+            payload.write_text(
+                json.dumps(
+                    {
+                        "examName": "多科目成绩排序测试",
+                        "rows": [
+                            {"name": "语文缺考", "course": "语文", "exam_status": "未开考", "score": ""},
+                            {"name": "数学乙", "course": "数学", "exam_status": "已完成", "score": 88},
+                            {"name": "语文乙", "course": "语文", "exam_status": "已完成", "score": 72},
+                            {"name": "数学缺考", "course": "数学", "exam_status": "valid", "score": ""},
+                            {"name": "语文甲", "course": "语文", "exam_status": "已完成", "score": 96},
+                            {"name": "数学甲", "course": "数学", "exam_status": "已完成", "score": 91},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                "utf-8",
+            )
+
+            result = export_score_feedback(template, payload, output)
+
+            self.assertTrue(result["ok"])
+            sheet = load_workbook(output).active
+            self.assertEqual(
+                [sheet.cell(row, 6).value for row in range(7, 13)],
+                ["语文", "语文", "语文", "数学", "数学", "数学"],
+            )
+            self.assertEqual(
+                [sheet.cell(row, 1).value for row in range(7, 13)],
+                ["语文甲", "语文乙", "语文缺考", "数学甲", "数学乙", "数学缺考"],
+            )
+            self.assertEqual(
+                [sheet.cell(row, 9).value for row in range(7, 13)],
+                [96, 72, "--", 91, 88, "--"],
+            )
 
     def test_appends_assessment_report_hyperlinks_when_present(self):
         root = Path(__file__).resolve().parents[1]

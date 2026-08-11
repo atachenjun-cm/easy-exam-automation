@@ -58,6 +58,39 @@ test("installs launchd collector plist and loads it", () => {
   ]);
 });
 
+test("renders launchd collector paths for the current machine", () => {
+  const dir = tmpDir();
+  const templatePath = path.join(dir, "template.plist");
+  const plistPath = path.join(dir, "LaunchAgents", "com.ata.easy-exam-wechat-collector.plist");
+  const appDir = path.join(dir, "Easy Exam & WeChat", "app");
+  const runtimeDir = path.join(dir, "Easy Exam & WeChat", "runtime");
+  const nodePath = path.join(dir, "runtime", "node");
+  writeFileSync(templatePath, [
+    "<plist><dict>",
+    "<string>__EASY_EXAM_APP_DIR__</string>",
+    "<string>__EASY_EXAM_RUNTIME_DIR__</string>",
+    "<string>__EASY_EXAM_NODE__</string>",
+    "</dict></plist>",
+  ].join(""));
+
+  installWechatCollectorLaunchd({
+    templatePath,
+    plistPath,
+    appDir,
+    runtimeDir,
+    nodePath,
+    execFileSyncImpl: (command) => (
+      command === "launchctl" ? "123\t0\tcom.ata.easy-exam-wechat-collector\n" : ""
+    ),
+  });
+
+  const plist = readFileSync(plistPath, "utf8");
+  assert.match(plist, /Easy Exam &amp; WeChat\/app/);
+  assert.match(plist, /Easy Exam &amp; WeChat\/runtime/);
+  assert.match(plist, /runtime\/node/);
+  assert.doesNotMatch(plist, /__EASY_EXAM_/);
+});
+
 test("uninstalls launchd collector plist and unloads it when present", () => {
   const dir = tmpDir();
   const plistPath = path.join(dir, "LaunchAgents", "com.ata.easy-exam-wechat-collector.plist");
@@ -95,6 +128,29 @@ test("reports easy exam service launchd installed and loaded status", () => {
   assert.equal(status.plistPath, plistPath);
   assert.equal(status.installed, true);
   assert.equal(status.loaded, true);
+});
+
+test("reuses the active Easy Exam LaunchAgent when its label differs", () => {
+  const dir = tmpDir();
+  const homeDir = path.join(dir, "home");
+  const activeLabel = "com.example.easy-exam-web";
+  const activePlistPath = path.join(homeDir, "Library", "LaunchAgents", `${activeLabel}.plist`);
+  mkdirSync(path.dirname(activePlistPath), { recursive: true });
+  writeFileSync(activePlistPath, "<plist></plist>");
+
+  const status = getEasyExamServiceLaunchdStatus({
+    homeDir,
+    plistPath: path.join(homeDir, "Library", "LaunchAgents", "com.ata.easy-exam-service.plist"),
+    activeServiceLabel: activeLabel,
+    execFileSyncImpl: () => `321\t0\t${activeLabel}\n`,
+  });
+
+  assert.equal(status.label, activeLabel);
+  assert.equal(status.canonicalLabel, "com.ata.easy-exam-service");
+  assert.equal(status.plistPath, activePlistPath);
+  assert.equal(status.installed, true);
+  assert.equal(status.loaded, true);
+  assert.equal(status.reused, true);
 });
 
 test("installs easy exam service plist and loads it", () => {

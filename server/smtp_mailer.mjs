@@ -34,14 +34,16 @@ function formatAddress(address) {
   return `${JSON.stringify(name)} <${email}>`;
 }
 
-export function createSmtpMessage({ from, to = [], subject, text: body, html }) {
+export function createSmtpMessage({ from, to = [], cc = [], subject, text: body, html }) {
   const messageId = `<${Date.now()}.${Math.random().toString(16).slice(2)}@easy-exam-automation.local>`;
   const boundary = `easy-exam-${Math.random().toString(16).slice(2)}`;
   const hasHtml = Boolean(text(html));
   const recipients = to.map(emailAddress);
+  const ccRecipients = cc.map(emailAddress);
   const headers = [
     `From: ${formatAddress(from)}`,
     `To: ${recipients.join(", ")}`,
+    ...(ccRecipients.length ? [`Cc: ${ccRecipients.join(", ")}`] : []),
     `Subject: ${headerText(subject)}`,
     `Date: ${new Date().toUTCString()}`,
     `Message-ID: ${messageId}`,
@@ -124,12 +126,14 @@ function smtpSession(socket) {
   return { command };
 }
 
-export async function sendSmtpMail({ settings = {}, from, to = [], subject, text: body, html } = {}) {
+export async function sendSmtpMail({ settings = {}, from, to = [], cc = [], subject, text: body, html } = {}) {
   const sender = {
     email: emailAddress(from?.email || from),
     name: headerText(from?.name),
   };
   const recipients = to.map(emailAddress);
+  const ccRecipients = cc.map(emailAddress);
+  const envelopeRecipients = [...new Set([...recipients, ...ccRecipients])];
   const socket = connectSocket(settings);
   const session = smtpSession(socket);
   try {
@@ -147,11 +151,11 @@ export async function sendSmtpMail({ settings = {}, from, to = [], subject, text
     await activeSession.command(b64(settings.username), /^334/);
     await activeSession.command(b64(settings.password), /^235/);
     await activeSession.command(`MAIL FROM:<${sender.email}>`);
-    for (const recipient of recipients) {
+    for (const recipient of envelopeRecipients) {
       await activeSession.command(`RCPT TO:<${recipient}>`);
     }
     await activeSession.command("DATA", /^354/);
-    const message = createSmtpMessage({ from: sender, to: recipients, subject, text: body, html });
+    const message = createSmtpMessage({ from: sender, to: recipients, cc: ccRecipients, subject, text: body, html });
     await activeSession.command(message.raw);
     await activeSession.command("QUIT", /^221|^2/);
     activeSocket.end();

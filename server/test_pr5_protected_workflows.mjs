@@ -53,31 +53,6 @@ const EXPECTED_SENTINELS = {
   ],
 };
 
-const EXPECTED_TASK4_FANWEI_IMPORT_ERROR_MAPPING_CHANGE = {
-  name: "Task 4 Fanwei import conflict error mapping",
-  current: `  try {
-    json(res, 200, await createFanweiRequirementImportFromPayload(payload, req));
-  } catch (error) {
-    json(res, error.status || 500, {
-      error: error instanceof Error ? error.message : String(error),
-      errorCode: error.errorCode,
-      detail: error.detail,
-    });
-  }
-`,
-  baseline: "  json(res, 200, await createFanweiRequirementImportFromPayload(payload, req));\n",
-};
-
-const EXPECTED_TASK10_TASK_DETAIL_RESPONSE_ENRICHMENT_CHANGE = {
-  name: "Task 10 legacy batch-name response enrichment",
-  current: `  return json(res, 200, {
-    ...withOperationBatchNameEditorDefaults(enrichedTask),
-    sessionChangeFeatureEnabled,
-  });
-`,
-  baseline: "  return json(res, 200, { ...enrichedTask, sessionChangeFeatureEnabled });\n",
-};
-
 const EXPECTED_SERVER_DISPATCHER_REGION = {
   name: "server dispatcher with approved PR 5 route slots",
   kind: "allowlisted-anchor-range",
@@ -85,82 +60,69 @@ const EXPECTED_SERVER_DISPATCHER_REGION = {
   endAnchor: "const roomsPreviewMatch = url.pathname.match(",
   allowedInsertions: [
     {
-      name: "operation batch reconcile route",
+      name: "email settings route",
+      kind: "js-block",
+      startAnchor: "if ((req.method === \"GET\" || req.method === \"POST\") && url.pathname === \"/api/email/settings\") {",
+      afterAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/settings\") {",
+      beforeAnchor: "if (url.pathname === \"/api/customer-service-scheduler\" || url.pathname.startsWith(\"/api/customer-service-scheduler/\")) {",
+    },
+    {
+      name: "email test route",
+      kind: "js-block",
+      startAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/email/test\") {",
+      afterAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/settings\") {",
+      beforeAnchor: "if (url.pathname === \"/api/customer-service-scheduler\" || url.pathname.startsWith(\"/api/customer-service-scheduler/\")) {",
+    },
+    {
+      name: "operation environment route",
+      kind: "js-block",
+      startAnchor: "if (req.method === \"GET\" && url.pathname === \"/api/operation-console/environment\") {",
+      afterAnchor: "if (await handleWechatCollector(req, res, url)) {",
+      beforeAnchor: "if (req.method === \"GET\" && url.pathname === \"/api/tasks\") {",
+    },
+    {
+      name: "operation environment install route",
+      kind: "js-block",
+      startAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/operation-console/environment/install\") {",
+      afterAnchor: "if (await handleWechatCollector(req, res, url)) {",
+      beforeAnchor: "if (req.method === \"GET\" && url.pathname === \"/api/tasks\") {",
+    },
+    {
+      name: "operation environment enable route",
+      kind: "js-block",
+      startAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/operation-console/environment/enable\") {",
+      afterAnchor: "if (await handleWechatCollector(req, res, url)) {",
+      beforeAnchor: "if (req.method === \"GET\" && url.pathname === \"/api/tasks\") {",
+    },
+    {
+      name: "operation batch draft route",
       kind: "js-route-pair",
-      startAnchor: "const operationBatchReconcileMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/reconcile$/);",
-      routeAnchor: "if (req.method === \"POST\" && operationBatchReconcileMatch) {",
+      startAnchor: "const operationBatchDraftMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/draft$/);",
+      routeAnchor: "if ((req.method === \"GET\" || req.method === \"POST\") && operationBatchDraftMatch) {",
       afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
       beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
     },
     {
-      name: "operation personnel state route",
+      name: "operation batch create route",
       kind: "js-route-pair",
-      startAnchor: "const personnelStateMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-personnel-task$/);",
-      routeAnchor: "if (req.method === \"GET\" && personnelStateMatch) {",
+      startAnchor: "const operationBatchCreateMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/create$/);",
+      routeAnchor: "if (req.method === \"POST\" && operationBatchCreateMatch) {",
       afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
       beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
     },
     {
-      name: "operation personnel preview route",
+      name: "operation batch result route",
       kind: "js-route-pair",
-      startAnchor: "const personnelPreviewMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-personnel-task\\/preview$/);",
-      routeAnchor: "if (req.method === \"POST\" && personnelPreviewMatch) {",
+      startAnchor: "const operationBatchResultMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/result$/);",
+      routeAnchor: "if (req.method === \"POST\" && operationBatchResultMatch) {",
       afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
       beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
     },
     {
-      name: "operation personnel send route",
+      name: "content requirement email route",
       kind: "js-route-pair",
-      startAnchor: "const personnelSendMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-personnel-task\\/send$/);",
-      routeAnchor: "if (req.method === \"POST\" && personnelSendMatch) {",
-      afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
-      beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
-    },
-    {
-      name: "operation personnel attempt route",
-      kind: "js-route-pair",
-      startAnchor: "const personnelAttemptMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-personnel-task\\/attempts\\/([^/]+)$/);",
-      routeAnchor: "if (req.method === \"GET\" && personnelAttemptMatch) {",
-      afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
-      beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
-    },
-    {
-      name: "operation personnel recheck route",
-      kind: "js-route-pair",
-      startAnchor: "const personnelRecheckMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-personnel-task\\/recheck$/);",
-      routeAnchor: "if (req.method === \"POST\" && personnelRecheckMatch) {",
-      afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
-      beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
-    },
-    {
-      name: "operation batch update state route",
-      kind: "js-route-pair",
-      startAnchor: "const operationBatchUpdateStateMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/update-state$/);",
-      routeAnchor: "if (req.method === \"GET\" && operationBatchUpdateStateMatch) {",
-      afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
-      beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
-    },
-    {
-      name: "operation batch update preview route",
-      kind: "js-route-pair",
-      startAnchor: "const operationBatchUpdatePreviewMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/update-preview$/);",
-      routeAnchor: "if (req.method === \"POST\" && operationBatchUpdatePreviewMatch) {",
-      afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
-      beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
-    },
-    {
-      name: "operation batch update route",
-      kind: "js-route-pair",
-      startAnchor: "const operationBatchUpdateMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/update$/);",
-      routeAnchor: "if (req.method === \"POST\" && operationBatchUpdateMatch) {",
-      afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
-      beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
-    },
-    {
-      name: "operation batch update attempt route",
-      kind: "js-route-pair",
-      startAnchor: "const operationBatchUpdateAttemptMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/update-attempts\\/([^/]+)$/);",
-      routeAnchor: "if (req.method === \"GET\" && operationBatchUpdateAttemptMatch) {",
+      startAnchor: "const contentRequirementEmailMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/content-requirement-email$/);",
+      routeAnchor: "if (req.method === \"POST\" && contentRequirementEmailMatch) {",
       afterAnchor: "if (req.method === \"POST\" && taskRetryMatch) {",
       beforeAnchor: "const sharedSheetFillMatch = url.pathname.match(",
     },
@@ -174,12 +136,7 @@ const EXPECTED_SHARED_REGIONS = {
     { name: "auto-config progress events", kind: "js-block", startAnchor: "function pushEvent(job, evt) {" },
     { name: "Fanwei preview handler", kind: "js-block", startAnchor: "async function handleFanweiRequirementPreview(req, res) {" },
     { name: "Fanwei import task creation", kind: "js-block", startAnchor: "async function createFanweiRequirementImportFromPayload(payload, req, options = {}) {" },
-    {
-      name: "Fanwei import handler",
-      kind: "allowlisted-js-block",
-      startAnchor: "async function handleFanweiRequirementImport(req, res) {",
-      allowedChanges: [EXPECTED_TASK4_FANWEI_IMPORT_ERROR_MAPPING_CHANGE],
-    },
+    { name: "Fanwei import handler", kind: "js-block", startAnchor: "async function handleFanweiRequirementImport(req, res) {" },
     { name: "Fanwei auto-read status handler", kind: "js-block", startAnchor: "async function handleFanweiAutoReadStatus(_req, res) {" },
     { name: "Fanwei local-read handler", kind: "js-block", startAnchor: "async function handleFanweiLocalRead(req, res) {" },
     { name: "Fanwei auto-read handler", kind: "js-block", startAnchor: "async function handleFanweiAutoRead(req, res) {" },
@@ -193,12 +150,7 @@ const EXPECTED_SHARED_REGIONS = {
     { name: "auto-config progress state handler", kind: "js-block", startAnchor: "function handleJobState(job, res) {" },
     { name: "auto-config events handler", kind: "js-block", startAnchor: "function handleEvents(job, req, res) {" },
     { name: "exam list handler", kind: "js-block", startAnchor: "async function handleExamList(req, res) {" },
-    {
-      name: "exam detail handler",
-      kind: "allowlisted-js-block",
-      startAnchor: "async function handleTaskDetail(taskId, req, res) {",
-      allowedChanges: [EXPECTED_TASK10_TASK_DETAIL_RESPONSE_ENRICHMENT_CHANGE],
-    },
+    { name: "exam detail handler", kind: "js-block", startAnchor: "async function handleTaskDetail(taskId, req, res) {" },
     { name: "Fanwei preview route", kind: "js-block", startAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/fanwei/requirement-preview\") {" },
     { name: "Fanwei import route", kind: "js-block", startAnchor: "if (req.method === \"POST\" && url.pathname === \"/api/fanwei/requirement-import\") {" },
     { name: "Fanwei status route", kind: "js-block", startAnchor: "if (req.method === \"GET\" && url.pathname === \"/api/fanwei/auto-read/status\") {" },
@@ -243,7 +195,7 @@ const EXPECTED_SHARED_REGIONS = {
     { name: "Fanwei preview read", kind: "js-block", startAnchor: "async function copyFanweiReaderScript() {" },
     { name: "Fanwei auto-read status", kind: "js-block", startAnchor: "async function loadFanweiAutoReadStatus() {" },
     { name: "Fanwei requirement import", kind: "js-block", startAnchor: "async function createFanweiRequirementImport() {" },
-    { name: "auto-config progress event wiring", kind: "js-block", startAnchor: "function connectEvents(jobId, requirementIndex = uiState.autoConfigRequirementIndex) {" },
+    { name: "auto-config progress event wiring", kind: "js-block", startAnchor: "function connectEvents(jobId) {" },
     { name: "protected page registration", kind: "js-array", startAnchor: "const pages = [" },
     { name: "candidate import wiring", kind: "js-call", startAnchor: "candidateImportBtn.addEventListener(\"click\", async () => {" },
     { name: "Fanwei preview wiring", kind: "js-call", startAnchor: "fanweiCopyScriptBtn.addEventListener(\"click\", () => copyFanweiReaderScript().catch((error) => {" },
@@ -547,7 +499,7 @@ function extractProtectedRegion(source, relativePath, region) {
     : region.kind === "js-call"
       ? ["(", ")"]
       : ["{", "}"];
-  const openIndex = (region.kind === "js-block" || region.kind === "allowlisted-js-block") && /(?:async )?function /.test(region.startAnchor)
+  const openIndex = region.kind === "js-block" && /(?:async )?function /.test(region.startAnchor)
     ? findFunctionBodyOpen(source, startIndex, relativePath, region.name)
     : source.indexOf(tokens[0], startIndex);
   assert.notEqual(openIndex, -1, `${relativePath} protected region "${region.name}" has no ${tokens[0]}`);
@@ -583,42 +535,11 @@ function baselineFile(relativePath) {
   );
 }
 
-function countOccurrences(source, value) {
-  return source.split(value).length - 1;
-}
-
-function normalizeAllowedChanges(currentRegion, deployedRegion, relativePath, region) {
-  let normalized = currentRegion;
-  for (const change of region.allowedChanges || []) {
-    assert.equal(
-      countOccurrences(deployedRegion, change.current),
-      0,
-      `${relativePath} protected region "${region.name}" baseline unexpectedly contains ${change.name}`,
-    );
-    assert.equal(
-      countOccurrences(currentRegion, change.current),
-      1,
-      `${relativePath} protected region "${region.name}" authorized change ${change.name} must appear exactly once`,
-    );
-    if (change.baseline) {
-      assert.equal(
-        countOccurrences(deployedRegion, change.baseline),
-        1,
-        `${relativePath} protected region "${region.name}" baseline replacement for ${change.name} is unexpected`,
-      );
-    }
-    normalized = normalized.replace(change.current, change.baseline);
-  }
-  return normalized;
-}
-
 function assertFileRegionsMatch(relativePath, regions, currentSource, deployedSource) {
   for (const region of regions) {
-    const currentRegion = extractProtectedRegion(currentSource, relativePath, region);
-    const deployedRegion = extractProtectedRegion(deployedSource, relativePath, region);
     assert.equal(
-      normalizeAllowedChanges(currentRegion, deployedRegion, relativePath, region),
-      deployedRegion,
+      extractProtectedRegion(currentSource, relativePath, region),
+      extractProtectedRegion(deployedSource, relativePath, region),
       `${relativePath} protected region "${region.name}" differs from deployed main commit ${PROTECTED_BASE_COMMIT}`,
     );
   }
@@ -668,7 +589,7 @@ function assertPolicyShape({ exactFiles, sentinels, sharedRegions }) {
 test("PR 5 protection manifest defines the complete unique policy", () => {
   assert.equal(
     PROTECTED_BASE_COMMIT,
-    "27e65133bfbbb81fd50817a54f2e28c56277389c",
+    "e3250c09bfb2666a9787b4d23bdf348634f69ff8",
   );
   assertPolicyShape({
     exactFiles: PROTECTED_EXACT_FILES,
@@ -748,60 +669,6 @@ test("PR 5 protected regions in shared files match the deployed main commit", ()
     const deployedSource = baselineFile(relativePath).toString("utf8");
     assertFileRegionsMatch(relativePath, regions, currentSource, deployedSource);
   }
-});
-
-test("PR 5 Fanwei protection rejects changed or unapproved protected text", () => {
-  const relativePath = "server/easy_exam_server.mjs";
-  const currentSource = readFileSync(new URL(`../${relativePath}`, import.meta.url), "utf8");
-  const deployedSource = baselineFile(relativePath).toString("utf8");
-  const task4Regions = PROTECTED_SHARED_REGIONS[relativePath].filter(
-    (region) => region.name === "Fanwei import task creation" || region.name === "Fanwei import handler",
-  );
-
-  const changedHandlerAllowlistSource = currentSource.replace(
-    "    json(res, error.status || 500, {\n",
-    "    json(res, error.status || 400, {\n",
-  );
-  assert.throws(
-    () => assertFileRegionsMatch(relativePath, task4Regions, changedHandlerAllowlistSource, deployedSource),
-    /authorized change Task 4 Fanwei import conflict error mapping must appear exactly once/,
-  );
-
-  const unapprovedMutationSource = currentSource.replace(
-    '  await fs.writeFile(payloadPath, JSON.stringify(model, null, 2), "utf8");\n',
-    '  return null;\n  await fs.writeFile(payloadPath, JSON.stringify(model, null, 2), "utf8");\n',
-  );
-  assert.throws(
-    () => assertFileRegionsMatch(relativePath, task4Regions, unapprovedMutationSource, deployedSource),
-    /protected region "Fanwei import task creation" differs/,
-  );
-});
-
-test("PR 5 Task 10 detail allowlist rejects changed or unapproved protected text", () => {
-  const relativePath = "server/easy_exam_server.mjs";
-  const currentSource = readFileSync(new URL(`../${relativePath}`, import.meta.url), "utf8");
-  const deployedSource = baselineFile(relativePath).toString("utf8");
-  const detailRegion = PROTECTED_SHARED_REGIONS[relativePath].filter(
-    (region) => region.name === "exam detail handler",
-  );
-
-  const changedAllowlistSource = currentSource.replace(
-    "    ...withOperationBatchNameEditorDefaults(enrichedTask),\n",
-    "    ...withOperationBatchNameEditorDefaults(syncedTask),\n",
-  );
-  assert.throws(
-    () => assertFileRegionsMatch(relativePath, detailRegion, changedAllowlistSource, deployedSource),
-    /authorized change Task 10 legacy batch-name response enrichment must appear exactly once/,
-  );
-
-  const unapprovedMutationSource = currentSource.replace(
-    "  let syncedTask = task;\n",
-    "  let syncedTask = { ...task };\n",
-  );
-  assert.throws(
-    () => assertFileRegionsMatch(relativePath, detailRegion, unapprovedMutationSource, deployedSource),
-    /protected region "exam detail handler" differs/,
-  );
 });
 
 test("PR 5 shared-region guard rejects an immediate return in handleExamList", () => {
@@ -935,7 +802,7 @@ test("PR 5 server dispatcher guard rejects a widened allowlisted route", () => {
   const sharedSheetAnchor = "const sharedSheetFillMatch = url.pathname.match(";
   const mutatedSource = currentSource.replace(
     sharedSheetAnchor,
-    `const operationBatchReconcileMatch = url.pathname.match(/.*/);\n    if (req.method === "POST" && operationBatchReconcileMatch) {\n      return await handleOperationBatchReconcile(operationBatchReconcileMatch[1], req, res);\n    }\n    ${sharedSheetAnchor}`,
+    `const operationBatchCreateMatch = url.pathname.match(/.*/);\n    if (req.method === "POST" && operationBatchCreateMatch) {\n      return await handleOperationBatchCreate(operationBatchCreateMatch[1], req, res);\n    }\n    ${sharedSheetAnchor}`,
   );
   assert.notEqual(mutatedSource, currentSource, "widened operation route was not applied");
 
@@ -953,7 +820,7 @@ test("PR 5 server dispatcher guard rejects a widened allowlisted route", () => {
   );
 });
 
-test("PR 5 server dispatcher guard rejects a protected route nested in its slot opener", () => {
+test("PR 5 server dispatcher guard rejects an allowlisted route nested in its slot opener", () => {
   const relativePath = "server/easy_exam_server.mjs";
   const currentSource = baselineFile(relativePath).toString("utf8");
   const settingsRouteOpen = "if (req.method === \"POST\" && url.pathname === \"/api/settings\") {\n";
@@ -974,11 +841,11 @@ test("PR 5 server dispatcher guard rejects a protected route nested in its slot 
       mutatedSource,
       baselineFile(relativePath).toString("utf8"),
     ),
-    /protected region "server dispatcher with approved PR 5 route slots" differs/,
+    /email settings route (?:is nested|before its approved slot boundary)/,
   );
 });
 
-test("PR 5 server dispatcher guard rejects a same-line suffix after a protected route", () => {
+test("PR 5 server dispatcher guard rejects a same-line suffix after an allowlisted route", () => {
   const relativePath = "server/easy_exam_server.mjs";
   const currentSource = baselineFile(relativePath).toString("utf8");
   const customerServiceAnchor = "if (url.pathname === \"/api/customer-service-scheduler\" || url.pathname.startsWith(\"/api/customer-service-scheduler/\")) {";
@@ -999,22 +866,33 @@ test("PR 5 server dispatcher guard rejects a same-line suffix after a protected 
       mutatedSource,
       baselineFile(relativePath).toString("utf8"),
     ),
-    /protected region "server dispatcher with approved PR 5 route slots" differs/,
+    /email settings route has a non-whitespace same-line suffix/,
   );
 });
 
-test("PR 5 server dispatcher guard allows only the exact reconciliation route", () => {
+test("PR 5 server dispatcher guard allows only the planned operation and email routes", () => {
   const relativePath = "server/easy_exam_server.mjs";
   const currentSource = baselineFile(relativePath).toString("utf8");
-  const reconcileRoute = `const operationBatchReconcileMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/reconcile$/);\n    if (req.method === "POST" && operationBatchReconcileMatch) {\n      return await handleOperationBatchReconcile(decodeURIComponent(operationBatchReconcileMatch[1]), req, res);\n    }\n    `;
-  const mutatedSource = currentSource.replace(
-    "const sharedSheetFillMatch = url.pathname.match(",
-    `${reconcileRoute}const sharedSheetFillMatch = url.pathname.match(`,
-  );
+  const emailRoutes = `if ((req.method === "GET" || req.method === "POST") && url.pathname === "/api/email/settings") {\n      return await handleEmailSettings(req, res);\n    }\n    if (req.method === "POST" && url.pathname === "/api/email/test") {\n      return await handleEmailTest(req, res);\n    }\n    `;
+  const operationEnvironmentRoutes = `if (req.method === "GET" && url.pathname === "/api/operation-console/environment") {\n      return await handleOperationConsoleEnvironment(req, res);\n    }\n    if (req.method === "POST" && url.pathname === "/api/operation-console/environment/install") {\n      return await handleOperationConsoleEnvironmentInstall(req, res);\n    }\n    if (req.method === "POST" && url.pathname === "/api/operation-console/environment/enable") {\n      return await handleOperationConsoleEnvironmentEnable(req, res);\n    }\n    `;
+  const taskRoutes = `const operationBatchDraftMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/draft$/);\n    if ((req.method === "GET" || req.method === "POST") && operationBatchDraftMatch) {\n      return await handleOperationBatchDraft(decodeURIComponent(operationBatchDraftMatch[1]), req, res);\n    }\n    const operationBatchCreateMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/create$/);\n    if (req.method === "POST" && operationBatchCreateMatch) {\n      return await handleOperationBatchCreate(decodeURIComponent(operationBatchCreateMatch[1]), req, res);\n    }\n    const operationBatchResultMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/operation-batch\\/result$/);\n    if (req.method === "POST" && operationBatchResultMatch) {\n      return await handleOperationBatchResult(decodeURIComponent(operationBatchResultMatch[1]), req, res);\n    }\n    const contentRequirementEmailMatch = url.pathname.match(/^\\/api\\/tasks\\/([^/]+)\\/content-requirement-email$/);\n    if (req.method === "POST" && contentRequirementEmailMatch) {\n      return await handleContentRequirementEmail(decodeURIComponent(contentRequirementEmailMatch[1]), req, res);\n    }\n    `;
+  const mutatedSource = currentSource
+    .replace(
+      "if (url.pathname === \"/api/customer-service-scheduler\" || url.pathname.startsWith(\"/api/customer-service-scheduler/\")) {",
+      `${emailRoutes}if (url.pathname === "/api/customer-service-scheduler" || url.pathname.startsWith("/api/customer-service-scheduler/")) {`,
+    )
+    .replace(
+      "if (req.method === \"GET\" && url.pathname === \"/api/tasks\") {",
+      `${operationEnvironmentRoutes}if (req.method === "GET" && url.pathname === "/api/tasks") {`,
+    )
+    .replace(
+      "const sharedSheetFillMatch = url.pathname.match(",
+      `${taskRoutes}const sharedSheetFillMatch = url.pathname.match(`,
+    );
   assert.notEqual(
     mutatedSource,
     currentSource,
-    "planned reconciliation route insertion was not applied",
+    "planned operation and email route insertions were not applied",
   );
 
   const dispatcherRegion = PROTECTED_SHARED_REGIONS[relativePath].filter(

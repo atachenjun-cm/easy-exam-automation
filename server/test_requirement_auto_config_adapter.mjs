@@ -43,8 +43,8 @@ test("converts a complete WeChat requirement into the existing auto config shape
   assert.equal(result.config.leaveLimit, 3);
   assert.deepEqual(result.config.subjects, ["综合能力", "专业知识"]);
   assert.deepEqual(result.config.courses, [
-    { name: "综合能力", code: "20260705-01-01", form_codes: ["20260705-01-01"], paper_name: "第一场综合能力卷" },
-    { name: "专业知识", code: "20260705-01-02", form_codes: ["20260705-01-02"], paper_name: "第一场专业知识卷" },
+    { name: "综合能力", paper_name: "第一场综合能力卷" },
+    { name: "专业知识", paper_name: "第一场专业知识卷" },
   ]);
   assert.equal(result.config.confirmOnly, true);
 });
@@ -115,8 +115,8 @@ test("reports warnings when execution-critical fields cannot be normalized", () 
   assert.deepEqual(result.config.subjects, ["语文", "数学"]);
   assert.equal(result.config.startTimeDisplay, "");
   assert.equal(result.config.endTimeDisplay, "");
-  assert.deepEqual(result.config.courses, []);
+  assert.deepEqual(result.config.courses, [{ name: "语文" }, { name: "数学" }]);
   assert.ok(result.warnings.includes("正式考试时间无法解析。"));
   assert.ok(result.warnings.includes("未读取到试考时间，试考自动创建会跳过。"));
-  assert.ok(result.warnings.includes("科目信息缺少考试日期，无法按规则生成 code/form_codes。"));
+  assert.equal(result.warnings.some((warning) => warning.includes("code/form_codes")), false);
 });

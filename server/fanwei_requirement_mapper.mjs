@@ -95,6 +95,32 @@ function firstNonEmpty(...values) {
   return values.map(cleanText).find(Boolean) ?? "";
 }
 
+function normalizeFlowOpinionRows(rows = []) {
+  return (Array.isArray(rows) ? rows : []).flatMap((row) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return [];
+    const normalized = {
+      "处理人": cleanText(row["处理人"] ?? row.operator),
+      "部门": cleanText(row["部门"] ?? row.department),
+      "接收人": cleanText(row["接收人"] ?? row.recipient),
+      "操作时间": cleanText(row["操作时间"] ?? row.operatedAt),
+      "节点": cleanText(row["节点"] ?? row.operation),
+    };
+    return Object.values(normalized).some(Boolean) ? [normalized] : [];
+  });
+}
+
+export function contentPersonnelFromFlowOpinionRows(rows = []) {
+  const personnel = [];
+  for (const row of normalizeFlowOpinionRows(rows)) {
+    if (row["部门"] !== "内容开发部") continue;
+    for (const name of row["接收人"].split(/[\s、,，;；]+/).map(cleanText).filter(Boolean)) {
+      if (/^(等待合并|无|暂无)$/.test(name) || personnel.includes(name)) continue;
+      personnel.push(name);
+    }
+  }
+  return personnel.join("；");
+}
+
 function deriveExamName(fields) {
   const projectName = firstNonEmpty(fields["项目名称"], fields["标题"]);
   const rawOther = cleanText(fields["其他说明"]);
@@ -274,6 +300,7 @@ export function buildFanweiRequirementModel(fanwei) {
   appendPreview(previewFields, "考场规则", confirmationFields["考场规则"], "服务确认单");
   appendPreview(previewFields, "预估科次", fields["预估科次"], "泛微主表");
   appendPreview(previewFields, "内容来源", fields["内容来源"], "泛微主表");
+  appendPreview(previewFields, "内容人员", fields["内容人员"], "流转意见");
   appendPreview(previewFields, "试题类型", fields["试题类型"], "泛微主表");
   appendPreview(previewFields, "科目数量", subjectCount, subjectCount === cleanText(fields["科目数"]) ? "泛微主表" : "服务确认单");
   appendPreview(previewFields, "试卷数量", paperCount, "泛微主表");
@@ -346,6 +373,9 @@ export function normalizeFanweiDomPayload(payload) {
   for (const [key, value] of Object.entries(payload?.fields ?? {})) {
     fields[cleanText(key)] = cleanText(value);
   }
+  const flowOpinionRows = normalizeFlowOpinionRows(payload?.flowOpinionRows);
+  const contentPersonnel = contentPersonnelFromFlowOpinionRows(flowOpinionRows);
+  if (contentPersonnel) fields["内容人员"] = contentPersonnel;
   const serviceFields = {};
   for (const [key, value] of Object.entries(payload?.serviceConfirmation?.fields ?? {})) {
     serviceFields[cleanText(key)] = cleanText(value);
@@ -356,5 +386,6 @@ export function normalizeFanweiDomPayload(payload) {
     serviceConfirmation: { fields: serviceFields },
     examSceneRows: Array.isArray(payload?.examSceneRows) ? payload.examSceneRows : [],
     opaRows: Array.isArray(payload?.opaRows) ? payload.opaRows : [],
+    flowOpinionRows,
   };
 }

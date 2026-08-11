@@ -71,6 +71,26 @@ test("score stamp payload uses manual batch name as the direct OA batch search t
   assert.deepEqual(payload.batchMatchKeywords, ["人工回填批次名称_2026年7月"]);
 });
 
+test("score stamp payload falls back to the synchronized operation batch name", () => {
+  const payload = buildScoreStampApplicationPayload({
+    task: {
+      taskId: "task-1",
+      projectName: "项目考试",
+      config: {
+        operationBatch: {
+          code: "EZT260018",
+          draft: { fields: { batchName: { value: "项目考试_2026年8月" } } },
+        },
+      },
+    },
+    scoreResult: { pdfFileName: "成绩反馈单.pdf" },
+    env: {},
+  });
+
+  assert.equal(payload.batchKeyword, "项目考试_2026年8月");
+  assert.deepEqual(payload.batchSearchQueries, ["项目考试_2026年8月"]);
+});
+
 test("score stamp fill script asks the operator to verify the uploaded encrypted archive", () => {
   const script = buildScoreStampApplicationFillScript({
     archiveFileName: "score.zip",
