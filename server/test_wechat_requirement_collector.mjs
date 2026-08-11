@@ -167,6 +167,26 @@ test("parses conversational time and subject changes from visible WeChat text", 
   ]);
 });
 
+test("parses compact direct exam date changes from real WeChat OCR text", () => {
+  const config = loadWechatGroupConfig(configuredRequestConfig);
+  const draft = buildWechatRequirementDraft({
+    config,
+    groupName: "AI赋能运营自动化小组",
+    text: [
+      "09:05",
+      "微信电脑版",
+      "考试改到8-4号",
+    ].join("\n"),
+  });
+
+  assert.equal(draft.requirement.formal_exam_time_range, "8-4号");
+  assert.deepEqual(draft.changeRecords, [{
+    type: "formal_exam_time_change",
+    message: "考试改到8-4号",
+    changes: { formal_exam_time_range: "8-4号" },
+  }]);
+});
+
 test("uses matched attachment previews as requirement parsing context", () => {
   const config = loadWechatGroupConfig(sampleConfig);
   const draft = buildWechatRequirementDraft({

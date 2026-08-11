@@ -151,7 +151,11 @@ export function buildScoreStampApplicationPayload({
   const date = shanghaiDate(now);
   const applicant = first(env.SCORE_STAMP_APPLICANT_NAME, user.name, business.applicant, user.email);
   const projectName = first(task.projectName, business.project_name, scoreResult.examName);
-  const manualBatchName = first(config.scoreStampBatchName);
+  const manualBatchName = first(
+    config.scoreStampBatchName,
+    config.operationBatch?.batchName,
+    config.operationBatch?.draft?.fields?.batchName?.value,
+  );
   const fallbackBatchKeyword = first(
     config.operationBatchCode,
     config.operationBatch?.code,

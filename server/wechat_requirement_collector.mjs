@@ -14,6 +14,11 @@ const REQUIRED_FIELD_LABELS = {
   subjects: "考试科目",
 };
 
+const EXAM_TIME_CHANGE_PATTERNS = [
+  /(?:考试时间|正式考试时间|正式时间|时间)(?:改一下|变更一下|调整一下)?[，,\s]*(?:改到|改为|调整到|调整为)\s*([^。\n，,；;]+)/,
+  /考试(?:日期)?(?:改到|改为|调整到|调整为)\s*((?:\d{1,4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?(?:日|号)?|\d{1,2}月\d{1,2}(?:日|号)?|\d{1,2}号|周[一二三四五六日天]|星期[一二三四五六日天])[^。\n，,；;]*)/,
+];
+
 export function loadWechatGroupConfig(input) {
   const raw = typeof input === "string" ? JSON.parse(input) : input || {};
   const groups = Array.isArray(raw.groups) ? raw.groups : [];
@@ -299,8 +304,7 @@ export function parseWechatRequirementMessages(text) {
   requirement.formal_exam_time_range = latestMatch(parsingLines, [
     /正式考试(?!时间)\s*([^。\n，,；;]+)/,
     /正式(?:时间|考试时间)(?:是|为|[:：])?\s*([^。\n，,；;]+)/,
-    /(?:考试时间|正式考试时间|正式时间|时间)(?:改一下|变更一下|调整一下)?[，,\s]*(?:改到|改为|调整到|调整为)\s*([^。\n，,；;]+)/,
-    /(?:考试时间|正式考试时间|正式时间|时间)(?:改到|改为|调整到|调整为)\s*([^。\n，,；;]+)/,
+    ...EXAM_TIME_CHANGE_PATTERNS,
   ]);
   requirement.mock_exam_time_range = latestMatch(parsingLines, [
     /试考(?!日期时间)\s*([^。\n，,；;]+)/,
@@ -464,9 +468,9 @@ function expandKnownSubjects(value) {
 function collectExplicitChangeRecords(lines, changeRecords, requirement) {
   for (const line of lines) {
     if (/变更|调整|增加|新增|改|不考/.test(line)) {
-      const timeMatch = line.match(/(?:考试时间|正式考试时间|正式时间|时间)(?:改一下|变更一下|调整一下)?[，,\s]*(?:改到|改为|调整到|调整为)\s*([^。\n，,；;]+)/);
-      if (timeMatch?.[1]) {
-        const value = cleanupValue(timeMatch[1]);
+      const changedTime = firstMatch(line, EXAM_TIME_CHANGE_PATTERNS);
+      if (changedTime) {
+        const value = cleanupValue(changedTime);
         requirement.formal_exam_time_range = value;
         changeRecords.push({
           type: "formal_exam_time_change",

@@ -4,20 +4,47 @@ import {
   advanceOperationBatchListPage,
   launchOperationBatchContext,
   openExactOperationBatchCard,
+  operationConsoleBaseUrl,
   operationDateTitle,
   runWithOperationBatchContext,
   searchOperationBatchListPages,
   startOperationBatchListSearch,
-} from "./operation_batch_runner.mjs";
+} from "./operation_personnel_console_runner.mjs";
 import { openVisibleEztestSchedulePage } from "./operation_batch_update_runner.mjs";
 
-const RECIPIENT_RULES = Object.freeze({
-  test: { toGroup: "演练组", toName: "张乐翔", ccGroup: "", ccCount: 0 },
-  production: { toGroup: "拓展二部", toName: "唐润梅", ccGroup: "结算组", ccCount: 4 },
-});
+const PERSONNEL_CC_GROUP = "考站管理&质量控制部";
+const PERSONNEL_CC_DEFAULT_IDS = Object.freeze(["zypz@ata.net.cn"]);
 
 function text(value) {
   return String(value ?? "").trim();
+}
+
+function logicalRecipientGroupName(value) {
+  return text(value).replace(/\s*[（(]\s*项目经理\s*[）)]\s*$/, "");
+}
+
+export function operationPersonnelRecipientGroupMatches(actual, expected) {
+  return Boolean(text(actual) && text(expected))
+    && logicalRecipientGroupName(actual) === logicalRecipientGroupName(expected);
+}
+
+export function operationPersonnelRecipientRule(options = {}) {
+  const batch = options.target?.batch || options.batch || {};
+  const recipients = options.recipients || options.target?.recipients || {};
+  const toGroup = text(recipients.toGroup || batch.projectDepartment);
+  const toNames = Array.isArray(recipients.toNames) ? recipients.toNames.map(text).filter(Boolean) : [];
+  const toName = text(toNames[0] || batch.projectManager);
+  if (!toGroup || !toName || toNames.length > 1) {
+    throw operationConflict("发送规则必须包含唯一的项目部归属和项目经理");
+  }
+  return {
+    toGroup,
+    toName,
+    ccGroup: PERSONNEL_CC_GROUP,
+    ccCount: 0,
+    ccGroupOnly: true,
+    allowedDefaultIds: [...PERSONNEL_CC_DEFAULT_IDS],
+  };
 }
 
 function numberOrText(value) {
@@ -67,7 +94,7 @@ function assertScheduleCodes(schedules = []) {
 function comparableScheduleMinute(value) {
   const raw = text(value);
   const match = raw.match(
-    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/,
+    /^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/,
   );
   if (!match || (match[6] !== undefined && match[6] !== "00")) {
     throw batchScheduleConflict(
@@ -243,6 +270,7 @@ function normalizeDirectoryMatch(raw = {}) {
     group: text(item?.group),
     id: text(item?.id),
     name: text(item?.name),
+    ...(text(item?.kind) ? { kind: text(item.kind) } : {}),
   }));
   return { to: people(raw.to), cc: people(raw.cc) };
 }
@@ -271,7 +299,9 @@ export function normalizeOperationPersonnelSnapshot(raw = {}) {
 }
 
 function exactGroup(groups, name) {
-  const matches = groups.filter((group) => text(group?.name) === name);
+  const matches = groups.filter((group) => (
+    operationPersonnelRecipientGroupMatches(group?.name, name)
+  ));
   if (matches.length !== 1) {
     throw new Error(`人员目录组“${name}”必须精确匹配 1 个，实际 ${matches.length} 个`);
   }
@@ -287,18 +317,25 @@ function exactPerson(group, name) {
 }
 
 function recipient(person) {
-  return { id: text(person?.id), name: text(person?.name) };
+  return {
+    id: text(person?.id),
+    name: text(person?.name),
+    ...(text(person?.kind) ? { kind: text(person.kind) } : {}),
+  };
+}
+
+function groupRecipient(name) {
+  return { id: `group:${text(name)}`, name: text(name), kind: "group" };
 }
 
 export function matchOperationPersonnelRecipients(options = {}) {
-  const environment = text(options.environment);
-  const rule = RECIPIENT_RULES[environment];
-  if (!rule) throw new Error(`未知运控收件环境：${environment || "空"}`);
+  const rule = operationPersonnelRecipientRule(options);
   const groups = [...(options.groups || [])];
   const toGroup = exactGroup(groups, rule.toGroup);
   const to = [recipient(exactPerson(toGroup, rule.toName))];
   if (!rule.ccGroup) return { to, cc: [] };
   const ccGroup = exactGroup(groups, rule.ccGroup);
+  if (rule.ccGroupOnly) return { to, cc: [groupRecipient(ccGroup.name)] };
   const cc = [...(ccGroup.people || [])].map(recipient);
   if (cc.length !== rule.ccCount) {
     throw new Error(`${rule.ccGroup}必须精确匹配 ${rule.ccCount} 人，实际 ${cc.length} 人`);
@@ -310,8 +347,7 @@ export function matchOperationPersonnelRecipients(options = {}) {
   return { to, cc };
 }
 
-function directoryMatch(environment, matched) {
-  const rule = RECIPIENT_RULES[environment];
+function directoryMatch(rule, matched) {
   return {
     to: matched.to.map((item) => ({ group: rule.toGroup, ...item })),
     cc: matched.cc.map((item) => ({ group: rule.ccGroup, ...item })),
@@ -554,6 +590,170 @@ export function operationPersonnelPageFromVisibleRaw(raw = {}) {
       },
     },
   };
+}
+
+export async function clickVisiblePersonnelPaginationNext(control) {
+  const clickable = control.locator("button, a").first();
+  if (await clickable.count() !== 1) {
+    throw operationControlError("分散在线监考任务下一页按钮", await clickable.count());
+  }
+  await clickable.evaluate((element) => element.click());
+}
+
+export function operationPersonnelCurrentPageFromVisibleRaw(raw = {}) {
+  const paginationCount = Number(raw.paginationCount || 0);
+  if (paginationCount === 0) return 1;
+  if (paginationCount !== 1) {
+    throw operationControlError("分散在线监考任务分页", paginationCount);
+  }
+  const activeCount = Number(raw.activeCount || 0);
+  if (activeCount !== 1) {
+    throw operationControlError("分散在线监考任务当前页", activeCount);
+  }
+  const value = text(raw.value);
+  if (!/^\d+$/.test(value)) throw new Error(`分散在线监考任务当前页无效：${value || "空"}`);
+  return Number(value);
+}
+
+export async function readVisiblePersonnelTaskResultSummary(page, timeout = 10_000) {
+  const summary = page.getByText(/^找到\s*\d+\s*条结果$/);
+  if (await summary.count() === 0) {
+    await summary.first().waitFor({ state: "visible", timeout });
+  }
+  const count = await summary.count();
+  if (count !== 1) throw operationControlError("分散在线监考任务结果统计", count);
+  const value = text(await summary.first().innerText());
+  if (!/^找到\s*\d+\s*条结果$/.test(value)) {
+    throw new Error(`分散在线监考任务结果统计无效：${value || "空"}`);
+  }
+  return value;
+}
+
+export async function waitForVisiblePersonnelTaskInitialResults(page, options = {}) {
+  const maxChecks = Math.max(1, Number(options.maxChecks || 51));
+  const pollMs = Math.max(0, Number(options.pollMs ?? 200));
+  let summary = "";
+  for (let check = 0; check < maxChecks; check += 1) {
+    summary = await readVisiblePersonnelTaskResultSummary(page);
+    if (!/^找到\s*0\s*条结果$/.test(summary)) return summary;
+    if (check + 1 < maxChecks && typeof page.waitForTimeout === "function") {
+      await page.waitForTimeout(pollMs);
+    }
+  }
+  throw new Error(`分散在线监考任务初始列表未完成加载：${summary || "无结果统计"}`);
+}
+
+export function operationPersonnelTaskListFilterSettled(raw = {}) {
+  const summary = text(raw.summary);
+  const summaryMatch = summary.match(/^找到\s*(\d+)\s*条结果$/);
+  const pageSize = Math.max(1, Number(raw.pageSize || 10));
+  if (!summaryMatch) return false;
+  const total = Number(summaryMatch[1]);
+  const summarySettled = summary !== text(raw.previousSummary)
+    || /^找到\s*1\s*条结果$/.test(text(raw.previousSummary));
+  const paginationCount = Number(raw.paginationCount || 0);
+  const paginationSettled = paginationCount === 0
+    ? total <= pageSize
+    : paginationCount === 1
+      && Number(raw.activePage) === 1
+      && (total > pageSize || raw.nextDisabled === true);
+  return summarySettled
+    && paginationSettled
+    && Number(raw.exactCount) === 1
+    && Number(raw.rowCount) === Math.min(total, pageSize);
+}
+
+export function operationPersonnelTaskListPageCount(summary, pageSize = 10) {
+  const match = text(summary).match(/^找到\s*(\d+)\s*条结果$/);
+  if (!match) throw new Error(`分散在线监考任务结果统计无效：${text(summary) || "空"}`);
+  return Math.max(1, Math.ceil(Number(match[1]) / Math.max(1, Number(pageSize || 10))));
+}
+
+export function operationPersonnelTaskListCanReuseFilter(currentValue, searchValue, summary) {
+  return text(currentValue) === text(searchValue)
+    && /^找到\s*1\s*条结果$/.test(text(summary));
+}
+
+export async function submitVisiblePersonnelTaskFilter(search, searchValue) {
+  await search.fill("");
+  await search.fill(searchValue);
+  await search.press("Enter");
+}
+
+export function operationPersonnelTaskSearchValue(visibility = {}, batchCode, batchName) {
+  if (visibility.batchCodeColumnVisible) return text(batchCode);
+  if (visibility.batchNameColumnVisible) return text(batchName);
+  throw new Error("分散在线监考任务主表缺少可见的批次代码或批次名称列");
+}
+
+export async function waitForVisiblePersonnelTaskListFilter(page, options = {}) {
+  const maxChecks = Math.max(1, Number(options.maxChecks || 51));
+  const pollMs = Math.max(0, Number(options.pollMs ?? 200));
+  const stableChecks = Math.max(1, Number(options.stableChecks || 5));
+  let consecutiveStable = 0;
+  let latest = {};
+  for (let check = 0; check < maxChecks; check += 1) {
+    latest = await page.evaluate(({ batchCode, batchName, previousSummary }) => {
+      const clean = (value) => String(value ?? "").trim().replace(/\s+/g, " ");
+      const visible = (element) => Boolean(
+        element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length)
+      );
+      const tables = [...document.querySelectorAll("table")].filter((table) => {
+        if (!visible(table)) return false;
+        return [...table.querySelectorAll("thead th")]
+          .some((header) => clean(header.textContent) === "批次名称");
+      });
+      const table = tables.length === 1 ? tables[0] : null;
+      const headers = table
+        ? [...table.querySelectorAll("thead th")].map((header) => clean(header.textContent))
+        : [];
+      const rows = table
+        ? [...table.querySelectorAll("tbody tr")].filter(visible)
+        : [];
+      const codeIndex = headers.indexOf("批次代码");
+      const nameIndex = headers.indexOf("批次名称");
+      const exactCount = rows.filter((row) => {
+        const cells = [...row.querySelectorAll("td")].map((cell) => clean(cell.textContent));
+        return cells[nameIndex] === batchName
+          && (codeIndex < 0 || cells[codeIndex] === batchCode);
+      }).length;
+      const summary = String(document.body?.innerText ?? "")
+        .match(/找到\s*\d+\s*条结果/)?.[0] || "";
+      const pageSizeText = [...document.querySelectorAll(".ant-pagination-options-size-changer")]
+        .filter(visible)[0]?.textContent || "";
+      const paginations = [...document.querySelectorAll(".ant-pagination")].filter(visible);
+      const active = paginations.length === 1
+        ? [...paginations[0].querySelectorAll(".ant-pagination-item-active")].filter(visible)
+        : [];
+      const next = paginations.length === 1
+        ? [...paginations[0].querySelectorAll(".ant-pagination-next")].filter(visible)
+        : [];
+      return {
+        previousSummary,
+        summary: clean(summary),
+        tableCount: tables.length,
+        exactCount,
+        rowCount: rows.length,
+        pageSize: Number(pageSizeText.match(/\d+/)?.[0] || 10),
+        paginationCount: paginations.length,
+        activePage: Number(active[0]?.getAttribute("title") || active[0]?.textContent || 0),
+        nextDisabled: next.length === 1 && (
+          next[0].classList.contains("ant-pagination-disabled")
+          || next[0].getAttribute("aria-disabled") === "true"
+        ),
+      };
+    }, options);
+    consecutiveStable = (!options.requiredSummary || latest.summary === options.requiredSummary)
+      && latest.tableCount === 1
+      && operationPersonnelTaskListFilterSettled(latest)
+      ? consecutiveStable + 1
+      : 0;
+    if (consecutiveStable >= stableChecks) return latest;
+    if (check + 1 < maxChecks && typeof page.waitForTimeout === "function") {
+      await page.waitForTimeout(pollMs);
+    }
+  }
+  throw new Error(`运控任务查询结果未稳定：${JSON.stringify(latest)}`);
 }
 
 function visibleRowMap(rows = []) {
@@ -808,11 +1008,7 @@ export async function openVisiblePersonnelTaskSheet(page, instruction = {}, opti
   const batchName = text(instruction.batch?.batchName || instruction.batchName);
   if (!batchCode) throw new Error("缺少运控批次代码");
   if (!batchName) throw new Error("缺少运控批次名称");
-  const baseUrl = text(
-    options.baseUrl
-    || process.env.OPERATION_CONSOLE_BASE_URL
-    || "http://172.16.18.198:8020",
-  );
+  const baseUrl = operationConsoleBaseUrl(options);
   await page.goto(`${baseUrl.replace(/\/$/, "")}/job/decentralizedInvigilate`, {
     waitUntil: "domcontentloaded",
   });
@@ -825,6 +1021,11 @@ export async function openVisiblePersonnelTaskSheet(page, instruction = {}, opti
   if (await search.count() !== 1) {
     throw operationControlError("分散在线监考任务筛选框", await search.count());
   }
+  const previousResultSummary = await waitForVisiblePersonnelTaskInitialResults(page);
+  await page.getByRole("columnheader", { name: "批次名称", exact: true }).first().waitFor({
+    state: "visible",
+    timeout: 10_000,
+  });
   const visibleTables = page.locator("table:visible");
   let batchCodeColumnVisible = false;
   let batchNameColumnVisible = false;
@@ -833,73 +1034,56 @@ export async function openVisiblePersonnelTaskSheet(page, instruction = {}, opti
     batchCodeColumnVisible ||= headers.includes("批次代码");
     batchNameColumnVisible ||= headers.includes("批次名称");
   }
-  const searchValue = !batchCodeColumnVisible && batchNameColumnVisible
-    ? batchName
-    : batchCode;
-  const resultSummary = page.getByText(/^找到\s*\d+\s*条结果$/);
-  const previousResultSummary = await resultSummary.count() === 1
-    ? text(await resultSummary.first().innerText())
-    : "";
-  await search.fill(searchValue);
-  await search.press("Enter");
-  try {
-    await page.getByText(searchValue, { exact: true }).first().waitFor({
-      state: "visible",
-      timeout: 10_000,
-    });
-  } catch (cause) {
-    const error = new Error(`运控批次 ${batchCode}/${batchName} 尚未生成人员任务单`);
-    error.code = "PERSONNEL_TASK_SHEET_NOT_READY";
-    error.status = 409;
-    error.cause = cause;
-    throw error;
-  }
-  if (typeof page.waitForFunction === "function") {
+  const searchValue = operationPersonnelTaskSearchValue({
+    batchCodeColumnVisible,
+    batchNameColumnVisible,
+  }, batchCode, batchName);
+  const reuseExistingFilter = operationPersonnelTaskListCanReuseFilter(
+    await search.inputValue(),
+    searchValue,
+    previousResultSummary,
+  );
+  let filteredListState;
+  if (reuseExistingFilter) {
     try {
-      await page.waitForFunction(
-        ({
-          batchCode: expectedCode,
-          batchName: expectedName,
-          previousResultSummary: previousSummary,
-        }) => {
-          const visible = (element) => Boolean(
-            element.offsetWidth || element.offsetHeight || element.getClientRects().length
-          );
-          const tables = [...document.querySelectorAll("table")].filter((table) => {
-            if (!visible(table)) return false;
-            const headers = [...table.querySelectorAll("thead th")]
-              .map((header) => (header.textContent || "").trim().replace(/\s+/g, " "));
-            return headers.includes("批次名称");
-          });
-          if (tables.length !== 1) return false;
-          const table = tables[0];
-          const headers = [...table.querySelectorAll("thead th")]
-            .map((header) => (header.textContent || "").trim().replace(/\s+/g, " "));
-          const codeIndex = headers.indexOf("批次代码");
-          const nameIndex = headers.indexOf("批次名称");
-          const exact = [...table.querySelectorAll("tbody tr")].filter((row) => {
-            const cells = [...row.querySelectorAll("td")]
-              .map((cell) => (cell.textContent || "").trim().replace(/\s+/g, " "));
-            return cells[nameIndex] === expectedName
-              && (codeIndex < 0 || cells[codeIndex] === expectedCode);
-          });
-          const summary = String(document.body?.innerText ?? "")
-            .match(/找到\s*\d+\s*条结果/)?.[0]
-            ?.trim()
-            .replace(/\s+/g, " ") || "";
-          const summarySettled = !previousSummary
-            || (summary && (
-              summary !== previousSummary
-              || /^找到\s*1\s*条结果$/.test(previousSummary)
-            ));
-          return exact.length === 1 && summarySettled;
-        },
-        { batchCode, batchName, previousResultSummary },
-        { timeout: 10_000 },
-      );
+      filteredListState = await waitForVisiblePersonnelTaskListFilter(page, {
+        batchCode,
+        batchName,
+        previousSummary: previousResultSummary,
+        requiredSummary: previousResultSummary,
+        maxChecks: 16,
+      });
+    } catch {
+      filteredListState = undefined;
+    }
+  }
+  if (!filteredListState) {
+    const filterBaseline = reuseExistingFilter
+      ? await readVisiblePersonnelTaskResultSummary(page)
+      : previousResultSummary;
+    await submitVisiblePersonnelTaskFilter(search, searchValue);
+    try {
+      await page.getByText(searchValue, { exact: true }).first().waitFor({
+        state: "visible",
+        timeout: 10_000,
+      });
+    } catch (cause) {
+      const error = new Error(`运控批次 ${batchCode}/${batchName} 尚未生成人员任务单`);
+      error.code = "PERSONNEL_TASK_SHEET_NOT_READY";
+      error.status = 409;
+      error.cause = cause;
+      throw error;
+    }
+    try {
+      filteredListState = await waitForVisiblePersonnelTaskListFilter(page, {
+        batchCode,
+        batchName,
+        previousSummary: filterBaseline,
+        requiredSummary: "找到 1 条结果",
+      });
     } catch (cause) {
       const error = new Error(
-        `运控任务查询结果未在 10 秒内稳定：${batchCode}/${batchName}`,
+        `运控任务查询结果未在 10 秒内稳定：${batchCode}/${batchName}；${text(cause?.message)}`,
       );
       error.code = "PERSONNEL_TASK_LIST_FILTER_TIMEOUT";
       error.status = 409;
@@ -907,21 +1091,27 @@ export async function openVisiblePersonnelTaskSheet(page, instruction = {}, opti
       throw error;
     }
   }
+  const filteredPageCount = operationPersonnelTaskListPageCount(
+    filteredListState.summary,
+    filteredListState.pageSize,
+  );
 
   const currentPage = async () => {
-    const pagination = page.locator(".ant-pagination:visible");
-    if (await pagination.count() === 0) return 1;
-    if (await pagination.count() !== 1) {
-      throw operationControlError("分散在线监考任务分页", await pagination.count());
-    }
-    const active = page.locator(".ant-pagination-item-active:visible");
-    if (await active.count() !== 1) {
-      throw operationControlError("分散在线监考任务当前页", await active.count());
-    }
-    const value = text(await active.first().getAttribute("title"))
-      || text(await active.first().innerText());
-    if (!/^\d+$/.test(value)) throw new Error(`分散在线监考任务当前页无效：${value || "空"}`);
-    return Number(value);
+    const raw = await page.evaluate(() => {
+      const visible = (element) => Boolean(
+        element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length)
+      );
+      const paginations = [...document.querySelectorAll(".ant-pagination")].filter(visible);
+      const active = paginations.length === 1
+        ? [...paginations[0].querySelectorAll(".ant-pagination-item-active")].filter(visible)
+        : [];
+      return {
+        paginationCount: paginations.length,
+        activeCount: active.length,
+        value: active[0]?.getAttribute("title") || active[0]?.textContent || "",
+      };
+    });
+    return operationPersonnelCurrentPageFromVisibleRaw(raw);
   };
   const currentRowsSignature = async () => {
     const tables = page.locator("table:visible");
@@ -940,52 +1130,129 @@ export async function openVisiblePersonnelTaskSheet(page, instruction = {}, opti
   };
   const waitForPageRows = async (pageNumber, previousRows) => {
     if (typeof page.waitForFunction !== "function") return;
-    await page.waitForFunction(
-      ({ pageNumber: expectedPage, previousRows: previous }) => {
-        const active = document.querySelector(".ant-pagination-item-active");
-        const current = Number(active?.getAttribute("title") || active?.textContent);
-        if (current !== expectedPage) return false;
-        const visible = (element) => Boolean(
-          element.offsetWidth || element.offsetHeight || element.getClientRects().length
-        );
-        const table = [...document.querySelectorAll("table")].find((candidate) => (
-          visible(candidate)
-          && [...candidate.querySelectorAll("thead th")]
-            .some((header) => header.textContent?.trim() === "批次名称")
-        ));
-        if (!table) return false;
-        const rows = [...table.querySelectorAll("tbody tr")].map((row) => (
-          [...row.querySelectorAll("td")].map((cell) => (
-            (cell.textContent || "").trim().replace(/\s+/g, " ")
-          ))
-        ));
-        return rows.length > 0 && JSON.stringify(rows) !== previous;
-      },
-      { pageNumber, previousRows },
-      { timeout: 10_000 },
-    );
+    try {
+      await page.waitForFunction(
+        ({ pageNumber: expectedPage, previousRows: previous }) => {
+          const active = document.querySelector(".ant-pagination-item-active");
+          const current = Number(active?.getAttribute("title") || active?.textContent);
+          if (current !== expectedPage) return false;
+          const visible = (element) => Boolean(
+            element.offsetWidth || element.offsetHeight || element.getClientRects().length
+          );
+          const table = [...document.querySelectorAll("table")].find((candidate) => (
+            visible(candidate)
+            && [...candidate.querySelectorAll("thead th")]
+              .some((header) => header.textContent?.trim() === "批次名称")
+          ));
+          if (!table) return false;
+          const rows = [...table.querySelectorAll("tbody tr")].map((row) => (
+            [...row.querySelectorAll("td")].map((cell) => (
+              (cell.textContent || "").trim().replace(/\s+/g, " ")
+            ))
+          ));
+          return rows.length > 0 && JSON.stringify(rows) !== previous;
+        },
+        { pageNumber, previousRows },
+        { timeout: 10_000 },
+      );
+    } catch (cause) {
+      const error = new Error(`分散在线监考任务列表未稳定到第 ${pageNumber} 页`);
+      error.cause = cause;
+      throw error;
+    }
   };
   const nextPage = async () => {
-    const pagination = page.locator(".ant-pagination:visible");
-    if (await pagination.count() === 0) return false;
-    const next = page.locator(".ant-pagination .ant-pagination-next:visible");
-    if (await next.count() !== 1) {
-      throw operationControlError("分散在线监考任务下一页", await next.count());
+    if (await currentPage() >= filteredPageCount) return false;
+    const action = await page.evaluate(() => {
+      const clean = (value) => String(value ?? "").trim().replace(/\s+/g, " ");
+      const visible = (element) => Boolean(
+        element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length)
+      );
+      const paginations = [...document.querySelectorAll(".ant-pagination")].filter(visible);
+      if (paginations.length === 0) return { state: "end", paginationCount: 0 };
+      if (paginations.length !== 1) {
+        return { state: "invalid", paginationCount: paginations.length };
+      }
+      const pagination = paginations[0];
+      const next = [...pagination.querySelectorAll(".ant-pagination-next")].filter(visible);
+      if (next.length !== 1) {
+        return { state: "invalid", paginationCount: 1, nextCount: next.length };
+      }
+      const control = next[0];
+      if (control.classList.contains("ant-pagination-disabled")
+        || control.getAttribute("aria-disabled") === "true") {
+        return { state: "end", paginationCount: 1, nextCount: 1 };
+      }
+      const active = [...pagination.querySelectorAll(".ant-pagination-item-active")].filter(visible);
+      const before = Number(active[0]?.getAttribute("title") || active[0]?.textContent);
+      if (active.length !== 1 || !Number.isInteger(before) || before < 1) {
+        return {
+          state: "invalid",
+          paginationCount: 1,
+          nextCount: 1,
+          activeCount: active.length,
+          activeValue: Number.isFinite(before) ? String(before) : "",
+        };
+      }
+      const tables = [...document.querySelectorAll("table")].filter((table) => (
+        visible(table)
+        && [...table.querySelectorAll("thead th")]
+          .some((header) => clean(header.textContent) === "批次名称")
+      ));
+      if (tables.length !== 1) {
+        return {
+          state: "invalid",
+          paginationCount: 1,
+          nextCount: 1,
+          activeCount: 1,
+          before,
+          tableCount: tables.length,
+        };
+      }
+      const rows = [...tables[0].querySelectorAll("tbody tr")].map((row) => (
+        [...row.querySelectorAll("td")].map((cell) => clean(cell.textContent))
+      ));
+      const clickable = [...control.querySelectorAll("button, a")].filter(visible);
+      if (clickable.length !== 1) {
+        return {
+          state: "invalid",
+          paginationCount: 1,
+          nextCount: 1,
+          activeCount: 1,
+          before,
+          tableCount: 1,
+          clickableCount: clickable.length,
+        };
+      }
+      clickable[0].click();
+      return {
+        state: "clicked",
+        paginationCount: 1,
+        nextCount: 1,
+        activeCount: 1,
+        tableCount: 1,
+        clickableCount: 1,
+        before,
+        previousRows: JSON.stringify(rows),
+      };
+    });
+    if (action.state === "end") return false;
+    if (action.paginationCount !== 1) {
+      throw operationControlError("分散在线监考任务分页", action.paginationCount);
     }
-    const control = next.first();
-    const classes = text(await control.getAttribute("class")).split(/\s+/);
-    if (classes.includes("ant-pagination-disabled")
-      || text(await control.getAttribute("aria-disabled")) === "true") {
-      return false;
+    if (action.nextCount !== 1) {
+      throw operationControlError("分散在线监考任务下一页", action.nextCount);
     }
-    const before = await currentPage();
-    const previousRows = await currentRowsSignature();
-    const clickable = control.locator("button, a").first();
-    if (await clickable.count() !== 1) {
-      throw operationControlError("分散在线监考任务下一页按钮", await clickable.count());
+    if (action.activeCount !== 1 || !action.activeValue && !action.before) {
+      throw operationControlError("分散在线监考任务当前页", action.activeCount);
     }
-    await clickable.click();
-    await waitForPageRows(before + 1, previousRows);
+    if (action.tableCount !== 1) {
+      throw operationControlError("分散在线监考任务主表", action.tableCount);
+    }
+    if (action.clickableCount !== 1) {
+      throw operationControlError("分散在线监考任务下一页按钮", action.clickableCount);
+    }
+    await waitForPageRows(action.before + 1, action.previousRows);
     return true;
   };
   const readPage = async () => {
@@ -1069,44 +1336,50 @@ export async function readVisiblePersonnelTaskSheet(page) {
     throw operationControlError("分散在线监考任务单弹窗", dialogCount);
   }
   if (typeof page.waitForFunction === "function") {
-    await page.waitForFunction(() => {
-      const clean = (value) => String(value ?? "").trim().replace(/\s+/g, " ");
-      const visible = (node) => Boolean(
-        node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length),
-      );
-      const modal = [...document.querySelectorAll(".ant-modal")].find((node) => (
-        visible(node)
-        && clean(node.innerText).includes("任务单发送需满足以下条件")
-      ));
-      if (!modal) return false;
-      const rowValue = (label) => {
-        for (const row of modal.querySelectorAll(".order-item, .m_bottom.ant-row")) {
-          if (!visible(row)) continue;
-          const title = row.querySelector(":scope > .order-title-1");
-          if (clean(title?.textContent).replace(/[：:]\s*$/, "") !== label) continue;
-          const value = [...row.children]
-            .filter((node) => node !== title)
-            .map((node) => clean(node.textContent))
-            .find(Boolean);
-          return value || "";
-        }
-        return "";
-      };
-      const schedule = [...modal.querySelectorAll("table")].find((table) => {
-        const headers = [...table.querySelectorAll("thead th")].map((cell) => clean(cell.textContent));
-        return visible(table)
-          && headers.includes("日程代码")
-          && (headers.includes("考试名称") || headers.includes("科目名称"));
-      });
-      const scheduleRows = schedule
-        ? [...schedule.querySelectorAll("tbody tr")].filter(visible)
-        : [];
-      return Boolean(
-        rowValue("批次名称")
-        && rowValue("批次名称") !== "—"
-        && scheduleRows.length > 0,
-      );
-    }, undefined, { timeout: 30_000 });
+    try {
+      await page.waitForFunction(() => {
+        const clean = (value) => String(value ?? "").trim().replace(/\s+/g, " ");
+        const visible = (node) => Boolean(
+          node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length),
+        );
+        const modal = [...document.querySelectorAll(".ant-modal")].find((node) => (
+          visible(node)
+          && clean(node.innerText).includes("任务单发送需满足以下条件")
+        ));
+        if (!modal) return false;
+        const rowValue = (label) => {
+          for (const row of modal.querySelectorAll(".order-item, .m_bottom.ant-row")) {
+            if (!visible(row)) continue;
+            const title = row.querySelector(":scope > .order-title-1");
+            if (clean(title?.textContent).replace(/[：:]\s*$/, "") !== label) continue;
+            const value = [...row.children]
+              .filter((node) => node !== title)
+              .map((node) => clean(node.textContent))
+              .find(Boolean);
+            return value || "";
+          }
+          return "";
+        };
+        const schedule = [...modal.querySelectorAll("table")].find((table) => {
+          const headers = [...table.querySelectorAll("thead th")].map((cell) => clean(cell.textContent));
+          return visible(table)
+            && headers.includes("日程代码")
+            && (headers.includes("考试名称") || headers.includes("科目名称"));
+        });
+        const scheduleRows = schedule
+          ? [...schedule.querySelectorAll("tbody tr")].filter(visible)
+          : [];
+        return Boolean(
+          rowValue("批次名称")
+          && rowValue("批次名称") !== "—"
+          && scheduleRows.length > 0,
+        );
+      }, undefined, { timeout: 30_000 });
+    } catch (cause) {
+      const error = new Error("分散在线监考任务单基本信息和考试日程未在 30 秒内稳定");
+      error.cause = cause;
+      throw error;
+    }
   }
   const raw = await page.evaluate(() => {
     const clean = (value) => String(value ?? "").trim().replace(/\s+/g, " ");
@@ -1192,25 +1465,31 @@ export async function readVisiblePersonnelTaskSheet(page) {
 async function readVisibleOperationPersonnelSnapshot(page) {
   if (typeof page.evaluate !== "function") return {};
   if (typeof page.waitForFunction === "function") {
-    await page.waitForFunction(() => {
-      const clean = (value) => String(value ?? "").trim();
-      const visible = (node) => Boolean(
-        node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length),
-      );
-      const titles = [...document.querySelectorAll(".header-title")].filter(visible);
-      if (titles.length !== 1) return false;
-      const headerRoot = titles[0].parentElement?.parentElement;
-      const statusNodes = headerRoot
-        ? [...headerRoot.querySelectorAll(".right p")].filter(
-          (node) => visible(node) && clean(node.textContent).startsWith("批次状态"),
-        )
-        : [];
-      if (statusNodes.length !== 1) return false;
-      const publicationTags = [...statusNodes[0].querySelectorAll(".ant-tag")]
-        .map((node) => clean(node.textContent))
-        .filter((value) => ["已发布", "撤销发布", "未发布"].includes(value));
-      return publicationTags.length === 1;
-    }, undefined, { timeout: 10_000 });
+    try {
+      await page.waitForFunction(() => {
+        const clean = (value) => String(value ?? "").trim();
+        const visible = (node) => Boolean(
+          node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length),
+        );
+        const titles = [...document.querySelectorAll(".header-title")].filter(visible);
+        if (titles.length !== 1) return false;
+        const headerRoot = titles[0].parentElement?.parentElement;
+        const statusNodes = headerRoot
+          ? [...headerRoot.querySelectorAll(".right p")].filter(
+            (node) => visible(node) && clean(node.textContent).startsWith("批次状态"),
+          )
+          : [];
+        if (statusNodes.length !== 1) return false;
+        const publicationTags = [...statusNodes[0].querySelectorAll(".ant-tag")]
+          .map((node) => clean(node.textContent))
+          .filter((value) => ["已发布", "撤销发布", "未发布"].includes(value));
+        return publicationTags.length === 1;
+      }, undefined, { timeout: 10_000 });
+    } catch (cause) {
+      const error = new Error("批次详情发布状态未在 10 秒内稳定");
+      error.cause = cause;
+      throw error;
+    }
   }
   const snapshot = await page.evaluate(() => {
     const clean = (value) => String(value ?? "").trim();
@@ -1413,7 +1692,7 @@ function assertVisibleSection(snapshot, key) {
 async function locateOperationPersonnelBatch(page, instruction = {}, options = {}) {
   const batchCode = text(instruction.batch?.code || instruction.batchCode);
   if (!batchCode) throw new Error("缺少运控批次代码");
-  const baseUrl = text(options.baseUrl || process.env.OPERATION_CONSOLE_BASE_URL || "http://172.16.18.198:8020");
+  const baseUrl = operationConsoleBaseUrl(options);
   const batchListUrl = `${baseUrl.replace(/\/$/, "")}/batch/batchList`;
   const batchPages = await (
     options.readBatchPages
@@ -1470,6 +1749,7 @@ export async function inspectOperationPersonnelTask(page, instruction = {}, opti
       directoryMatch: { to: [], cc: [] },
     });
   };
+  if (instruction.skipTaskSheet === true) return setupPreview();
   if (instruction.allowUnpublishedPreview === true && batch.published !== true) {
     return setupPreview();
   }
@@ -1520,10 +1800,7 @@ export async function inspectOperationPersonnelTask(page, instruction = {}, opti
       } else {
         groups = await inspectVisiblePersonnelDirectory(page, instruction);
       }
-      matched = matchOperationPersonnelRecipients({
-        environment: text(instruction.environment),
-        groups,
-      });
+      matched = matchOperationPersonnelRecipients({ ...instruction, groups });
     }
     return normalizeOperationPersonnelSnapshot({
       ...taskSnapshot,
@@ -1533,13 +1810,13 @@ export async function inspectOperationPersonnelTask(page, instruction = {}, opti
         published: taskSnapshot.batch.published === true || batch.published === true,
       },
       directoryMatch: directoryProbeSummary
-        ? directoryMatch(text(instruction.environment), matched)
+        ? directoryMatch(operationPersonnelRecipientRule(instruction), matched)
         : { to: [], cc: [] },
     });
   }
   const groups = await read("readDirectoryGroups", "directoryGroups", []);
-  const environment = text(instruction.environment);
-  const matched = matchOperationPersonnelRecipients({ environment, groups });
+  const rule = operationPersonnelRecipientRule(instruction);
+  const matched = matchOperationPersonnelRecipients({ ...instruction, groups });
   return normalizeOperationPersonnelSnapshot({
     batch,
     schedules: await read("readSchedules", "schedules", []),
@@ -1548,7 +1825,7 @@ export async function inspectOperationPersonnelTask(page, instruction = {}, opti
     requirements: await read("readRequirements", "requirements", []),
     taskSheet: await read("readTaskSheet", "taskSheet", {}),
     sendRecords: await read("readSendRecords", "sendRecords", []),
-    directoryMatch: directoryMatch(environment, matched),
+    directoryMatch: directoryMatch(rule, matched),
   });
 }
 
@@ -1848,25 +2125,43 @@ async function ensureVisiblePersonnelPage(page, instruction = {}) {
   await uniqueVisibleControl(config, "在线监考配置项");
 }
 
-async function readVisiblePersonnelPage(page) {
-  if (typeof page.waitForFunction === "function") {
-    try {
-      await page.waitForFunction(() => {
-        const value = String(document.body?.innerText ?? "");
-        return value.includes("人员落实日期")
-          && value.includes("人员落实平台");
-      }, undefined, { timeout: 10_000 });
-    } catch {
-      throw operationConflict("人员配置保存后页面未恢复，无法回读人员落实日期和平台");
-    }
-  }
-  const raw = await page.evaluate(() => ({
+async function readVisiblePersonnelPageRaw(page) {
+  return page.evaluate(() => ({
     lines: String(document.body?.innerText ?? "")
       .split(/\n+/)
       .map((value) => value.trim().replace(/\s+/g, " "))
       .filter(Boolean),
   }));
-  return operationPersonnelPageFromVisibleRaw(raw);
+}
+
+export async function waitForVisiblePersonnelConfiguration(page, options = {}) {
+  const maxChecks = Math.max(1, Number(options.maxChecks || 51));
+  const pollMs = Math.max(0, Number(options.pollMs ?? 200));
+  let snapshot = operationPersonnelPageFromVisibleRaw({ lines: [] });
+  for (let attempt = 0; attempt < maxChecks; attempt += 1) {
+    snapshot = operationPersonnelPageFromVisibleRaw(
+      await readVisiblePersonnelPageRaw(page),
+    );
+    if (snapshot.evidence.personnel.present && snapshot.evidence.dates.present) {
+      return snapshot;
+    }
+    if (attempt + 1 < maxChecks && pollMs > 0) {
+      if (typeof page.waitForTimeout === "function") {
+        await page.waitForTimeout(pollMs);
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+      }
+    }
+  }
+  const missing = [...new Set([
+    ...(snapshot.evidence.personnel.missing || []),
+    ...(snapshot.evidence.dates.missing || []),
+  ])].join("、");
+  throw operationConflict(`人员配置保存后页面未完整恢复：${missing || "必填字段"}`);
+}
+
+async function readVisiblePersonnelPage(page) {
+  return waitForVisiblePersonnelConfiguration(page);
 }
 
 async function readVisiblePersonnelPageSection(page, key) {
@@ -1932,16 +2227,71 @@ async function visiblePersonnelConfigDialog(page) {
   return uniqueVisibleControl(dialogs, "在线监考配置项弹窗");
 }
 
+async function restoreVisiblePersonnelDateGrid(page, value, placeholder) {
+  const targetDate = new Date(`${text(value).replaceAll("/", "-")}T00:00:00`);
+  if (Number.isNaN(targetDate.getTime())) {
+    throw operationConflict(`人员日期 ${text(value) || "空"} 无效，不能打开日期面板`);
+  }
+  const targetYear = String(targetDate.getFullYear());
+  const targetDecade = `${Math.floor(targetDate.getFullYear() / 10) * 10}-${Math.floor(targetDate.getFullYear() / 10) * 10 + 9}`;
+  const targetMonth = targetDate.getMonth() + 1;
+  const chineseMonth = [
+    "", "一月", "二月", "三月", "四月", "五月", "六月",
+    "七月", "八月", "九月", "十月", "十一月", "十二月",
+  ][targetMonth];
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const decadePanels = page.locator(".ant-calendar-decade-panel:visible");
+    const yearPanels = page.locator(".ant-calendar-year-panel:visible");
+    const monthPanels = page.locator(".ant-calendar-month-panel:visible");
+    const panelCount = await decadePanels.count() + await yearPanels.count() + await monthPanels.count();
+    if (panelCount === 0) return;
+    if (panelCount > 1) {
+      throw operationControlError("人员日期年月选择面板", panelCount);
+    }
+    const panel = (await decadePanels.count() === 1 ? decadePanels
+      : await yearPanels.count() === 1 ? yearPanels : monthPanels).first();
+    let calendar = panel.locator(
+      "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' ant-calendar-range-part ')][1]",
+    );
+    if (await calendar.count() === 0) {
+      calendar = panel.locator(
+        "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' ant-calendar ')][1]",
+      );
+    }
+    if (await decadePanels.count() === 1) {
+      const decade = calendar
+        .locator(`.ant-calendar-decade-panel-decade:visible`)
+        .filter({ hasText: new RegExp(`^${targetDecade}$`) });
+      await clickUniqueVisible(decade, `${targetDecade}年代选项`);
+    } else if (await yearPanels.count() === 1) {
+      const year = calendar.locator(`.ant-calendar-year-panel-cell[title="${targetYear}"]:visible`);
+      await clickUniqueVisible(year, `${targetYear}年份选项`);
+    } else {
+      const month = calendar
+        .locator(".ant-calendar-month-panel-month:visible")
+        .filter({ hasText: new RegExp(`^(?:${targetMonth}月|${chineseMonth})$`) });
+      await clickUniqueVisible(month, `${targetMonth}月选项`);
+    }
+    if (typeof page.waitForTimeout === "function") await page.waitForTimeout(100);
+  }
+  if (text(placeholder)) {
+    throw operationConflict(`${text(placeholder)}日期选择器未恢复到日期面板`);
+  }
+  throw operationConflict("人员日期选择器未恢复到日期面板");
+}
+
 async function visiblePersonnelDateCell(
   page,
   value,
   nextMonthAttempts = 0,
   forceTargetMonth = false,
+  placeholder = "",
 ) {
-  const selector = `[title="${operationDateTitle(value)}"]`
+  const selector = `td[title="${operationDateTitle(value)}"]`
     + ":not(.ant-calendar-last-month-cell)"
     + ":not(.ant-calendar-next-month-btn-day)";
   const cell = page.locator(`${selector}:visible`);
+  await restoreVisiblePersonnelDateGrid(page, value, placeholder);
   let targetMonthSelected = false;
   if (nextMonthAttempts > 0 && (forceTargetMonth || await cell.count() === 0)) {
     const targetDate = new Date(`${text(value).replaceAll("/", "-")}T00:00:00`);
@@ -2011,7 +2361,8 @@ export async function selectVisiblePersonnelDate(page, dialog, placeholder, valu
     `${placeholder}输入框`,
   );
   await input.click();
-  await (await visiblePersonnelDateCell(page, value, 1)).click();
+  await (await visiblePersonnelDateCell(page, value, 1, false, placeholder))
+    .click({ force: true, timeout: 10_000 });
   const calendars = page.locator(".ant-calendar-picker-container:visible");
   const calendarCount = await calendars.count();
   if (calendarCount > 1) {
@@ -2037,7 +2388,8 @@ export async function selectVisiblePersonnelDateRange(page, dialog, start, end) 
   if (await calendars.count() === 0 && typeof calendars.last === "function") {
     await calendars.waitFor({ state: "visible", timeout: 10_000 });
   }
-  await (await visiblePersonnelDateCell(page, start)).click();
+  await (await visiblePersonnelDateCell(page, start, 0, false, "开始日期"))
+    .click({ force: true, timeout: 10_000 });
   await endInput.click({ force: true });
   if (await calendars.count() === 0 && typeof calendars.last === "function") {
     await calendars.waitFor({ state: "visible", timeout: 10_000 });
@@ -2056,17 +2408,73 @@ export async function selectVisiblePersonnelDateRange(page, dialog, start, end) 
     end,
     Math.min(monthDifference, 24),
     true,
-  )).click();
+    "结束日期",
+  )).click({ force: true, timeout: 10_000 });
   if (await calendars.count() > 0) {
     await calendars.waitFor({ state: "hidden", timeout: 10_000 });
   }
 }
 
+function normalizedVisibleDateInput(value) {
+  const match = text(value).match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  if (!match) return text(value);
+  return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
+}
+
+export async function assertVisiblePersonnelDateInputs(dialog, expected = {}) {
+  const controls = [
+    ["开始日期", 'input[placeholder="开始日期"]:visible', expected.start],
+    ["结束日期", 'input[placeholder="结束日期"]:visible', expected.end],
+    ["人员名单提交日期", 'input[placeholder="请选择日期"]:visible', expected.nameListDue],
+  ];
+  const conflicts = [];
+  for (const [label, selector, value] of controls) {
+    const input = await uniqueVisibleControl(dialog.locator(selector), `${label}输入框`);
+    const actual = normalizedVisibleDateInput(await input.inputValue());
+    const target = normalizedVisibleDateInput(value);
+    if (actual !== target) conflicts.push(`${label}期望 ${target || "空"}，实际 ${actual || "空"}`);
+  }
+  if (conflicts.length) {
+    throw operationConflict(`人员日期选择结果不一致：${conflicts.join("；")}`);
+  }
+}
+
 async function chooseVisibleRadio(dialog, name) {
-  await clickUniqueVisible(
-    dialog.getByRole("radio", { name: text(name), exact: true }),
+  const values = {
+    悦站: "tc_joytest",
+    考站服务平台: "tc",
+    分散监考: "decentralized",
+    集中监考: "centralized",
+  };
+  const value = values[text(name)];
+  const locator = value
+    ? dialog.locator(`input[type="radio"][value="${value}"]:visible`)
+    : dialog.getByRole("radio", { name: text(name), exact: true });
+  const radio = await uniqueVisibleControl(
+    locator,
     `${text(name)}单选项`,
   );
+  await radio.click({ force: true, timeout: 10_000 });
+}
+
+export async function fillVisiblePersonnelConfiguration(
+  page,
+  dialog,
+  personnel = {},
+  datesValue = {},
+) {
+  if (text(personnel.serviceType) !== "ATA 监考－分散在线监考") {
+    throw operationConflict("人员服务类型不是 ATA 分散在线监考");
+  }
+  const dates = normalizeDates(datesValue);
+  if (!dates.start || !dates.end || !dates.nameListDue) {
+    throw operationConflict("人员配置缺少完整日期");
+  }
+  await chooseVisibleRadio(dialog, personnel.platform);
+  await chooseVisibleRadio(dialog, "分散监考");
+  await selectVisiblePersonnelDateRange(page, dialog, dates.start, dates.end);
+  await selectVisiblePersonnelDate(page, dialog, "请选择日期", dates.nameListDue);
+  await assertVisiblePersonnelDateInputs(dialog, dates);
 }
 
 async function confirmVisiblePersonnelConfig(page, dialog) {
@@ -2166,6 +2574,16 @@ async function visibleRecipientGroupNames(dialog) {
     .filter(Boolean));
 }
 
+async function visibleRecipientGroupName(dialog, groupName, required = true) {
+  const names = await visibleRecipientGroupNames(dialog);
+  const matches = names.filter((name) => (
+    operationPersonnelRecipientGroupMatches(name, groupName)
+  ));
+  if (matches.length === 1) return matches[0];
+  if (!required && matches.length === 0) return "";
+  throw operationControlError(`人员目录组 ${text(groupName)}`, matches.length);
+}
+
 async function visibleCheckedRecipientPeople(dialog) {
   const checked = await dialog.locator('input[type="checkbox"]:checked').all();
   const people = [];
@@ -2177,12 +2595,16 @@ async function visibleCheckedRecipientPeople(dialog) {
       || input.parentElement?.parentElement?.innerText
       || "",
     ).trim().replace(/\s+/g, " "));
-    if (label.includes("@")) people.push(control);
+    if (label.includes("@")) {
+      const person = operationPersonnelMailPeopleFromVisibleTexts([label])[0] || {};
+      people.push({ control, id: text(person.id) });
+    }
   }
   return people;
 }
 
-export async function clearVisiblePersonnelRecipientPeople(page, dialog) {
+export async function clearVisiblePersonnelRecipientPeople(page, dialog, preserveIds = []) {
+  const preserved = new Set(preserveIds.map(text).filter(Boolean));
   const groupNames = await visibleRecipientGroupNames(dialog);
   for (const groupName of groupNames) {
     const group = await uniqueVisibleControl(
@@ -2202,14 +2624,26 @@ export async function clearVisiblePersonnelRecipientPeople(page, dialog) {
     await page.waitForTimeout(100);
     const checkedPeople = await visibleCheckedRecipientPeople(dialog);
     for (let index = checkedPeople.length - 1; index >= 0; index -= 1) {
-      await checkedPeople[index].uncheck();
+      if (!preserved.has(checkedPeople[index].id)) {
+        await checkedPeople[index].control.uncheck();
+      }
     }
     if (await group.isChecked()) await group.uncheck();
   }
 }
 
+async function selectVisibleRecipientGroup(dialog, groupName) {
+  const visibleName = await visibleRecipientGroupName(dialog, groupName);
+  const group = await uniqueVisibleControl(
+    dialog.getByRole("checkbox", { name: visibleName, exact: true }),
+    `人员目录组 ${groupName}`,
+  );
+  if (!await group.isChecked()) await group.check();
+}
+
 async function selectVisiblePeople(page, dialog, groupName, people) {
-  const group = dialog.getByRole("checkbox", { name: groupName, exact: true });
+  const visibleName = await visibleRecipientGroupName(dialog, groupName);
+  const group = dialog.getByRole("checkbox", { name: visibleName, exact: true });
   if (await group.count() === 0) {
     await group.waitFor({ state: "visible", timeout: 10_000 });
   }
@@ -2235,14 +2669,13 @@ export async function selectVisiblePersonnelRecipients(
   recipients,
   rule,
 ) {
-  const inlineGroup = mailDialog.getByRole("checkbox", {
-    name: rule.toGroup,
-    exact: true,
-  });
-  if (await inlineGroup.count() === 1) {
-    await clearVisiblePersonnelRecipientPeople(page, mailDialog);
+  const inlineGroupName = await visibleRecipientGroupName(mailDialog, rule.toGroup, false);
+  if (inlineGroupName) {
+    await clearVisiblePersonnelRecipientPeople(page, mailDialog, rule.allowedDefaultIds || []);
     await selectVisiblePeople(page, mailDialog, rule.toGroup, recipients.to);
-    if (recipients.cc.length) {
+    if (rule.ccGroupOnly) {
+      await selectVisibleRecipientGroup(mailDialog, rule.ccGroup);
+    } else if (recipients.cc.length) {
       await selectVisiblePeople(page, mailDialog, rule.ccGroup, recipients.cc);
     }
     return;
@@ -2250,14 +2683,18 @@ export async function selectVisiblePersonnelRecipients(
 
   await openVisibleMailRecipientDirectory(mailDialog, "收件人");
   let directoryDialog = await topVisibleDialog(page, "人员目录弹窗");
-  await clearVisiblePersonnelRecipientPeople(page, directoryDialog);
+  await clearVisiblePersonnelRecipientPeople(page, directoryDialog, rule.allowedDefaultIds || []);
   await selectVisiblePeople(page, directoryDialog, rule.toGroup, recipients.to);
   await confirmVisibleDirectory(page);
-  if (recipients.cc.length) {
+  if (rule.ccGroupOnly || recipients.cc.length) {
     await openVisibleMailRecipientDirectory(mailDialog, "抄送（C）");
     directoryDialog = await topVisibleDialog(page, "人员目录弹窗");
-    await clearVisiblePersonnelRecipientPeople(page, directoryDialog);
-    await selectVisiblePeople(page, directoryDialog, rule.ccGroup, recipients.cc);
+    await clearVisiblePersonnelRecipientPeople(page, directoryDialog, rule.allowedDefaultIds || []);
+    if (rule.ccGroupOnly) {
+      await selectVisibleRecipientGroup(directoryDialog, rule.ccGroup);
+    } else {
+      await selectVisiblePeople(page, directoryDialog, rule.ccGroup, recipients.cc);
+    }
     await confirmVisibleDirectory(page);
   }
 }
@@ -2284,12 +2721,29 @@ export async function readVisibleExpectedMailRecipients(mailDialog, expected, ru
     };
   }, groupNames);
   const selected = operationPersonnelMailPeopleFromVisibleTexts(raw.checkedPeople);
+  const expectedPeople = [...(expected.to || []), ...(expected.cc || [])]
+    .filter((person) => text(person.kind) !== "group");
+  const expectedIds = new Set(expectedPeople.map((person) => text(person.id)));
+  const allowedDefaultIds = new Set((rule.allowedDefaultIds || []).map(text));
+  const unexpected = selected.filter((person) => (
+    !expectedIds.has(text(person.id)) && !allowedDefaultIds.has(text(person.id))
+  ));
+  if (unexpected.length) {
+    throw operationConflict(`邮件发送存在未授权收件人：${unexpected.map((person) => person.id).join("、")}`);
+  }
+  if (rule.ccGroupOnly && !raw.checkedGroups.some((name) => (
+    operationPersonnelRecipientGroupMatches(name, rule.ccGroup)
+  ))) {
+    throw operationConflict(`邮件发送未勾选抄送部门：${rule.ccGroup}`);
+  }
   const ccKeys = new Set((expected.cc || []).map((person) => (
     `${text(person.id)}\0${text(person.name)}`
   )));
   return {
-    to: selected.filter((person) => !ccKeys.has(`${person.id}\0${person.name}`)),
-    cc: selected.filter((person) => ccKeys.has(`${person.id}\0${person.name}`)),
+    to: selected.filter((person) => (expected.to || []).some((item) => text(item.id) === person.id)),
+    cc: rule.ccGroupOnly
+      ? [groupRecipient(rule.ccGroup)]
+      : selected.filter((person) => ccKeys.has(`${person.id}\0${person.name}`)),
   };
 }
 
@@ -2310,7 +2764,8 @@ async function visibleDirectoryPeople(dialog) {
 
 export async function expandVisibleDirectoryGroup(dialog, groupName) {
   const before = await visibleDirectoryPeople(dialog);
-  const group = dialog.getByRole("checkbox", { name: groupName, exact: true });
+  const visibleName = await visibleRecipientGroupName(dialog, groupName);
+  const group = dialog.getByRole("checkbox", { name: visibleName, exact: true });
   if (await group.count() === 0) {
     await group.waitFor({ state: "visible", timeout: 10_000 });
   }
@@ -2376,16 +2831,21 @@ async function closeVisibleMailDialog(page) {
 
 export async function readVisiblePersonnelDirectoryGroups(page, mailDialog, rule) {
   const groupNames = [...new Set([rule.toGroup, rule.ccGroup].filter(Boolean))];
-  const inlineGroup = mailDialog.getByRole("checkbox", {
-    name: groupNames[0],
-    exact: true,
-  });
-  if (await inlineGroup.count() === 1) {
+  const inlineGroupName = await visibleRecipientGroupName(mailDialog, groupNames[0], false);
+  if (inlineGroupName) {
     const groups = [];
     for (const groupName of groupNames) {
       groups.push({
         name: groupName,
-        people: await expandVisibleDirectoryGroup(mailDialog, groupName),
+        people: rule.ccGroupOnly && groupName === rule.ccGroup
+          ? await uniqueVisibleControl(
+            mailDialog.getByRole("checkbox", {
+              name: await visibleRecipientGroupName(mailDialog, groupName),
+              exact: true,
+            }),
+            `人员目录组 ${groupName}`,
+          ).then(() => [])
+          : await expandVisibleDirectoryGroup(mailDialog, groupName),
       });
     }
     return groups;
@@ -2400,7 +2860,15 @@ export async function readVisiblePersonnelDirectoryGroups(page, mailDialog, rule
     const dialog = await topVisibleDialog(page, "人员目录弹窗");
     groups.push({
       name: groupName,
-      people: await expandVisibleDirectoryGroup(dialog, groupName),
+      people: rule.ccGroupOnly && groupName === rule.ccGroup
+          ? await uniqueVisibleControl(
+            dialog.getByRole("checkbox", {
+              name: await visibleRecipientGroupName(dialog, groupName),
+              exact: true,
+            }),
+          `人员目录组 ${groupName}`,
+        ).then(() => [])
+        : await expandVisibleDirectoryGroup(dialog, groupName),
     });
     await cancelVisibleDirectory(page);
   }
@@ -2441,13 +2909,11 @@ export async function openVisiblePersonnelMailDialog(page, instruction = {}) {
 
 async function readVisibleMailRecipients(page, instruction = {}) {
   const mailDialog = await visiblePersonnelMailDialog(page);
-  const rule = RECIPIENT_RULES[text(instruction.environment)];
+  const rule = operationPersonnelRecipientRule(instruction);
   const expected = targetRecipients(instruction.target || {});
-  const inlineGroup = rule
-    ? mailDialog.getByRole("checkbox", { name: rule.toGroup, exact: true })
-    : null;
+  const inlineGroupName = await visibleRecipientGroupName(mailDialog, rule.toGroup, false);
   if ((expected.to.length || expected.cc.length)
-    && await inlineGroup?.count() === 1) {
+    && inlineGroupName) {
     return readVisibleExpectedMailRecipients(mailDialog, expected, rule);
   }
 
@@ -2514,8 +2980,7 @@ async function readVisibleMailRecipients(page, instruction = {}) {
 
 export async function inspectVisiblePersonnelDirectory(page, instruction = {}) {
   const mailDialog = await openVisiblePersonnelMailDialog(page, instruction);
-  const rule = RECIPIENT_RULES[text(instruction.environment)];
-  if (!rule) throw new Error(`未知运控收件环境：${text(instruction.environment) || "空"}`);
+  const rule = operationPersonnelRecipientRule(instruction);
   const groups = await readVisiblePersonnelDirectoryGroups(page, mailDialog, rule);
   await closeVisibleMailDialog(page);
   return groups;
@@ -2663,20 +3128,11 @@ const VISIBLE_OPERATION_PERSONNEL_ADAPTER = Object.freeze({
   },
 
   async syncPersonnelConfig(page, personnel = {}, _current = {}, instruction = {}) {
-    if (text(personnel.serviceType) !== "ATA 监考－分散在线监考") {
-      throw operationConflict("人员服务类型不是 ATA 分散在线监考");
-    }
     const dates = normalizeDates(instruction.target?.dates || {});
-    if (!dates.start || !dates.end || !dates.nameListDue) {
-      throw operationConflict("人员配置缺少完整日期");
-    }
     await ensureVisiblePersonnelPage(page, instruction);
     await openVisiblePersonnelSectionEditor(page, "配置项");
     const dialog = await visiblePersonnelConfigDialog(page);
-    await chooseVisibleRadio(dialog, personnel.platform);
-    await chooseVisibleRadio(dialog, "分散监考");
-    await selectVisiblePersonnelDateRange(page, dialog, dates.start, dates.end);
-    await selectVisiblePersonnelDate(page, dialog, "请选择日期", dates.nameListDue);
+    await fillVisiblePersonnelConfiguration(page, dialog, personnel, dates);
     await confirmVisiblePersonnelConfig(page, dialog);
   },
 
@@ -2691,6 +3147,7 @@ const VISIBLE_OPERATION_PERSONNEL_ADAPTER = Object.freeze({
     if (text(current.nameListDue) !== text(dates.nameListDue)) {
       await selectVisiblePersonnelDate(page, dialog, "请选择日期", dates.nameListDue);
     }
+    await assertVisiblePersonnelDateInputs(dialog, dates);
     await confirmVisiblePersonnelConfig(page, dialog);
   },
 
@@ -2728,10 +3185,13 @@ const VISIBLE_OPERATION_PERSONNEL_ADAPTER = Object.freeze({
 
   async selectRecipients(page, recipients, instruction = {}) {
     const mailDialog = await openVisiblePersonnelMailDialog(page, instruction);
-    const rule = RECIPIENT_RULES[text(instruction.environment)];
-    if (!rule) throw new Error(`未知运控收件环境：${text(instruction.environment) || "空"}`);
+    const rule = operationPersonnelRecipientRule(instruction);
+    const expectedCcCount = rule.ccGroupOnly ? 1 : rule.ccCount;
     if (recipients.to.length !== 1 || recipients.to[0].name !== rule.toName
-      || recipients.cc.length !== rule.ccCount) {
+      || recipients.cc.length !== expectedCcCount
+      || (rule.ccGroupOnly && (
+        recipients.cc[0]?.kind !== "group" || recipients.cc[0]?.name !== rule.ccGroup
+      ))) {
       throw operationControlError("固定收件人与抄送人", 0);
     }
     await selectVisiblePersonnelRecipients(page, mailDialog, recipients, rule);
@@ -2764,13 +3224,13 @@ const VISIBLE_OPERATION_PERSONNEL_ADAPTER = Object.freeze({
   ),
 });
 
-const OPERATION_PERSONNEL_CHECKPOINTS = Object.freeze([
+export const OPERATION_PERSONNEL_CHECKPOINTS = Object.freeze([
   "inspect_batch",
   "publish_batch",
-  "verify_exam_schedules",
   "sync_personnel_config",
   "sync_personnel_dates",
   "sync_exam_service_requirements",
+  "verify_exam_schedules",
   "verify_task_sheet",
   "select_recipients",
   "submit_send",
@@ -2878,6 +3338,7 @@ function targetRecipients(target = {}) {
   const people = (items) => [...(items || [])].map((item) => ({
     id: text(item?.id),
     name: text(item?.name),
+    ...(text(item?.kind) ? { kind: text(item.kind) } : {}),
   }));
   return {
     to: people(target.directoryMatch?.to),
@@ -2994,6 +3455,7 @@ async function runOperationPersonnelAttemptOnPage(page, instruction, options) {
     const actual = await inspectOperationPersonnelTask(page, {
       ...instruction,
       allowUnpublishedPreview: kind === "initial",
+      skipTaskSheet: true,
     }, options);
     const expected = operationPersonnelConflictBaseline(
       resumeBaseline,
@@ -3061,6 +3523,7 @@ async function runOperationPersonnelAttemptOnPage(page, instruction, options) {
     const refreshed = await inspectOperationPersonnelTask(page, {
       ...instruction,
       allowUnpublishedPreview: false,
+      skipTaskSheet: true,
     }, options);
     const expected = structuredClone(baseline);
     expected.batch.published = refreshed.batch.published;
@@ -3126,6 +3589,24 @@ async function runOperationPersonnelAttemptOnPage(page, instruction, options) {
     });
   };
 
+  await operationMethod(page, options, "openPersonnelPage")(page, instruction);
+  await sync(
+    OPERATION_PERSONNEL_CHECKPOINTS[2],
+    "syncPersonnelConfig",
+    "readPersonnel",
+    "personnel",
+    undefined,
+    personnelConfigProjection,
+  );
+  snapshot.dates = normalizeDates(await readSection("readDates", "dates"));
+  await sync(OPERATION_PERSONNEL_CHECKPOINTS[3], "syncPersonnelDates", "readDates", "dates");
+  await sync(
+    OPERATION_PERSONNEL_CHECKPOINTS[4],
+    "syncExamServiceRequirements",
+    "readRequirements",
+    "requirements",
+  );
+
   const readManagedSchedules = async () => {
     await locateOperationPersonnelBatch(page, instruction, options);
     await (options.openEztestSchedulePage || openVisibleEztestSchedulePage)(page, instruction);
@@ -3136,7 +3617,7 @@ async function runOperationPersonnelAttemptOnPage(page, instruction, options) {
     );
   };
   await runPersonnelCheckpoint({
-    name: OPERATION_PERSONNEL_CHECKPOINTS[2],
+    name: OPERATION_PERSONNEL_CHECKPOINTS[5],
     target: displaySchedules,
     action: async () => {},
     verify: readManagedSchedules,
@@ -3144,23 +3625,6 @@ async function runOperationPersonnelAttemptOnPage(page, instruction, options) {
     instruction,
     options,
   });
-  await sync(
-    OPERATION_PERSONNEL_CHECKPOINTS[3],
-    "syncPersonnelConfig",
-    "readPersonnel",
-    "personnel",
-    undefined,
-    personnelConfigProjection,
-  );
-  await operationMethod(page, options, "openPersonnelPage")(page, instruction);
-  snapshot.dates = normalizeDates(await readSection("readDates", "dates"));
-  await sync(OPERATION_PERSONNEL_CHECKPOINTS[4], "syncPersonnelDates", "readDates", "dates");
-  await sync(
-    OPERATION_PERSONNEL_CHECKPOINTS[5],
-    "syncExamServiceRequirements",
-    "readRequirements",
-    "requirements",
-  );
 
   const readAndVerifyTaskSheet = async () => {
     const taskSheet = normalizeTaskSheet(
@@ -3194,11 +3658,8 @@ async function runOperationPersonnelAttemptOnPage(page, instruction, options) {
       ? await customDirectoryReader(page, instruction)
       : await inspectVisiblePersonnelDirectory(page, instruction);
     target.directoryMatch = directoryMatch(
-      text(instruction.environment),
-      matchOperationPersonnelRecipients({
-        environment: text(instruction.environment),
-        groups,
-      }),
+      operationPersonnelRecipientRule(instruction),
+      matchOperationPersonnelRecipients({ ...instruction, groups }),
     );
     instruction.target = structuredClone(target);
   }

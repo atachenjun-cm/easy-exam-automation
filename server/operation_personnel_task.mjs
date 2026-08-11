@@ -2,10 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { operationBatchCodeIsValid } from "./operation_batch.mjs";
 
 const SCHEMA_VERSION = 1;
-const RECIPIENT_RULES = Object.freeze({
-  test: { toGroup: "演练组", toNames: ["张乐翔"], ccGroup: "", ccCount: 0 },
-  production: { toGroup: "拓展二部", toNames: ["唐润梅"], ccGroup: "结算组", ccCount: 4 },
-});
+const PERSONNEL_CC_GROUP = "考站管理&质量控制部";
+const EDITABLE_PERSONNEL_REQUIREMENT_NAMES = [
+  "正式考试-最早登录系统时间",
+  "正式考试-监考人员安排",
+  "正式考试-监考人员数量",
+  "正式考试-监考人员比例",
+];
 
 function text(value) {
   return String(value ?? "").trim();
@@ -79,11 +82,11 @@ function daysBefore(dateText, days) {
   return formatShanghaiDate(parsed - days * 24 * 60 * 60 * 1000);
 }
 
-function simultaneousCandidatePeak(sessions) {
+function simultaneousCountPeak(sessions, countForSession) {
   const events = sessions.flatMap((session) => {
     const start = dateValue(session.start);
     const end = dateValue(session.end);
-    const count = Number(session.candidateCount || session.candidate_count || 0);
+    const count = Number(countForSession(session) || 0);
     return Number.isFinite(start) && Number.isFinite(end) && end > start && count > 0
       ? [{ at: start, delta: count }, { at: end, delta: -count }]
       : [];
@@ -95,6 +98,32 @@ function simultaneousCandidatePeak(sessions) {
     peak = Math.max(peak, current);
   }
   return peak;
+}
+
+function formalRoomAssignment(task = {}) {
+  const formalSessions = (Array.isArray(task.sessions) ? task.sessions : [])
+    .filter((session) => text(session.sessionType || session.session_type) === "formal");
+  const assigned = formalSessions.filter((session) => (
+    Number.isSafeInteger(Number(session.roomCount || session.room_count))
+    && Number(session.roomCount || session.room_count) > 0
+    && Number.isSafeInteger(Number(session.candidateCount || session.candidate_count))
+    && Number(session.candidateCount || session.candidate_count) > 0
+  ));
+  if (!formalSessions.length || assigned.length !== formalSessions.length) {
+    return { complete: false, monitorCount: "", roomSize: "" };
+  }
+  const roomSize = Math.max(...assigned.map((session) => Math.ceil(
+    Number(session.candidateCount || session.candidate_count)
+      / Number(session.roomCount || session.room_count),
+  )));
+  const concurrent = simultaneousCountPeak(
+    assigned,
+    (session) => session.roomCount || session.room_count,
+  );
+  const monitorCount = concurrent || Math.max(
+    ...assigned.map((session) => Number(session.roomCount || session.room_count)),
+  );
+  return { complete: monitorCount > 0 && roomSize > 0, monitorCount, roomSize };
 }
 
 function includesTrialMonitoring(task, requirement) {
@@ -165,14 +194,15 @@ export function operationPersonnelConfirmedEdits(draft = {}) {
     const value = text(draft.dates?.[key]);
     if (value) dates[key] = value;
   }
-  const personnel = {};
-  const monitorRatio = text(draft.personnel?.monitorRatio);
-  if (monitorRatio) personnel.monitorRatio = monitorRatio;
-  const monitorCount = Number(draft.personnel?.monitorCount);
-  if (Number.isSafeInteger(monitorCount) && monitorCount > 0) {
-    personnel.monitorCount = monitorCount;
+  const storedRequirements = draft.requirementOverrides
+    || (!Array.isArray(draft.requirements) ? draft.requirements : {})
+    || {};
+  const requirements = {};
+  for (const name of EDITABLE_PERSONNEL_REQUIREMENT_NAMES) {
+    const value = text(storedRequirements[name]);
+    if (value) requirements[name] = value;
   }
-  return { dates, personnel };
+  return { dates, personnel: {}, requirements };
 }
 
 function confirmedEditsFromTask(task = {}) {
@@ -180,36 +210,67 @@ function confirmedEditsFromTask(task = {}) {
   if (state.confirmedEdits) {
     return operationPersonnelConfirmedEdits(state.confirmedEdits);
   }
-  if (!state.lastSuccessfulFingerprint) return { dates: {}, personnel: {} };
+  if (!state.lastSuccessfulFingerprint) return { dates: {}, personnel: {}, requirements: {} };
   const stored = operationPersonnelConfirmedEdits(state.draft || {});
   const successfulTarget = state.activeAttempt?.status === "sent"
     ? operationPersonnelConfirmedEdits(state.activeAttempt.target || {})
-    : { dates: {}, personnel: {} };
+    : { dates: {}, personnel: {}, requirements: {} };
   return {
     dates: { ...stored.dates, ...successfulTarget.dates },
     personnel: { ...stored.personnel, ...successfulTarget.personnel },
+    requirements: { ...stored.requirements, ...successfulTarget.requirements },
   };
+}
+
+function applyConfirmedRequirementEdits(draft, requirements = {}) {
+  draft.requirementOverrides = {};
+  for (const name of EDITABLE_PERSONNEL_REQUIREMENT_NAMES) {
+    const value = text(requirements[name]);
+    if (!value) continue;
+    draft.requirementOverrides[name] = value;
+    if (name === "正式考试-最早登录系统时间") {
+      const minutes = value.match(/考试开始前\s*(\d+)\s*分钟/)?.[1];
+      if (minutes !== undefined) draft.personnel.earliestLoginMinutes = Number(minutes);
+    } else if (name === "正式考试-监考人员数量") {
+      draft.personnel.monitorCount = Number(value);
+    } else if (name === "正式考试-监考人员比例") {
+      draft.personnel.monitorRatio = value;
+      const basis = value.match(/^\d+:(\d+)$/)?.[1];
+      if (basis !== undefined) draft.personnel.candidateBasis = Number(basis);
+    }
+  }
 }
 
 export function buildOperationPersonnelTaskDraft(task = {}, options = {}) {
   const environment = text(options.environment || task.config?.operationPersonnelTask?.environment || "test");
-  const recipientsRule = RECIPIENT_RULES[environment];
   const warnings = [];
-  if (!recipientsRule) warnings.push({ code: "INVALID_RECIPIENT_ENVIRONMENT", environment });
+  const business = task.config?.businessRequirement || {};
+  const operationBatch = task.config?.operationBatch || {};
+  const batchFields = operationBatch.draft?.fields || {};
+  const projectDepartment = text(
+    batchFields.projectDepartment?.value
+    || operationBatch.projectDepartment
+    || operationBatch.projectDepartmentDefault
+    || business.project_department,
+  );
+  const projectManager = text(
+    batchFields.projectManager?.value
+    || operationBatch.projectManager
+    || business.project_manager
+    || task.config?.projectManager,
+  );
+  if (!projectDepartment || !projectManager) {
+    warnings.push({
+      code: "PERSONNEL_RECIPIENT_REQUIRED",
+      message: `发送规则缺少${!projectDepartment ? "项目部归属" : ""}${!projectDepartment && !projectManager ? "、" : ""}${!projectManager ? "项目经理" : ""}`,
+    });
+  }
   const previousMap = options.scheduleCodeMap || task.config?.operationPersonnelTask?.scheduleCodeMap || {};
   const rows = scheduleRows(task, previousMap, options.makeId || randomUUID, warnings);
   const { schedules, scheduleCodeMap } = assignScheduleCodes(rows, previousMap);
   const formalSchedules = schedules.filter((item) => item.sessionType === "formal");
-  const peak = simultaneousCandidatePeak((Array.isArray(task.sessions) ? task.sessions : [])
-    .filter((session) => text(session.sessionType || "formal") === "formal"));
-  const estimated = Number(
-    task.config?.operationBatch?.estimatedMaxSubjectCount
-    || task.config?.operationBatch?.draft?.fields?.estimatedMaxSubjectCount?.value
-    || task.config?.estimatedMaxSubjectCount
-    || 0,
-  );
-  const candidateBasis = peak || (estimated > 0 ? estimated : "");
-  if (!candidateBasis) warnings.push({ code: "MONITOR_COUNT_REQUIRED" });
+  const roomAssignment = formalRoomAssignment(task);
+  if (!roomAssignment.complete) warnings.push({ code: "FORMAL_ROOM_ASSIGNMENT_REQUIRED" });
   const earliestStart = formalSchedules.map((item) => item.start).sort((left, right) => dateValue(left) - dateValue(right))[0] || "";
   const now = options.now || new Date().toISOString();
   const today = formatShanghaiDate(dateValue(now));
@@ -217,9 +278,14 @@ export function buildOperationPersonnelTaskDraft(task = {}, options = {}) {
   const validDates = due && due >= today;
   if (!validDates) warnings.push({ code: "PERSONNEL_DATES_REQUIRED" });
   if (unsupported(task)) warnings.push({ code: "UNSUPPORTED_PERSONNEL_TASK" });
-  const recipients = recipientsRule
-    ? { ...recipientsRule, toNames: [...recipientsRule.toNames], ruleVersion: 1 }
-    : { toGroup: "", toNames: [], ccGroup: "", ccCount: 0, ruleVersion: 1 };
+  const recipients = {
+    toGroup: projectDepartment,
+    toNames: projectManager ? [projectManager] : [],
+    ccGroup: PERSONNEL_CC_GROUP,
+    ccCount: 0,
+    ccGroupOnly: true,
+    ruleVersion: 3,
+  };
   const draft = {
     schemaVersion: SCHEMA_VERSION,
     environment,
@@ -232,15 +298,17 @@ export function buildOperationPersonnelTaskDraft(task = {}, options = {}) {
       operationTaskSerial: text(task.config?.businessRequirement?.operation_serial_number),
       projectCode: text(task.config?.businessRequirement?.project_code),
       projectName: text(task.config?.businessRequirement?.project_name || task.projectName),
+      projectDepartment,
+      projectManager,
     },
     schedules,
     personnel: {
       serviceType: "ATA 监考－分散在线监考",
       platform: "悦站",
-      loginMonitoring: "是",
-      monitorRatio: "1:50",
-      candidateBasis,
-      monitorCount: candidateBasis ? Math.max(1, Math.ceil(candidateBasis / 50)) : "",
+      loginMonitoring: "否",
+      monitorRatio: roomAssignment.complete ? `1:${roomAssignment.roomSize}` : "",
+      candidateBasis: roomAssignment.roomSize,
+      monitorCount: roomAssignment.monitorCount,
       earliestLoginMinutes: Math.max(0, ...formalSchedules.map((item) => item.earlyLoginMinutes)),
       trialIncluded: schedules.some((item) => item.sessionType === "trial"),
     },
@@ -252,16 +320,30 @@ export function buildOperationPersonnelTaskDraft(task = {}, options = {}) {
   };
   const confirmed = confirmedEditsFromTask(task);
   draft.dates = { ...draft.dates, ...confirmed.dates };
-  draft.personnel = { ...draft.personnel, ...confirmed.personnel };
+  applyConfirmedRequirementEdits(draft, confirmed.requirements);
   const datesComplete = ["start", "end", "nameListDue"].every(
     (key) => /^\d{4}-\d{2}-\d{2}$/.test(text(draft.dates[key])),
   ) && draft.dates.start <= draft.dates.end;
+  const expiredDateFields = datesComplete
+    ? [
+        ["end", "人员落实结束日期"],
+        ["nameListDue", "人员名单提交日期"],
+      ].filter(([key]) => draft.dates[key] < today).map(([, label]) => label)
+    : [];
   const monitorCountComplete = Number.isSafeInteger(Number(draft.personnel.monitorCount))
     && Number(draft.personnel.monitorCount) > 0;
   draft.warnings = draft.warnings.filter((item) => (
     !(item.code === "PERSONNEL_DATES_REQUIRED" && datesComplete)
-    && !(item.code === "MONITOR_COUNT_REQUIRED" && monitorCountComplete)
+    && item.code !== "PERSONNEL_DATES_EXPIRED"
+    && !(item.code === "FORMAL_ROOM_ASSIGNMENT_REQUIRED" && monitorCountComplete)
   ));
+  if (expiredDateFields.length) {
+    draft.warnings.push({
+      code: "PERSONNEL_DATES_EXPIRED",
+      fields: expiredDateFields,
+      message: `${expiredDateFields.join("、")}已过期`,
+    });
+  }
   return draft;
 }
 
@@ -280,6 +362,7 @@ export function operationPersonnelTaskFingerprint(draft) {
     schedules: draft.schedules,
     managedSchedules,
     personnel: draft.personnel,
+    requirementOverrides: draft.requirementOverrides || {},
     dates: draft.dates,
     recipients: {
       ruleVersion: draft.recipients.ruleVersion,
@@ -287,6 +370,7 @@ export function operationPersonnelTaskFingerprint(draft) {
       toNames: draft.recipients.toNames,
       ccGroup: draft.recipients.ccGroup,
       ccCount: draft.recipients.ccCount,
+      ccGroupOnly: draft.recipients.ccGroupOnly === true,
     },
   };
   return createHash("sha256").update(stableJson(material)).digest("hex");
@@ -316,10 +400,14 @@ const FIELD_LABELS = {
   "personnel.platform": "人员落实平台",
   "personnel.loginMonitoring": "监考登录监控",
   "personnel.monitorRatio": "监考比例",
-  "personnel.candidateBasis": "监考人数计算基数",
+  "personnel.candidateBasis": "正式考试每班人数",
   "personnel.monitorCount": "监考人数",
   "personnel.earliestLoginMinutes": "最早登录系统时间",
   "personnel.trialIncluded": "是否包含试考",
+  "requirementOverrides.正式考试-最早登录系统时间": "正式考试-最早登录系统时间",
+  "requirementOverrides.正式考试-监考人员安排": "正式考试-监考人员安排",
+  "requirementOverrides.正式考试-监考人员数量": "正式考试-监考人员数量",
+  "requirementOverrides.正式考试-监考人员比例": "正式考试-监考人员比例",
 };
 
 export function diffOperationPersonnelTaskDrafts(before = {}, after = {}) {
@@ -332,6 +420,7 @@ export function diffOperationPersonnelTaskDrafts(before = {}, after = {}) {
   const fields = [
     ...changedFields(before.dates, after.dates, "dates"),
     ...changedFields(before.personnel, after.personnel, "personnel"),
+    ...changedFields(before.requirementOverrides, after.requirementOverrides, "requirementOverrides"),
     ...(stableJson(before.managedSchedules || []) === stableJson(after.managedSchedules || [])
       ? []
       : [{

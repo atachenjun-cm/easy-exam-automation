@@ -33,6 +33,18 @@ test("defines every required page component", () => {
   }
 });
 
+test("public exam assistant is a standalone conversation surface", () => {
+  const html = read("web/public_exam_assistant.html");
+  const script = read("web/public_exam_assistant.mjs");
+  const style = read("web/public_exam_assistant.css");
+  assert.match(html, /id="messages"/);
+  assert.match(html, /id="assistantInput"/);
+  assert.match(html, /public_exam_assistant\.mjs/);
+  assert.match(script, /\/api\/public\/assistant\/chat/);
+  assert.match(script, /state\.context/);
+  assert.match(style, /@media \(max-width: 640px\)/);
+});
+
 test("only AutoConfigPage imports auto configuration components", () => {
   const autoPage = read("web/pages/AutoConfigPage.mjs");
   for (const component of autoComponents) assert.ok(autoPage.includes(component), component);

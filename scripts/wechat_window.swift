@@ -17,14 +17,26 @@ func mainWindow() -> (id: Int, pid: pid_t, bounds: CGRect)? {
           let pid = window[kCGWindowOwnerPID as String] as? pid_t,
           let boundsValue = window[kCGWindowBounds as String],
           let bounds = CGRect(dictionaryRepresentation: boundsValue as! CFDictionary) else { continue }
+    guard bounds.width >= 640, bounds.height >= 420 else { continue }
     candidates.append((id, pid, bounds))
   }
   return candidates.max { $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height }
 }
 
-guard let window = mainWindow() else {
-  fputs("未找到可见微信主窗口\n", stderr)
-  exit(1)
+func requireMainWindow() -> (id: Int, pid: pid_t, bounds: CGRect) {
+  guard let window = mainWindow() else {
+    fputs("微信未登录或主聊天窗口不可见\n", stderr)
+    exit(1)
+  }
+  return window
+}
+
+func windowSharingState(_ windowID: Int) -> Int {
+  let windows = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
+  for window in windows where window[kCGWindowNumber as String] as? Int == windowID {
+    return window[kCGWindowSharingState as String] as? Int ?? -1
+  }
+  return -1
 }
 
 func postKey(_ keyCode: CGKeyCode, flags: CGEventFlags = []) {
@@ -62,19 +74,16 @@ func activateWeChat() {
   let apps = NSWorkspace.shared.runningApplications.filter { app in
     isWeChatApplication(app)
   }
-  for app in apps {
-    app.unhide()
-    app.activate(options: [.activateAllWindows])
-  }
   let deadline = Date().addingTimeInterval(5)
   while Date() < deadline {
+    for app in apps {
+      app.unhide()
+      app.activate(options: [.activateAllWindows])
+    }
     if isWeChatApplication(NSWorkspace.shared.frontmostApplication) {
       return
     }
     usleep(100_000)
-  }
-  if mainWindow() != nil {
-    return
   }
   fputs("无法将微信切到前台\n", stderr)
   exit(1)
@@ -115,6 +124,46 @@ func clickWithFreshProcess(_ point: CGPoint) {
 
 func clickSearch(_ bounds: CGRect) {
   click(CGPoint(x: bounds.origin.x + 152, y: bounds.origin.y + 27))
+}
+
+func waitForWindowSharingState(
+  _ windowID: Int,
+  timeout: TimeInterval = 5,
+  condition: (Int) -> Bool
+) -> Bool {
+  let deadline = Date().addingTimeInterval(timeout)
+  while Date() < deadline {
+    if condition(windowSharingState(windowID)) {
+      return true
+    }
+    usleep(100_000)
+  }
+  return condition(windowSharingState(windowID))
+}
+
+func beginScreenshotMode(in window: (id: Int, pid: pid_t, bounds: CGRect)) {
+  activateWeChat()
+  if windowSharingState(window.id) != 0 {
+    return
+  }
+  let screenshotButton = CGPoint(
+    x: window.bounds.origin.x + min(window.bounds.width - 32, 357),
+    y: window.bounds.origin.y + window.bounds.height - 36
+  )
+  click(screenshotButton)
+  if waitForWindowSharingState(window.id, condition: { $0 != 0 }) {
+    usleep(300_000)
+    return
+  }
+  postKey(53)
+  fputs("无法启动微信内置截图，请确认群聊输入栏的截图按钮可用\n", stderr)
+  exit(1)
+}
+
+func endScreenshotMode() {
+  guard let window = mainWindow(), windowSharingState(window.id) != 0 else { return }
+  postKey(53)
+  _ = waitForWindowSharingState(window.id, timeout: 2, condition: { $0 == 0 })
 }
 
 func scrollChat(direction: String, in bounds: CGRect, lines: Int = 48, bursts: Int = 4) {
@@ -203,7 +252,12 @@ func debugLog(_ message: String) {
   }
 }
 
-func clickVisibleConversation(_ groupName: String, in window: (id: Int, pid: pid_t, bounds: CGRect), clearSearch: Bool = false) -> Bool {
+struct RecognizedWindowText {
+  let text: String
+  let rect: CGRect
+}
+
+func recognizeWindowText(in window: (id: Int, pid: pid_t, bounds: CGRect)) -> (size: CGSize, items: [RecognizedWindowText]) {
   let screenshotURL = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("easy-exam-wechat-window-\(window.id)-\(UUID().uuidString).png")
   let process = Process()
@@ -216,7 +270,26 @@ func clickVisibleConversation(_ groupName: String, in window: (id: Int, pid: pid
     fputs("无法截图微信窗口用于定位会话列表：\(error.localizedDescription)\n", stderr)
     exit(1)
   }
-  guard process.terminationStatus == 0,
+  var captured = process.terminationStatus == 0 && FileManager.default.fileExists(atPath: screenshotURL.path)
+  if !captured {
+    let bounds = window.bounds
+    let fallback = Process()
+    fallback.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    fallback.arguments = [
+      "-x",
+      "-o",
+      "-R\(Int(bounds.origin.x)),\(Int(bounds.origin.y)),\(Int(bounds.width)),\(Int(bounds.height))",
+      screenshotURL.path,
+    ]
+    do {
+      try fallback.run()
+      fallback.waitUntilExit()
+      captured = fallback.terminationStatus == 0 && FileManager.default.fileExists(atPath: screenshotURL.path)
+    } catch {
+      debugLog("window region screenshot fallback failed: \(error.localizedDescription)")
+    }
+  }
+  guard captured,
         let source = CGImageSourceCreateWithURL(screenshotURL as CFURL, nil),
         let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
     try? FileManager.default.removeItem(at: screenshotURL)
@@ -239,10 +312,8 @@ func clickVisibleConversation(_ groupName: String, in window: (id: Int, pid: pid
 
   let imageWidth = CGFloat(image.width)
   let imageHeight = CGFloat(image.height)
-  let matches = (request.results ?? []).compactMap { observation -> (text: String, rect: CGRect)? in
-    guard let text = observation.topCandidates(1).first?.string, textMatchesGroup(text, groupName: groupName) else {
-      return nil
-    }
+  let items = (request.results ?? []).compactMap { observation -> RecognizedWindowText? in
+    guard let text = observation.topCandidates(1).first?.string else { return nil }
     let box = observation.boundingBox
     let rect = CGRect(
       x: box.minX * imageWidth,
@@ -250,33 +321,70 @@ func clickVisibleConversation(_ groupName: String, in window: (id: Int, pid: pid
       width: box.width * imageWidth,
       height: box.height * imageHeight
     )
-    guard rect.minX >= 55, rect.maxX <= 300, rect.minY >= 55 else { return nil }
-    return (text, rect)
+    return RecognizedWindowText(text: text, rect: rect)
+  }
+  return (CGSize(width: imageWidth, height: imageHeight), items)
+}
+
+func conversationTitleMatches(_ groupName: String, in window: (id: Int, pid: pid_t, bounds: CGRect)) -> Bool {
+  let recognized = recognizeWindowText(in: window)
+  return recognized.items.contains { item in
+    textMatchesGroup(item.text, groupName: groupName)
+      && item.rect.midX >= recognized.size.width * 0.35
+      && item.rect.minY <= recognized.size.height * 0.18
+  }
+}
+
+func clickVisibleConversation(
+  _ groupName: String,
+  in window: (id: Int, pid: pid_t, bounds: CGRect),
+  clearSearch: Bool = false,
+  searchResults: Bool = false
+) -> Bool {
+  let recognized = recognizeWindowText(in: window)
+  let maxXRatio: CGFloat = searchResults ? 0.55 : 0.38
+  let matches = recognized.items.filter { item in
+    textMatchesGroup(item.text, groupName: groupName)
+      && item.rect.minX >= recognized.size.width * 0.04
+      && item.rect.maxX <= recognized.size.width * maxXRatio
+      && item.rect.minY >= recognized.size.height * 0.05
   }
   guard let match = matches.min(by: { $0.rect.minY < $1.rect.minY }) else {
     return false
   }
-  let point = CGPoint(x: window.bounds.origin.x + 150, y: window.bounds.origin.y + match.rect.midY)
+  let scaleX = window.bounds.width / recognized.size.width
+  let scaleY = window.bounds.height / recognized.size.height
+  let point = CGPoint(
+    x: window.bounds.origin.x + match.rect.midX * scaleX,
+    y: window.bounds.origin.y + match.rect.midY * scaleY
+  )
   debugLog("matched conversation text=\(match.text) rect=\(Int(match.rect.minX)),\(Int(match.rect.minY)),\(Int(match.rect.width)),\(Int(match.rect.height)) point=\(Int(point.x)),\(Int(point.y))")
+  clickWithFreshProcess(point)
   if clearSearch {
     postKey(53)
     usleep(300_000)
   }
-  clickWithFreshProcess(point)
   return true
 }
 
 switch CommandLine.arguments.dropFirst().first ?? "info" {
 case "info":
+  let window = requireMainWindow()
   let bounds = window.bounds
-  print("\(window.id),\(Int(bounds.origin.x)),\(Int(bounds.origin.y)),\(Int(bounds.width)),\(Int(bounds.height))")
+  print("\(window.id),\(Int(bounds.origin.x)),\(Int(bounds.origin.y)),\(Int(bounds.width)),\(Int(bounds.height)),\(windowSharingState(window.id))")
 case "click-search":
+  let window = requireMainWindow()
   clickSearch(window.bounds)
+case "begin-screenshot":
+  beginScreenshotMode(in: requireMainWindow())
+case "end-screenshot":
+  endScreenshotMode()
 case "scroll-chat":
   guard CommandLine.arguments.count >= 3 else {
     fputs("缺少滚动方向\n", stderr)
     exit(2)
   }
+  let window = requireMainWindow()
   let lines = CommandLine.arguments.count >= 4 ? Int(CommandLine.arguments[3]) ?? 48 : 48
   let bursts = CommandLine.arguments.count >= 5 ? Int(CommandLine.arguments[4]) ?? 4 : 4
   scrollChat(direction: CommandLine.arguments[2], in: window.bounds, lines: lines, bursts: bursts)
@@ -287,6 +395,7 @@ case "resize-window":
     fputs("缺少目标窗口宽高\n", stderr)
     exit(2)
   }
+  let window = requireMainWindow()
   resizeWindow(width: width, height: height, window: window)
 case "click-point":
   guard CommandLine.arguments.count >= 4,
@@ -321,22 +430,18 @@ case "open-group":
   postKey(53)
   usleep(300_000)
   guard let activeWindow = mainWindow() else {
-    fputs("未找到可见微信主窗口\n", stderr)
+    fputs("微信未登录或主聊天窗口不可见\n", stderr)
     exit(1)
   }
-  if !clickVisibleConversation(CommandLine.arguments[2], in: activeWindow) {
-    clickSearch(activeWindow.bounds)
-    postKey(0, flags: .maskCommand)
-    postKey(9, flags: .maskCommand)
-    usleep(300_000)
-    postKey(36)
-    usleep(1_200_000)
-    if !clickVisibleConversation(CommandLine.arguments[2], in: activeWindow, clearSearch: true) {
-      fputs("未在左侧会话列表找到目标群：\(CommandLine.arguments[2])\n", stderr)
-      exit(1)
-    }
-  }
+  clickSearch(activeWindow.bounds)
+  postKey(0, flags: .maskCommand)
+  postKey(9, flags: .maskCommand)
+  usleep(800_000)
+  postKey(36)
+  usleep(1_200_000)
+  postKey(53)
+  usleep(300_000)
 default:
-  fputs("用法：swift scripts/wechat_window.swift [info|click-search|scroll-chat up|down [lines] [bursts]|resize-window width height|open-group 群名]\n", stderr)
+  fputs("用法：swift scripts/wechat_window.swift [info|click-search|begin-screenshot|end-screenshot|scroll-chat up|down [lines] [bursts]|resize-window width height|open-group 群名]\n", stderr)
   exit(2)
 }

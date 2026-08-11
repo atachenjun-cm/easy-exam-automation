@@ -55,7 +55,7 @@ export function buildFanweiDomExtractorScript({ serialNo = "" } = {}) {
     return { tr, elements, cells };
   }).filter((row) => row.cells.length && isVisible(row.tr));
   const fieldKeys = [
-    "标题","申请人","申请人部门","申请日期","运控流水号","项目名称","项目编码","客户名称（仅供参考）","客户及项目属性","业务方向","系统类型","预估科次","预估收入","结算依据","考试服务范围","报名方式","是否需要报名网站","在线报名开始时间","是否需要ATA安排人工监考","是否需要ATA安排集中监考场地","ATA内容制题参与方式","内容来源","试题类型","科目数","试卷数","是否需要封闭制题","是否需要人工阅卷","阅卷安排","EPI测试","性格测试工具","考核内容是否仅性格测试","其他说明","附件","选项项目组长","选择项目经理","项目经理操作"
+    "标题","申请人","申请人部门","申请日期","运控流水号","项目名称","项目编码","批次名称","客户名称（仅供参考）","客户及项目属性","业务方向","系统类型","预估科次","预估收入","结算依据","考试服务范围","报名方式","是否需要报名网站","在线报名开始时间","是否需要ATA安排人工监考","是否需要ATA安排集中监考场地","ATA内容制题参与方式","内容来源","试题类型","科目数","试卷数","是否需要封闭制题","是否需要人工阅卷","阅卷安排","EPI测试","性格测试工具","考核内容是否仅性格测试","其他说明","附件","选项项目组长","选择项目经理","项目经理操作"
   ];
   const fieldAliases = {"流水号":"运控流水号","销售项目名称":"项目名称","本批次预估科次":"预估科次"};
   const fields = {};
@@ -70,9 +70,10 @@ export function buildFanweiDomExtractorScript({ serialNo = "" } = {}) {
       if (!fieldKeys.includes(key)) continue;
       const valueCell = tr.children[i + 1] || tr.children[i]?.nextElementSibling || tr;
       const checked = selectedLabels(valueCell);
+      const choiceInputs = valueCell.querySelectorAll("input[type=checkbox], input[type=radio]");
       const next = key === "其他说明"
         ? cleanMultiline(valueCell.innerText || valueCell.textContent)
-        : cells[i + 1] || "";
+        : choiceInputs.length ? "" : cells[i + 1] || "";
       setField(key, checked.length ? checked.join("；") : next);
     }
   });
@@ -103,8 +104,26 @@ export function buildFanweiDomExtractorScript({ serialNo = "" } = {}) {
       "时长（分钟）": match[6],
     });
   }
+  const flowOpinionRows = Array.from(document.querySelectorAll(".wf-req-sign-list-content")).flatMap((item) => {
+    if (!isVisible(item)) return [];
+    const operator = clean(item.querySelector(".operate-name-label")?.innerText || item.querySelector(".operate-name-label")?.textContent);
+    const department = clean(item.querySelector(".left-department-span")?.innerText || item.querySelector(".left-department-span")?.textContent);
+    const recipientText = clean(item.querySelector(".logitem-Recipient")?.innerText || item.querySelector(".logitem-Recipient")?.textContent);
+    const recipient = recipientText.replace(/^接收人\\s*[:：]?\\s*/, "").trim();
+    const operationParts = Array.from(item.querySelectorAll(".loglist-item-operatedate span"))
+      .map((span) => clean(span.innerText || span.textContent))
+      .filter(Boolean);
+    if (!operator && !department && !recipient) return [];
+    return [{
+      "处理人": operator,
+      "部门": department,
+      "接收人": recipient,
+      "操作时间": operationParts[0] || "",
+      "节点": operationParts.slice(1).join(" "),
+    }];
+  });
   const requestid = new URLSearchParams(location.hash.split("?")[1] || location.search).get("requestid") || "";
-  return JSON.stringify({ requestid, fields, examSceneRows: sceneRows, opaRows });
+  return JSON.stringify({ requestid, fields, examSceneRows: sceneRows, opaRows, flowOpinionRows });
 })()`;
 }
 

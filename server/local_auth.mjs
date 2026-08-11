@@ -192,11 +192,22 @@ export function buildLogoutCookie(auth) {
 
 export function shouldAllowWithoutAuth(method = "GET", pathname = "") {
   if (pathname === "/login") return method === "GET";
+  if (/^\/assistant\/?$/.test(pathname)) return method === "GET";
   if (pathname.startsWith("/web/")) return method === "GET";
   if (pathname === "/api/health") return method === "GET";
+  if (pathname === "/api/public/assistant/chat") return method === "POST";
   if (pathname === "/api/auth/login") return method === "POST";
   if (pathname === "/api/auth/me") return method === "GET";
   if (pathname === "/api/auth/logout") return method === "POST";
   if (pathname === "/api/fanwei/bridge/submit") return method === "POST" || method === "OPTIONS";
+  return false;
+}
+
+export function shouldAllowInternalWechatCollectorRequest(method = "GET", pathname = "", remoteAddress = "") {
+  const address = String(remoteAddress || "").trim().toLowerCase();
+  const isLoopback = address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+  if (!isLoopback) return false;
+  if (method === "GET" && pathname === "/api/requirements") return true;
+  if (method === "POST" && pathname === "/api/ai/requirements/dispatch") return true;
   return false;
 }

@@ -54,12 +54,19 @@ test("fanwei DOM extractor returns only the requested serial when present", () =
   assert.match(extractor, /"流水号":"运控流水号"/);
   assert.match(extractor, /"销售项目名称":"项目名称"/);
   assert.match(extractor, /"本批次预估科次":"预估科次"/);
+  assert.match(extractor, /"项目编码","批次名称"/);
   assert.match(extractor, /fieldAliases\[rawKey\] \|\| rawKey/);
+  assert.match(extractor, /querySelectorAll\("input\[type=checkbox\], input\[type=radio\]"\)/);
+  assert.match(extractor, /choiceInputs\.length \? "" : cells\[i \+ 1\] \|\| ""/);
   assert.match(extractor, /fields\["运控流水号"\] !== expectedSerial/);
   assert.match(extractor, /!fields\["运控流水号"\]/);
   assert.match(extractor, /return ""/);
   assert.doesNotMatch(extractor, /fields\["运控流水号"\] = expectedSerial/);
-  assert.match(extractor, /JSON\.stringify\(\{ requestid, fields, examSceneRows: sceneRows, opaRows \}\)/);
+  assert.match(extractor, /\.wf-req-sign-list-content/);
+  assert.match(extractor, /\.left-department-span/);
+  assert.match(extractor, /\.logitem-Recipient/);
+  assert.match(extractor, /recipientText\.replace\(\/\^接收人/);
+  assert.match(extractor, /JSON\.stringify\(\{ requestid, fields, examSceneRows: sceneRows, opaRows, flowOpinionRows \}\)/);
 });
 
 test("fanwei DOM extractor ignores conditionally hidden form rows", () => {

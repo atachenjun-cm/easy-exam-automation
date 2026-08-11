@@ -211,7 +211,7 @@ export function assertDraftHasRequirementSignal(draft = {}) {
     return value !== undefined && value !== null;
   });
   if (hasRequirementValue || changeRecords.length || Object.keys(requirementCandidates).length || changeCandidates.length) return;
-  const error = new Error("OCR 文本未识别到需求字段或需求变更，已禁止写入 checkpoint 和需求中心");
+  const error = new Error("采集文本未识别到需求字段或需求变更，已禁止写入 checkpoint 和需求中心");
   error.code = "NO_REQUIREMENT_SIGNAL";
   throw error;
 }
@@ -323,11 +323,23 @@ tell application "System Events"
   end tell
 end tell
 delay 0.2
-`;
+  `;
   if (dryRun) return { script, text: "" };
   execFileSync("osascript", ["-e", script], { encoding: "utf8" });
   const text = execFileSync("pbpaste", { encoding: "utf8" });
+  assertClipboardCaptureMatchesGroup(text, groupName);
   return { script, text };
+}
+
+export function assertClipboardCaptureMatchesGroup(text, groupName) {
+  const normalizedText = normalizeWechatTitleText(text);
+  const normalizedGroup = normalizeWechatTitleText(groupName);
+  if (normalizedText === normalizedGroup) {
+    throw new Error(`微信剪贴板只复制到了搜索词，未读取到群聊正文：${groupName}`);
+  }
+  if (!normalizedGroup || !normalizedText.includes(normalizedGroup)) {
+    throw new Error(`无法确认剪贴板内容来自目标微信群：${groupName}`);
+  }
 }
 
 function captureVisibleWechatTextByOcr(groupName, {
@@ -351,13 +363,17 @@ function captureVisibleWechatTextByOcr(groupName, {
   const resolvedScreenshotPath = screenshotPath || defaultScreenshotPath(groupName);
   const resolvedOcrTool = ocrTool || path.join("scripts", "ocr_image.swift");
   const ocrCommand = buildOcrCommand(resolvedOcrTool, resolvedScreenshotPath).join(" ");
-  const captureInsets = {
-    leftInset: Number(chatLeftInset ?? 320),
-    topInset: Number(chatTopInset ?? 56),
-    rightInset: Number(chatRightInset ?? 0),
-    bottomInset: Number(chatBottomInset ?? 180),
+  const requestedCaptureInsets = {
+    leftInset: chatLeftInset,
+    topInset: chatTopInset,
+    rightInset: chatRightInset,
+    bottomInset: chatBottomInset,
   };
   const initialWindowInfo = checkWindow ? getWechatWindowInfo(windowHelper) : null;
+  let captureInsets = resolveAdaptiveWechatCaptureInsets(
+    initialWindowInfo || { width: 1200, height: 860 },
+    requestedCaptureInsets,
+  );
   const initialAdjustmentPlan = initialWindowInfo
     ? resolveWechatWindowAdjustmentPlan(initialWindowInfo, captureInsets)
     : null;
@@ -383,22 +399,10 @@ function captureVisibleWechatTextByOcr(groupName, {
     };
   }
   mkdirSync(path.dirname(resolvedScreenshotPath), { recursive: true });
-  execFileSync("osascript", ["-e", script], { encoding: "utf8" });
-  let windowInfo = getWechatWindowInfo(windowHelper);
-  let adjustmentPlan = resolveWechatWindowAdjustmentPlan(windowInfo, captureInsets);
-  if (adjustmentPlan.windowAdjustment.resized) {
-    resizeWechatWindow(windowHelper, adjustmentPlan.windowAdjustment.targetWindow);
-    windowInfo = getWechatWindowInfo(windowHelper);
-    adjustmentPlan = {
-      ...resolveWechatWindowAdjustmentPlan(windowInfo, captureInsets),
-      windowAdjustment: {
-        ...adjustmentPlan.windowAdjustment,
-        resized: true,
-        reason: "resized",
-        afterWindow: { width: windowInfo.width, height: windowInfo.height },
-      },
-    };
-  }
+  openWechatConversation(groupName, windowHelper);
+  const windowInfo = getWechatWindowInfo(windowHelper);
+  captureInsets = resolveAdaptiveWechatCaptureInsets(windowInfo, requestedCaptureInsets);
+  const adjustmentPlan = resolveWechatWindowAdjustmentPlan(windowInfo, captureInsets);
   const plan = buildWechatWindowCapturePlan(windowInfo, captureInsets);
   const adjustedScrollPlan = resolveScrollCapturePlan(
     { scrollPages, scrollSteps, scrollLines, scrollBursts },
@@ -406,18 +410,22 @@ function captureVisibleWechatTextByOcr(groupName, {
     { captureHeight: adjustmentPlan.chatCaptureSize.height, initialCollection },
   );
   const windowScreenshotPath = `${resolvedScreenshotPath}.window.png`;
+  const titleScreenshotPath = `${resolvedScreenshotPath}.title.png`;
   const maxTitleAttempts = 12;
   for (let attempt = 1; attempt <= maxTitleAttempts; attempt += 1) {
-    execFileSync("screencapture", [...plan.screenshotArgs, windowScreenshotPath], { encoding: "utf8" });
-    const windowOcrCommand = buildOcrCommand(resolvedOcrTool, windowScreenshotPath);
-    const windowText = execFileSync(windowOcrCommand[0], windowOcrCommand.slice(1), { encoding: "utf8" });
+    withWechatScreenshotMode(windowHelper, () => {
+      execFileSync("screencapture", [...plan.windowScreenshotArgs, windowScreenshotPath], { encoding: "utf8" });
+    });
+    execFileSync("sips", [...plan.titleCropArgs, windowScreenshotPath, "--out", titleScreenshotPath], { encoding: "utf8" });
+    const titleOcrCommand = buildOcrCommand(resolvedOcrTool, titleScreenshotPath);
+    const titleText = execFileSync(titleOcrCommand[0], titleOcrCommand.slice(1), { encoding: "utf8" });
     try {
-      assertWechatConversationTitle(windowText, groupName);
+      assertWechatConversationTitle(titleText, groupName);
       break;
     } catch (error) {
       if (!shouldRetryWechatConversationTitle(error, { attempt, maxAttempts: maxTitleAttempts })) throw error;
       if (shouldReopenWechatGroupDuringTitleRetry(error, { attempt, maxAttempts: maxTitleAttempts })) {
-        execFileSync("osascript", ["-e", script], { encoding: "utf8" });
+        openWechatConversation(groupName, windowHelper);
       }
       waitSync(1_000);
     }
@@ -434,8 +442,10 @@ function captureVisibleWechatTextByOcr(groupName, {
         const pageScreenshotPath = index === 0
           ? resolvedScreenshotPath
           : withPageSuffix(resolvedScreenshotPath, index + 1);
-        execFileSync("screencapture", [...plan.screenshotArgs, windowScreenshotPath], { encoding: "utf8" });
-        execFileSync("sips", [...plan.cropArgs, windowScreenshotPath, "--out", pageScreenshotPath], { encoding: "utf8" });
+        withWechatScreenshotMode(windowHelper, () => {
+          execFileSync("screencapture", [...plan.windowScreenshotArgs, windowScreenshotPath], { encoding: "utf8" });
+        });
+        execFileSync("sips", [...plan.chatCropArgs, windowScreenshotPath, "--out", pageScreenshotPath], { encoding: "utf8" });
         const command = buildOcrCommand(resolvedOcrTool, pageScreenshotPath);
         const pageText = execFileSync(command[0], command.slice(1), { encoding: "utf8" });
         pages.push(pageText);
@@ -466,7 +476,7 @@ function captureVisibleWechatTextByOcr(groupName, {
   let text = mergeWechatScrollPageTexts(pageCapture.pages, { scrollDirection: adjustedScrollPlan.scrollDirection || "up" });
   if (!text.trim()) {
     // 微信偶发会在左侧选中目标群但右侧停在空白占位；重新打开微信群后再采集一次。
-    execFileSync("osascript", ["-e", script], { encoding: "utf8" });
+    openWechatConversation(groupName, windowHelper);
     waitSync(1_000);
     pageCapture = capturePagesOnce();
     text = mergeWechatScrollPageTexts(pageCapture.pages, { scrollDirection: adjustedScrollPlan.scrollDirection || "up" });
@@ -479,6 +489,7 @@ function captureVisibleWechatTextByOcr(groupName, {
     screenshotPath: resolvedScreenshotPath,
     screenshotPaths: pageCapture.screenshotPaths,
     windowScreenshotPath,
+    titleScreenshotPath,
     ocrCommand,
     captureRect: plan.captureRect,
     captureInsets,
@@ -525,8 +536,7 @@ function commonBoundaryOverlap(leftLines, rightLines) {
 }
 
 const DEFAULT_SCROLL_BASE_HEIGHT = 624;
-const DEFAULT_MIN_CHAT_CAPTURE_HEIGHT = 480;
-const DEFAULT_TARGET_WECHAT_WINDOW = { width: 1200, height: 860 };
+const DEFAULT_MIN_CHAT_CAPTURE_HEIGHT = 240;
 
 export function resolveScrollCapturePlan(
   { scrollPages, scrollSteps, scrollLines, scrollBursts } = {},
@@ -581,11 +591,17 @@ export function resolveWechatWindowAdjustmentPlan(
   captureInsets = {},
   {
     minChatCaptureHeight = DEFAULT_MIN_CHAT_CAPTURE_HEIGHT,
-    targetWindow = DEFAULT_TARGET_WECHAT_WINDOW,
   } = {},
 ) {
-  const plan = buildWechatWindowCapturePlan(windowInfo, captureInsets);
-  const [, , width, height] = plan.captureRect.split(",").map((value) => Number(value));
+  const leftInset = Math.max(0, Math.round(Number(captureInsets.leftInset ?? 220)));
+  const topInset = Math.max(0, Math.round(Number(captureInsets.topInset ?? 56)));
+  const rightInset = Math.max(0, Math.round(Number(captureInsets.rightInset ?? 0)));
+  const bottomInset = Math.max(0, Math.round(Number(captureInsets.bottomInset ?? 120)));
+  if ([leftInset, topInset, rightInset, bottomInset].some((value) => !Number.isFinite(value))) {
+    throw new Error("聊天正文截图边距必须是数字");
+  }
+  const width = Math.round(Number(windowInfo.width) - leftInset - rightInset);
+  const height = Math.round(Number(windowInfo.height) - topInset - bottomInset);
   const wechatWindow = {
     windowId: windowInfo.windowId,
     x: windowInfo.x,
@@ -594,22 +610,45 @@ export function resolveWechatWindowAdjustmentPlan(
     height: windowInfo.height,
   };
   const originalWindow = { width: windowInfo.width, height: windowInfo.height };
-  const normalizedTarget = {
-    width: Math.max(Math.round(Number(targetWindow.width || DEFAULT_TARGET_WECHAT_WINDOW.width)), Math.round(windowInfo.width)),
-    height: Math.max(Math.round(Number(targetWindow.height || DEFAULT_TARGET_WECHAT_WINDOW.height)), Math.round(windowInfo.height)),
-  };
-  const tooSmall = height < minChatCaptureHeight;
+  const tooSmall = width < 320 || height < minChatCaptureHeight;
+  if (tooSmall) {
+    throw new Error(`聊天正文截图区域过小：${width}x${height}`);
+  }
   return {
     wechatWindow,
     chatCaptureSize: { width, height },
     windowAdjustment: {
       checked: true,
-      resized: tooSmall,
-      reason: tooSmall ? "chat_capture_too_small" : "size_ok",
+      resized: false,
+      reason: "adaptive_capture",
       minChatCaptureHeight,
-      targetWindow: normalizedTarget,
       originalWindow,
     },
+  };
+}
+
+export function resolveAdaptiveWechatCaptureInsets(windowInfo, requestedInsets = {}) {
+  const width = Math.round(Number(windowInfo?.width));
+  const height = Math.round(Number(windowInfo?.height));
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error("无法解析微信窗口尺寸");
+  }
+  const explicit = (value, fallback) => {
+    if (value === undefined || value === null || value === "") return fallback;
+    const parsed = Math.max(0, Math.round(Number(value)));
+    if (!Number.isFinite(parsed)) throw new Error("聊天正文截图边距必须是数字");
+    return parsed;
+  };
+  const defaultLeft = Math.min(220, Math.max(0, width - 320));
+  const topInset = explicit(requestedInsets.topInset, 56);
+  const rightInset = explicit(requestedInsets.rightInset, 0);
+  const maxBottom = Math.max(0, height - topInset - DEFAULT_MIN_CHAT_CAPTURE_HEIGHT);
+  const scaledBottom = Math.min(120, Math.max(90, Math.round(height * 0.14)));
+  return {
+    leftInset: explicit(requestedInsets.leftInset, defaultLeft),
+    topInset,
+    rightInset,
+    bottomInset: explicit(requestedInsets.bottomInset, Math.min(scaledBottom, maxBottom)),
   };
 }
 
@@ -628,21 +667,16 @@ function scrollWechatChat(windowHelper, direction, { scrollLines, scrollBursts }
   execFileSync("swift", [windowHelper, "scroll-chat", direction, String(scrollLines), String(scrollBursts)], { encoding: "utf8" });
 }
 
-function resizeWechatWindow(windowHelper, { width, height }) {
-  execFileSync("swift", [windowHelper, "resize-window", String(width), String(height)], { encoding: "utf8" });
-  waitSync(800);
-}
-
 function withPageSuffix(filePath, pageNumber) {
   const parsed = path.parse(filePath);
   return path.join(parsed.dir, `${parsed.name}.page-${pageNumber}${parsed.ext || ".png"}`);
 }
 
 export function buildChatCaptureRect(windowRect, {
-  leftInset = 320,
+  leftInset = 220,
   topInset = 56,
   rightInset = 0,
-  bottomInset = 180,
+  bottomInset = 120,
 } = {}) {
   const values = String(windowRect || "").split(",").map((value) => Number(value));
   if (values.length !== 4 || values.some((value) => !Number.isFinite(value))) {
@@ -664,21 +698,69 @@ export function buildChatCaptureRect(windowRect, {
 
 export function parseWechatWindowInfo(value) {
   const numbers = String(value || "").trim().split(",").map((item) => Number(item));
-  if (numbers.length !== 5 || numbers.some((item) => !Number.isFinite(item))) {
+  if (![5, 6].includes(numbers.length) || numbers.some((item) => !Number.isFinite(item))) {
     throw new Error(`无法解析微信窗口信息：${value || "空"}`);
   }
-  const [windowId, x, y, width, height] = numbers;
-  return { windowId, x, y, width, height };
+  const [windowId, x, y, width, height, sharingState] = numbers;
+  return sharingState === undefined
+    ? { windowId, x, y, width, height }
+    : { windowId, x, y, width, height, sharingState };
+}
+
+export function assertWechatWindowCaptureAllowed(windowInfo) {
+  if (windowInfo?.sharingState !== 0) return;
+  throw new Error("当前微信版本禁止系统截取主窗口，无法使用窗口 OCR 采集");
 }
 
 export function buildWechatWindowCapturePlan(windowInfo, captureInsets = {}) {
-  const captureRect = buildChatCaptureRect(`0,0,${windowInfo.width},${windowInfo.height}`, captureInsets);
-  const [left, top, width, height] = captureRect.split(",");
+  const captureRect = buildChatCaptureRect(
+    `${windowInfo.x},${windowInfo.y},${windowInfo.width},${windowInfo.height}`,
+    captureInsets,
+  );
+  const titleCaptureRect = buildWechatTitleCaptureRect(windowInfo, captureInsets);
+  const windowCaptureRect = [windowInfo.x, windowInfo.y, windowInfo.width, windowInfo.height]
+    .map((value) => Math.round(Number(value)))
+    .join(",");
+  const [left, top, width, height] = buildChatCaptureRect(
+    `0,0,${windowInfo.width},${windowInfo.height}`,
+    captureInsets,
+  ).split(",");
+  const [titleLeft, titleTop, titleWidth, titleHeight] = buildWechatTitleCaptureRect({
+    ...windowInfo,
+    x: 0,
+    y: 0,
+  }, captureInsets).split(",");
   return {
     captureRect,
+    titleCaptureRect,
+    windowCaptureRect,
     screenshotArgs: ["-x", "-o", `-l${windowInfo.windowId}`],
-    cropArgs: ["-c", height, width, "--cropOffset", top, left],
+    windowScreenshotArgs: ["-x", "-o", `-l${windowInfo.windowId}`],
+    chatCropArgs: ["-c", height, width, "--cropOffset", top, left],
+    titleCropArgs: ["-c", titleHeight, titleWidth, "--cropOffset", titleTop, titleLeft],
   };
+}
+
+export function buildWechatTitleCaptureRect(windowInfo, {
+  leftInset = 220,
+  rightInset = 0,
+  titleHeight = 112,
+} = {}) {
+  const values = [windowInfo?.x, windowInfo?.y, windowInfo?.width, windowInfo?.height]
+    .map((value) => Number(value));
+  const insets = [leftInset, rightInset, titleHeight]
+    .map((value) => Math.max(0, Math.round(Number(value))));
+  if (values.some((value) => !Number.isFinite(value)) || insets.some((value) => !Number.isFinite(value))) {
+    throw new Error("无法解析微信会话标题截图区域");
+  }
+  const [x, y, windowWidth, windowHeight] = values;
+  const [left, right, requestedHeight] = insets;
+  const width = Math.round(windowWidth - left - right);
+  const height = Math.min(Math.round(windowHeight), requestedHeight);
+  if (width < 320 || height < 56) {
+    throw new Error(`微信会话标题截图区域过小：${width}x${height}`);
+  }
+  return `${Math.round(x + left)},${Math.round(y)},${width},${height}`;
 }
 
 export function assertWechatConversationTitle(ocrText, groupName) {
@@ -717,6 +799,19 @@ function waitSync(ms) {
 function getWechatWindowInfo(windowHelper = path.resolve(path.join("scripts", "wechat_window.swift"))) {
   const value = execFileSync("swift", [windowHelper, "info"], { encoding: "utf8" }).trim();
   return parseWechatWindowInfo(value);
+}
+
+function openWechatConversation(groupName, windowHelper = path.resolve(path.join("scripts", "wechat_window.swift"))) {
+  execFileSync("swift", [windowHelper, "open-group", groupName], { encoding: "utf8" });
+}
+
+function withWechatScreenshotMode(windowHelper, capture) {
+  execFileSync("swift", [windowHelper, "begin-screenshot"], { encoding: "utf8" });
+  try {
+    return capture();
+  } finally {
+    execFileSync("swift", [windowHelper, "end-screenshot"], { encoding: "utf8" });
+  }
 }
 
 export function buildOpenWechatGroupScript(groupName, {

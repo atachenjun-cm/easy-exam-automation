@@ -1,6 +1,7 @@
 const FRONTEND_ROUTE_PATTERNS = [
   /^\/$/,
   /^\/login\/?$/,
+  /^\/assistant\/?$/,
   /^\/projects\/?$/,
   /^\/projects\/[^/]+\/?$/,
   /^\/fanwei-test\/?$/,

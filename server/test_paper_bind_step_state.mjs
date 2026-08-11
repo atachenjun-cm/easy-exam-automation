@@ -3,13 +3,17 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import {
-  millisecondsUntilNextHour,
-  shouldSkipFailedPaperBindCheckInCurrentHour,
-} from "./paper_bind_scheduler.mjs";
+import { millisecondsUntilNextHour } from "./paper_bind_scheduler.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const serverSource = fs.readFileSync(path.join(rootDir, "server/easy_exam_server.mjs"), "utf8");
+
+function sourceBetween(startMarker, endMarker) {
+  const start = serverSource.indexOf(startMarker);
+  const end = serverSource.indexOf(endMarker, start + startMarker.length);
+  assert.ok(start >= 0 && end > start, `missing source markers: ${startMarker}`);
+  return serverSource.slice(start, end);
+}
 
 test("paper form bind retry does not mark missing form codes as success", () => {
   assert.ok(serverSource.includes('if (bindResult.status === "waiting_manual")'));
@@ -36,7 +40,9 @@ test("paper binding scheduler runs at the next whole hour before the formal exam
   assert.ok(serverSource.includes("shouldAttemptScheduledPaperBind"));
   assert.ok(serverSource.includes("runScheduledPaperBindingOnce"));
   assert.ok(serverSource.includes("scheduleNextPaperBindingCheck"));
-  assert.ok(serverSource.includes("millisecondsUntilNextHour(new Date())"));
+  assert.ok(serverSource.includes("millisecondsUntilNextHour(scheduledAt)"));
+  assert.ok(serverSource.includes("scheduledForMs - Date.now()"));
+  assert.ok(serverSource.includes("setTimeout(runAtWholeHour, remainingMs)"));
   assert.equal(serverSource.includes("setInterval(runScheduledPaperBindingOnce"), false);
 });
 
@@ -50,51 +56,19 @@ test("paper binding state and execution are isolated by requirement", () => {
   assert.ok(serverSource.includes("function taskFormalSession(task = {}, requirementIndex = 0)"));
   assert.ok(serverSource.includes("function paperFormBindState(task = {}, requirementIndex = 0)"));
   assert.ok(serverSource.includes("paperFormBinds[normalizedIndex] = next"));
-  assert.ok(serverSource.includes("normalizeCourseRecords(taskRequirementConfig(task, requirementIndex))"));
+  assert.ok(serverSource.includes("normalizeCourseRecords({ courses: taskCoursesForChange(task, requirementIndex) })"));
   assert.ok(serverSource.includes("runPaperFormBindForTask(task, login, { scheduled: true, requirementIndex })"));
 });
 
-test("paper binding scheduler skips a repeated failed check in the same hour", () => {
-  const now = new Date("2026-07-07T10:20:00Z");
-  const state = {
-    status: "failed",
-    completedAt: "2026-07-07T10:10:00Z",
-  };
+test("paper binding scheduler retries failed checks every whole hour and stops after success", () => {
+  const shouldAttemptSource = sourceBetween(
+    "function shouldAttemptScheduledPaperBind",
+    "async function runPaperFormBindForTask",
+  );
 
-  assert.equal(shouldSkipFailedPaperBindCheckInCurrentHour(state, now), true);
-});
-
-test("paper binding scheduler retries a failed check on the next whole hour", () => {
-  const now = new Date("2026-07-07T11:00:00Z");
-  const state = {
-    status: "failed",
-    completedAt: "2026-07-07T10:59:59.900Z",
-  };
-
-  assert.equal(shouldSkipFailedPaperBindCheckInCurrentHour(state, now), false);
-});
-
-test("paper binding scheduler uses the latest log time when completion time is absent", () => {
-  const now = new Date("2026-07-07T10:20:00Z");
-  const state = {
-    status: "failed",
-    logs: [
-      { time: "2026-07-07T09:00:00Z", message: "old" },
-      { time: "2026-07-07T10:05:00Z", message: "new" },
-    ],
-  };
-
-  assert.equal(shouldSkipFailedPaperBindCheckInCurrentHour(state, now), true);
-});
-
-test("paper binding scheduler does not cool down manual pending checks", () => {
-  const now = new Date("2026-07-07T10:20:00Z");
-  const state = {
-    status: "pending",
-    completedAt: "2026-07-07T10:10:00Z",
-  };
-
-  assert.equal(shouldSkipFailedPaperBindCheckInCurrentHour(state, now), false);
+  assert.ok(shouldAttemptSource.includes('current.status === "success" || current.status === "running"'));
+  assert.equal(shouldAttemptSource.includes("shouldSkipFailedPaperBindCheckInCurrentHour"), false);
+  assert.equal(serverSource.includes("shouldSkipFailedPaperBindCheckInCurrentHour"), false);
 });
 
 test("paper binding detail renders bound form codes and manual action", () => {
@@ -110,5 +84,12 @@ test("paper binding detail renders bound form codes and manual action", () => {
   assert.ok(html.includes("paper-bind-label\">科目编号"));
   assert.equal(html.includes("paper-bind-label\">试卷编号"), false);
   assert.ok(html.includes("course-bind-label\">科目编号"));
+  assert.ok(html.includes("course-bind-line course-bind-code-line"));
+  assert.ok(html.includes('class="course-bind-code-value"'));
+  assert.ok(html.includes(".course-bind-code-line .course-bind-label { flex: 0 0 auto; margin-right: 2px; white-space: nowrap; }"));
+  assert.ok(html.includes(".course-bind-code-value { min-width: 0; font-size: 11px; white-space: nowrap; }"));
+  assert.ok(html.includes(".course-bind-code-line .sms-copy-button { width: 22px; height: 22px; flex-basis: 22px; }"));
+  assert.ok(html.includes('buildCourseCodeCopyButton(course.code || course.course_code || "")'));
+  assert.ok(html.includes('data-copy-course-code="${safeText(courseCode)}"'));
   assert.ok(html.includes("data-trigger-step=\"paper_form_bind\""));
 });

@@ -1,5 +1,6 @@
 export const ROUTES = [
   { name: "login", pattern: /^\/login\/?$/, menuKey: "" },
+  { name: "assistant", pattern: /^\/assistant\/?$/, menuKey: "" },
   { name: "projects", pattern: /^\/projects\/?$/, menuKey: "projects" },
   { name: "project-detail", pattern: /^\/projects\/([^/]+)\/?$/, param: "projectId", menuKey: "projects" },
   { name: "fanwei-test", pattern: /^\/fanwei-test\/?$/, menuKey: "projects" },

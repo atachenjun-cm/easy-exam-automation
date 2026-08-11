@@ -9,6 +9,7 @@ export function defaultLoginSettings() {
   return {
     url: DEFAULT_LOGIN_URL,
     username: "",
+    tenantId: "",
     password: "",
     tenantApiKey: "",
   };
@@ -33,6 +34,7 @@ export function sanitizeLoginSettings(login = {}) {
   return {
     url: String(login.url || defaults.url).trim(),
     username: String(login.username || "").trim(),
+    tenantId: String(login.tenantId || login.tenant_id || "").trim(),
     password: String(login.password || ""),
     tenantApiKey: String(login.tenantApiKey || "").trim(),
   };
@@ -107,6 +109,7 @@ export function apiKeyProfileCredentialsForUser({
   );
   return {
     username: login.username,
+    tenantId: login.tenantId,
     password: login.password,
     tenantApiKey: profile.tenantApiKey,
   };
@@ -134,6 +137,9 @@ export function updateApiKeyProfileForUser(userSettings, user, profileId, update
     ...currentProfile,
     label: updates.label === undefined ? currentProfile.label : String(updates.label || "").trim(),
     remark: updates.remark === undefined ? String(currentProfile.remark || "") : String(updates.remark || "").trim(),
+    tenantId: updates.tenantId === undefined
+      ? String(currentProfile.tenantId || "")
+      : String(updates.tenantId || "").trim(),
     tenantApiKey: String(updates.tenantApiKey || currentProfile.tenantApiKey || "").trim(),
     keyHint: apiKeyHint(updates.tenantApiKey || currentProfile.tenantApiKey),
     login: updates.login && typeof updates.login === "object"
@@ -189,7 +195,7 @@ export function deleteApiKeyProfileForUser(userSettings, user, profileId) {
     apiKeyProfiles: nextProfiles,
     login: current
       ? loginSettingsForApiKeyProfile(current, existing.login)
-      : { ...(existing.login || {}), tenantApiKey: "" },
+      : { ...(existing.login || {}), tenantId: "", tenantApiKey: "" },
     updatedAt: now,
     createdAt: existing.createdAt || now,
   };
@@ -290,6 +296,7 @@ export function saveUserLogin(userSettings, user, login) {
   if (record.login.tenantApiKey) {
     upsertApiKeyProfileInRecord(record, {
       apiBase: login.apiBase || DEFAULT_TENANT_API_BASE,
+      tenantId: record.login.tenantId,
       tenantApiKey: record.login.tenantApiKey,
       label: login.profileLabel || record.login.username || record.login.tenantApiKey,
       login: record.login,
@@ -316,6 +323,7 @@ export function upsertApiKeyProfileInRecord(record, input = {}, { now = new Date
   const id = existing.id || requestedId;
   const fallbackLogin = sanitizeLoginSettings(record.login || {});
   const existingProfileLogin = existing.login && typeof existing.login === "object" ? existing.login : {};
+  const tenantId = String(input.tenantId ?? submittedLogin.tenantId ?? existing.tenantId ?? fallbackLogin.tenantId ?? "").trim();
   if (current) {
     profiles.forEach((profile) => {
       profile.current = false;
@@ -325,6 +333,7 @@ export function upsertApiKeyProfileInRecord(record, input = {}, { now = new Date
     ...existing,
     id,
     apiBase,
+    tenantId,
     tenantApiKey,
     keyHint: apiKeyHint(tenantApiKey),
     label: String(input.label || existing.label || apiKeyHint(tenantApiKey)).trim(),
@@ -370,6 +379,7 @@ function normalizeApiKeyProfile(profile = {}) {
     label: String(profile.label || profile.name || apiKeyHint(tenantApiKey)).trim(),
     remark: String(profile.remark || "").trim(),
     apiBase,
+    tenantId: String(profile.tenantId || profile.tenant_id || "").trim(),
     tenantApiKey,
     keyHint: apiKeyHint(tenantApiKey),
     login: normalizeProfileLogin(profile.login),
@@ -413,6 +423,7 @@ function loginSettingsForApiKeyProfile(profile = {}, fallback = {}) {
     ...base,
     url: profileLogin.url || base.url,
     username: profileLogin.username || profile.label || base.username,
+    tenantId: profile.tenantId || base.tenantId,
     password: profileLogin.password || base.password,
     tenantApiKey: profile.tenantApiKey || base.tenantApiKey,
   });

@@ -121,14 +121,10 @@ class ExamRequestParserTest(unittest.TestCase):
             [
                 {
                     "name": "综合一",
-                    "code": "20260718-01-01",
-                    "form_codes": [],
                     "paper_name": "会计学与财务分析基础",
                 },
                 {
                     "name": "综合二",
-                    "code": "20260718-01-02",
-                    "form_codes": [],
                     "paper_name": "Python语言基础+大数据技术",
                 },
             ],

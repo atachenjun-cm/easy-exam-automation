@@ -4,10 +4,40 @@ import test from "node:test";
 import {
   buildFanweiRequirementModel,
   buildFanweiRequirementPreview,
+  contentPersonnelFromFlowOpinionRows,
   mapFanweiToRequirementFields,
   normalizeFanweiDomPayload,
   validateFanweiReadPayload,
 } from "./fanwei_requirement_mapper.mjs";
+
+test("reads content personnel from the content department flow opinion", () => {
+  const flowOpinionRows = [
+    { "处理人": "陈青", "部门": "职业能力评价研究院", "接收人": "潘君艳 杨铭 卢宁", "节点": "[研究院邮件环节 / 抄送]" },
+    { "处理人": "杨铭", "部门": "内容开发部", "接收人": "卢宁", "节点": "[内容部门经理处理 / 批准]" },
+    { "处理人": "其他人", "部门": "内容开发部", "接收人": "卢宁；张三", "节点": "[内容部门处理 / 批准]" },
+  ];
+
+  assert.equal(contentPersonnelFromFlowOpinionRows(flowOpinionRows), "卢宁；张三");
+
+  const normalized = normalizeFanweiDomPayload({
+    fields: { "运控流水号": "R0042182" },
+    flowOpinionRows,
+  });
+  const model = buildFanweiRequirementModel(normalized);
+
+  assert.equal(normalized.fields["内容人员"], "卢宁；张三");
+  assert.deepEqual(normalized.flowOpinionRows[1], {
+    "处理人": "杨铭",
+    "部门": "内容开发部",
+    "接收人": "卢宁",
+    "操作时间": "",
+    "节点": "[内容部门经理处理 / 批准]",
+  });
+  assert.deepEqual(
+    model.previewFields.find((row) => row.label === "内容人员"),
+    { label: "内容人员", value: "卢宁；张三", source: "流转意见" },
+  );
+});
 
 const fanweiR0042182 = normalizeFanweiDomPayload({
   requestid: "1505614",

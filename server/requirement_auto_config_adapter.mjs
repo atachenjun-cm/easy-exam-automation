@@ -8,14 +8,13 @@ export function buildAutoConfigFromRequirement(requirement = {}, options = {}) {
   const subjects = normalizeSubjects(requirement.subjects || requirement.subjects_text);
   const paperNames = normalizeSubjects(requirement.paper_names || requirement.paper_names_text);
   const examType = normalizeExamType(requirement.exam_client_type);
-  const courses = buildGeneratedCourses(subjects, formalRange.start, paperNames);
+  const courses = buildUncreatedCourses(subjects, paperNames);
 
   if (!requirement.exam_name) warnings.push("缺少考试名称。");
   if (!formalRange.start || !formalRange.end) warnings.push("正式考试时间无法解析。");
   if (requirement.mock_exam_time_range && (!mockRange.start || !mockRange.end)) warnings.push("试考时间无法解析，试考自动创建会跳过。");
   if (!requirement.mock_exam_time_range) warnings.push("未读取到试考时间，试考自动创建会跳过。");
   if (!subjects.length) warnings.push("未读取到科目信息，批量导入科目步骤会跳过。");
-  if (subjects.length && !courses.length) warnings.push("科目信息缺少考试日期，无法按规则生成 code/form_codes。");
   if (paperNames.length && paperNames.length !== subjects.length) warnings.push("试卷名称数量与科目数量不一致，请按科目顺序逐项填写。");
 
   const config = {
@@ -169,17 +168,10 @@ function formatIsoDateTime(value) {
   ].join("-") + `T${String(value.hour).padStart(2, "0")}:${String(value.minute).padStart(2, "0")}:00.000`;
 }
 
-function buildGeneratedCourses(subjects, start, paperNames = []) {
-  if (!subjects.length || !start) return [];
-  const prefix = [
-    String(start.year).padStart(4, "0"),
-    String(start.month).padStart(2, "0"),
-    String(start.day).padStart(2, "0"),
-  ].join("");
+function buildUncreatedCourses(subjects, paperNames = []) {
   return subjects.map((subject, index) => {
-    const code = `${prefix}-01-${String(index + 1).padStart(2, "0")}`;
     const paperName = normalizeText(paperNames[index]);
-    return { name: subject, code, form_codes: [code], ...(paperName ? { paper_name: paperName } : {}) };
+    return { name: subject, ...(paperName ? { paper_name: paperName } : {}) };
   });
 }
 

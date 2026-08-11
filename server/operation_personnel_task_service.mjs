@@ -26,6 +26,23 @@ function text(value) {
   return String(value ?? "").trim();
 }
 
+export function operationPersonnelFailedResumeConflictBaseline(current = {}, previous = {}) {
+  const baseline = structuredClone(current || {});
+  for (const key of ["personnel", "dates", "requirements"]) {
+    if (previous?.[key] !== undefined) baseline[key] = structuredClone(previous[key]);
+  }
+  return baseline;
+}
+
+export function operationPersonnelFailedResumeObservedBaseline(state = {}) {
+  return structuredClone(
+    state.checkpoints?.inspect_batch?.readback
+    || state.activeAttempt?.baseline
+    || state.activeAttempt?.target
+    || {},
+  );
+}
+
 function serviceError(code, status, message) {
   const error = new Error(message);
   error.code = code;
@@ -72,6 +89,17 @@ function managedScheduleProjection(items = []) {
   }));
 }
 
+export function operationPersonnelManagedSchedules(draft = {}, managedSchedules = []) {
+  const managed = managedScheduleProjection(managedSchedules);
+  if (managed.length) return managed;
+  return (draft.schedules || []).map((schedule, requirementIndex) => ({
+    requirementIndex,
+    name: text(schedule.subjectName || schedule.name),
+    start: text(schedule.start),
+    end: text(schedule.end),
+  }));
+}
+
 function requireManagedSchedules(task) {
   const result = operationPersonnelScheduleGate(task);
   if (!result.ok) throw serviceError(result.code, 409, result.message);
@@ -80,6 +108,27 @@ function requireManagedSchedules(task) {
 
 function nowIso(now) {
   return new Date(now()).toISOString();
+}
+
+function shanghaiDateKey(value) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(value));
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+export function operationPersonnelExpiredDateLabels(draft = {}, nowValue = Date.now()) {
+  const dates = draft.dates || {};
+  const today = shanghaiDateKey(nowValue);
+  return [
+    ["人员落实结束日期", text(dates.end)],
+    ["人员名单提交日期", text(dates.nameListDue)],
+  ].filter(([, value]) => /^\d{4}-\d{2}-\d{2}$/.test(value) && value < today)
+    .map(([label]) => label);
 }
 
 function requirementRequestId(task = {}) {
@@ -160,9 +209,13 @@ function normalizedState(task, environment, draft = null) {
     ? structuredClone(existing.activeAttempt)
     : null;
   if (activeAttempt?.status === "sent") activeAttempt.error = null;
+  const recoveredStatus = RECOVERY_STATUSES.has(activeAttempt?.status)
+    ? activeAttempt.status
+    : existing.status;
   return {
     ...stateDefaults(environment, generated),
     ...structuredClone(existing),
+    status: recoveredStatus,
     environment,
     draft: structuredClone(existing.draft || generated),
     // scheduleCodeMap is deserialized only for compatibility with historical drafts.
@@ -175,7 +228,7 @@ function normalizedState(task, environment, draft = null) {
   };
 }
 
-function requirementsFromPersonnel(personnel = {}) {
+export function operationPersonnelRequirementsFromPersonnel(personnel = {}, overrides = {}) {
   return [
     {
       name: "正式考试-最早登录系统时间",
@@ -197,7 +250,68 @@ function requirementsFromPersonnel(personnel = {}) {
       name: "正式考试-监考登录监控",
       value: text(personnel.loginMonitoring),
     },
-  ];
+  ].map((item) => ({
+    ...item,
+    value: Object.hasOwn(overrides || {}, item.name)
+      ? text(overrides[item.name])
+      : item.value,
+  }));
+}
+
+export function operationPersonnelInformationMissing(draft = {}, options = {}) {
+  const personnel = draft.personnel || {};
+  const dates = draft.dates || {};
+  const recipients = draft.recipients || {};
+  const requirements = operationPersonnelRequirementsFromPersonnel(
+    personnel,
+    draft.requirementOverrides,
+  );
+  const positiveInteger = (value) => Number.isSafeInteger(Number(value)) && Number(value) > 0;
+  const missing = [
+    ["人员服务", text(personnel.serviceType) === "ATA 监考－分散在线监考"],
+    ["人员落实平台", Boolean(text(personnel.platform))],
+    ["监考登录监控", ["是", "否"].includes(text(personnel.loginMonitoring))],
+    ["监考比例", /^[1-9]\d*:[1-9]\d*$/.test(text(personnel.monitorRatio))],
+    ["监考人数计算基数", positiveInteger(personnel.candidateBasis)],
+    ["监考人数", positiveInteger(personnel.monitorCount)],
+    ["最早登录系统时间", Number.isFinite(Number(personnel.earliestLoginMinutes))
+      && Number(personnel.earliestLoginMinutes) >= 0],
+    ["人员落实开始日期", /^\d{4}-\d{2}-\d{2}$/.test(text(dates.start))],
+    ["人员落实结束日期", /^\d{4}-\d{2}-\d{2}$/.test(text(dates.end))],
+    ["人员名单提交日期", /^\d{4}-\d{2}-\d{2}$/.test(text(dates.nameListDue))],
+    ["收件项目部", Boolean(text(recipients.toGroup))],
+    ["收件人项目经理", Array.isArray(recipients.toNames)
+      && recipients.toNames.length === 1 && Boolean(text(recipients.toNames[0]))],
+    ["固定抄送部门", text(recipients.ccGroup) === "考站管理&质量控制部"],
+  ].filter(([, complete]) => !complete).map(([label]) => label);
+  if (text(dates.start) && text(dates.end) && text(dates.start) > text(dates.end)) {
+    missing.push("人员落实日期范围");
+  }
+  for (const item of requirements) {
+    if (!text(item.value)) missing.push(item.name);
+  }
+  for (const label of operationPersonnelExpiredDateLabels(draft, options.now ?? Date.now())) {
+    missing.push(`${label}已过期`);
+  }
+  return [...new Set(missing)];
+}
+
+function attachOperationPersonnelTargets(draft = {}) {
+  draft.targetRequirements = operationPersonnelRequirementsFromPersonnel(
+    draft.personnel,
+    draft.requirementOverrides,
+  );
+  return draft;
+}
+
+function assertOperationPersonnelInformationComplete(draft = {}, nowValue = Date.now()) {
+  const missing = operationPersonnelInformationMissing(draft, { now: nowValue });
+  if (!missing.length) return;
+  throw serviceError(
+    "PERSONNEL_DRAFT_INCOMPLETE",
+    409,
+    `人员信息填写不完整：${missing.join("、")}`,
+  );
 }
 
 function targetFromDraft(draft = {}, snapshot = {}) {
@@ -216,29 +330,19 @@ function targetFromDraft(draft = {}, snapshot = {}) {
     schedules: structuredClone(snapshot.schedules || []),
     personnel: draft.personnel || {},
     dates: draft.dates || {},
-    requirements: requirementsFromPersonnel(draft.personnel),
+    requirements: operationPersonnelRequirementsFromPersonnel(
+      draft.personnel,
+      draft.requirementOverrides,
+    ),
     taskSheet: draft.operationTaskSheet || snapshot.taskSheet || {},
     sendRecords: snapshot.sendRecords || [],
     directoryMatch: draft.directoryMatch || snapshot.directoryMatch || {},
   });
 }
 
-function editableDraft(base, input = {}) {
+function editableDraft(base, input = {}, options = {}) {
   const draft = structuredClone(base);
   const changes = [];
-  const positiveIntegerValue = (value) => {
-    if (typeof value === "number") {
-      return Number.isSafeInteger(value) && value > 0 ? value : null;
-    }
-    if (typeof value !== "string" || !/^[1-9]\d*$/.test(value.trim())) return null;
-    const parsed = Number(value.trim());
-    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
-  };
-  const monitorRatioValue = (value) => (
-    typeof value === "string" && /^[1-9]\d*:[1-9]\d*$/.test(value.trim())
-      ? value.trim()
-      : null
-  );
   const set = (path, value) => {
     const keys = path.split(".");
     let owner = draft;
@@ -252,14 +356,30 @@ function editableDraft(base, input = {}) {
   for (const key of ["start", "end", "nameListDue"]) {
     if (Object.hasOwn(dates, key)) set(`dates.${key}`, text(dates[key]));
   }
-  const personnel = { ...(input.draft?.personnel || input.personnel || {}) };
-  if (Object.hasOwn(input, "monitorCount")) personnel.monitorCount = input.monitorCount;
-  if (Object.hasOwn(input, "monitorRatio")) personnel.monitorRatio = input.monitorRatio;
-  if (Object.hasOwn(personnel, "monitorCount")) {
-    set("personnel.monitorCount", positiveIntegerValue(personnel.monitorCount) ?? "");
-  }
-  if (Object.hasOwn(personnel, "monitorRatio")) {
-    set("personnel.monitorRatio", monitorRatioValue(personnel.monitorRatio) ?? "");
+  const requirements = input.draft?.requirements || input.requirements || {};
+  const requirementEntries = Array.isArray(requirements)
+    ? requirements.map((item) => [text(item?.name), text(item?.value)])
+    : Object.entries(requirements).map(([name, value]) => [text(name), text(value)]);
+  const editableRequirementNames = new Set([
+    "正式考试-最早登录系统时间",
+    "正式考试-监考人员安排",
+    "正式考试-监考人员数量",
+    "正式考试-监考人员比例",
+  ]);
+  draft.requirementOverrides = { ...(draft.requirementOverrides || {}) };
+  for (const [name, value] of requirementEntries) {
+    if (!editableRequirementNames.has(name)) continue;
+    set(`requirementOverrides.${name}`, value);
+    if (name === "正式考试-最早登录系统时间") {
+      const minutes = value.match(/考试开始前\s*(\d+)\s*分钟/)?.[1];
+      set("personnel.earliestLoginMinutes", minutes === undefined ? "" : Number(minutes));
+    } else if (name === "正式考试-监考人员数量") {
+      set("personnel.monitorCount", /^\d+$/.test(value) ? Number(value) : value);
+    } else if (name === "正式考试-监考人员比例") {
+      set("personnel.monitorRatio", value);
+      const basis = value.match(/^\d+:(\d+)$/)?.[1];
+      set("personnel.candidateBasis", basis === undefined ? "" : Number(basis));
+    }
   }
   const validIsoDate = (value) => {
     const match = text(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -271,18 +391,33 @@ function editableDraft(base, input = {}) {
   };
   const datesValid = ["start", "end", "nameListDue"].every((key) => validIsoDate(draft.dates?.[key]))
     && draft.dates.start <= draft.dates.end;
-  const monitorCountValid = positiveIntegerValue(draft.personnel?.monitorCount) !== null;
-  const monitorRatioValid = monitorRatioValue(draft.personnel?.monitorRatio) !== null;
+  const expiredDateLabels = datesValid
+    ? operationPersonnelExpiredDateLabels(draft, options.now ?? Date.now())
+    : [];
+  const personnelRequirementsValid = Number.isSafeInteger(Number(draft.personnel?.earliestLoginMinutes))
+    && Number(draft.personnel.earliestLoginMinutes) >= 0
+    && Number.isSafeInteger(Number(draft.personnel?.monitorCount))
+    && Number(draft.personnel.monitorCount) > 0
+    && /^[1-9]\d*:[1-9]\d*$/.test(text(draft.personnel?.monitorRatio));
   const resolvable = new Map([
     ["PERSONNEL_DATES_REQUIRED", datesValid],
-    ["MONITOR_COUNT_REQUIRED", monitorCountValid],
-    ["MONITOR_RATIO_REQUIRED", monitorRatioValid],
+    ["PERSONNEL_DATES_EXPIRED", datesValid && expiredDateLabels.length === 0],
+    ["FORMAL_ROOM_ASSIGNMENT_REQUIRED", personnelRequirementsValid],
   ]);
   const warnings = (draft.warnings || []).filter(
     (item) => !(resolvable.has(item.code) && resolvable.get(item.code)),
   );
   for (const [code, resolved] of resolvable) {
-    if (!resolved && !warnings.some((item) => item.code === code)) warnings.push({ code });
+    if (!resolved && !warnings.some((item) => item.code === code)) {
+      if (code === "PERSONNEL_DATES_EXPIRED" && !datesValid) continue;
+      warnings.push(code === "PERSONNEL_DATES_EXPIRED"
+        ? {
+            code,
+            fields: expiredDateLabels,
+            message: `${expiredDateLabels.join("、")}已过期`,
+          }
+        : { code });
+    }
   }
   draft.warnings = warnings;
   return { draft, changes: changes.sort((left, right) => left.path.localeCompare(right.path)) };
@@ -503,15 +638,21 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         state: { ...state, status: "unsupported", draft: {} },
       };
     }
-    const draft = buildOperationPersonnelTaskDraft(task, {
+    const draft = attachOperationPersonnelTargets(buildOperationPersonnelTaskDraft(task, {
       environment,
       now: nowIso(now),
       scheduleCodeMap: task.config?.operationPersonnelTask?.scheduleCodeMap || {},
-    });
+    }));
     const managed = operationPersonnelScheduleGate(task);
     if (managed.ok) draft.managedSchedules = managedScheduleProjection(managed.schedules);
     let state = normalizedState(task, environment, draft);
     state = recoverOrphanedAttempt(state, activeAttemptIds);
+    const requirementReadback = state.checkpoints?.sync_exam_service_requirements?.status === "completed"
+      ? state.checkpoints.sync_exam_service_requirements.readback
+      : state.lastOperationSnapshot?.requirements;
+    if (Array.isArray(requirementReadback)) {
+      draft.operationRequirements = structuredClone(requirementReadback);
+    }
     state.draft = structuredClone(draft);
     state.sourceFingerprint = draftSourceFingerprint(draft);
     state.scheduleCodeMap = structuredClone(draft.scheduleCodeMap || {});
@@ -520,6 +661,91 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
       state.status = buildOperationPersonnelTaskStatus(task, draft).status;
     }
     return { taskId, state };
+  }
+
+  async function edit(taskId, actor, input = {}) {
+    return withTaskLock(taskId, async () => {
+      const task = await readAuthorized(taskId, actor);
+      const state = recoverOrphanedAttempt(
+        normalizedState(task, environment),
+        activeAttemptIds,
+      );
+      if (ACTIVE_ATTEMPT_STATUSES.has(state.activeAttempt?.status)) {
+        throw serviceError(
+          "PERSONNEL_ATTEMPT_IN_PROGRESS",
+          409,
+          "人员任务发送正在执行，暂不能编辑",
+        );
+      }
+      if (state.status === "result_unknown") {
+        throw serviceError(
+          "PERSONNEL_RESULT_UNKNOWN",
+          409,
+          "上次发送结果未知，只能重新核对发送记录",
+        );
+      }
+
+      const draft = buildOperationPersonnelTaskDraft(task, {
+        environment,
+        now: nowIso(now),
+        scheduleCodeMap: state.scheduleCodeMap,
+      });
+      const managed = operationPersonnelScheduleGate(task);
+      if (managed.ok) draft.managedSchedules = managedScheduleProjection(managed.schedules);
+      const edited = editableDraft(draft, input, { now: now() });
+      attachOperationPersonnelTargets(edited.draft);
+      assertOperationPersonnelInformationComplete(edited.draft, now());
+      const blockingWarnings = edited.draft.warnings.filter(
+        (item) => item.code !== "UNSUPPORTED_PERSONNEL_TASK",
+      );
+      if (blockingWarnings.length) {
+        throw serviceError(
+          "PERSONNEL_DRAFT_INCOMPLETE",
+          409,
+          "人员任务字段无效，请检查日期和考务需求",
+        );
+      }
+
+      const draftVersion = Number(state.draftVersion || 0) + (edited.changes.length ? 1 : 0);
+      const nextTask = {
+        ...task,
+        config: {
+          ...task.config,
+          operationPersonnelTask: {
+            ...(task.config?.operationPersonnelTask || {}),
+            ...state,
+          },
+        },
+      };
+      const next = {
+        ...state,
+        status: VALID_ENVIRONMENTS.has(environment)
+          ? buildOperationPersonnelTaskStatus(nextTask, edited.draft).status
+          : "unsupported",
+        draft: edited.draft,
+        draftVersion,
+        sourceFingerprint: draftSourceFingerprint(edited.draft),
+        confirmedEdits: operationPersonnelConfirmedEdits(edited.draft),
+        scheduleCodeMap: structuredClone(edited.draft.scheduleCodeMap || {}),
+        activePreview: edited.changes.length ? null : state.activePreview,
+        changeSummary: diffOperationPersonnelTaskDrafts(state.draft || {}, edited.draft).summary,
+        events: edited.changes.length
+          ? [...state.events, {
+              type: "operation_personnel_draft_edited",
+              actor: text(actor?.email),
+              changes: structuredClone(edited.changes),
+              createdAt: nowIso(now),
+            }]
+          : state.events,
+      };
+      await persistState(taskId, next);
+      return {
+        taskId,
+        state: next,
+        changes: structuredClone(edited.changes),
+        changeSummary: next.changeSummary,
+      };
+    });
   }
 
   async function preview(taskId, actor, input = {}) {
@@ -552,9 +778,12 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
       now: nowIso(now),
       scheduleCodeMap: existing.scheduleCodeMap,
     });
-    const edited = editableDraft(generated, input);
-    const draft = edited.draft;
-    draft.managedSchedules = managedScheduleProjection(initialManaged.schedules);
+    const edited = editableDraft(generated, input, { now: now() });
+    const draft = attachOperationPersonnelTargets(edited.draft);
+    draft.managedSchedules = operationPersonnelManagedSchedules(
+      draft,
+      initialManaged.schedules,
+    );
     if ((draft.warnings || []).some((item) => item.code === "UNSUPPORTED_PERSONNEL_TASK")) {
       throw serviceError(
         "PERSONNEL_TASK_UNSUPPORTED",
@@ -562,6 +791,7 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         "当前需求包含人员任务单不支持的监考范围",
       );
     }
+    assertOperationPersonnelInformationComplete(draft, now());
 
     const releaseProfile = coordinator.acquireProfile();
     let snapshot;
@@ -646,7 +876,13 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
     }
     const conflictBaseline = existing.status === "failed_resumable"
       && existing.activeAttempt
-      ? operationPersonnelResumeBaseline(baseline || target, existing.checkpoints)
+      ? operationPersonnelResumeBaseline(
+        operationPersonnelFailedResumeConflictBaseline(
+          baseline || target,
+          operationPersonnelFailedResumeObservedBaseline(existing),
+        ),
+        existing.checkpoints,
+      )
       : baseline || target;
     const conflicts = operationPersonnelConflicts(
       operationPersonnelConflictBaseline(
@@ -876,8 +1112,10 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         const freshAttempt = freshTask?.config?.operationPersonnelTask?.activeAttempt;
         if (!freshTask || freshAttempt?.attemptId !== attemptId) return null;
         const freshManaged = requireManagedSchedules(freshTask);
+        const state = normalizedState(freshTask, environment);
+        assertOperationPersonnelInformationComplete(state.draft, now());
         const freshManagedFingerprint = fingerprint(
-          managedScheduleProjection(freshManaged.schedules),
+          operationPersonnelManagedSchedules(state.draft, freshManaged.schedules),
         );
         if (freshAttempt.previewBinding?.managedScheduleFingerprint
             !== freshManagedFingerprint) {
@@ -887,7 +1125,6 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
             "批次受管日程在排队期间发生变化，请重新检查",
           );
         }
-        const state = normalizedState(freshTask, environment);
         const next = {
           ...state,
           status: "applying_config",
@@ -996,7 +1233,10 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         await persistState(taskId, { ...state, activePreview: null });
         throw error;
       }
-      const currentManagedSchedules = managedScheduleProjection(currentManaged.schedules);
+      const currentManagedSchedules = operationPersonnelManagedSchedules(
+        state.draft,
+        currentManaged.schedules,
+      );
       if (preview.managedScheduleFingerprint !== fingerprint(currentManagedSchedules)) {
         await persistState(taskId, { ...state, activePreview: null });
         throw serviceError(
@@ -1005,8 +1245,8 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
           "批次受管日程在确认发送前发生变化，请重新检查",
         );
       }
-      const edited = editableDraft(state.draft, input.edits || {});
-      const finalDraft = edited.draft;
+      const edited = editableDraft(state.draft, input.edits || {}, { now: now() });
+      const finalDraft = attachOperationPersonnelTargets(edited.draft);
       if (finalDraft.warnings.length) {
         throw serviceError(
           "PERSONNEL_DRAFT_INCOMPLETE",
@@ -1014,6 +1254,7 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
           "人员任务字段无效，请检查日期、监考人数和监考比例",
         );
       }
+      assertOperationPersonnelInformationComplete(finalDraft, now());
       const finalDraftVersion = Number(state.draftVersion || 0) + (edited.changes.length ? 1 : 0);
       const currentFingerprint = operationPersonnelTaskFingerprint(finalDraft);
       if (state.lastSuccessfulFingerprint
@@ -1231,5 +1472,5 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
     return { taskId, state: next };
   }
 
-  return { get, preview, send, attempt, recheck };
+  return { get, edit, preview, send, attempt, recheck };
 }

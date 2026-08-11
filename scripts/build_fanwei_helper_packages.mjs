@@ -73,8 +73,23 @@ function writePackage({ platform, runtimePath, origin, packageDir }) {
     "fanwei_local_helper.mjs",
     "fanwei_auto_read.mjs",
     "score_stamp_application.mjs",
+    "operation_batch_runner.mjs",
+    "operation_batch_update_runner.mjs",
+    "operation_personnel_console_runner.mjs",
+    "operation_archive_runner.mjs",
+    "operation_content.mjs",
+    "operation_content_runner.mjs",
   ]) {
-    copyFile(path.join(rootDir, "server", moduleName), path.join(packageDir, "server", moduleName));
+    const source = path.join(rootDir, "server", moduleName);
+    if (fs.existsSync(source)) copyFile(source, path.join(packageDir, "server", moduleName));
+  }
+
+  for (const moduleName of ["playwright", "playwright-core"]) {
+    const source = path.join(rootDir, "node_modules", moduleName);
+    if (!fs.existsSync(source)) {
+      throw new Error(`缺少本机助手运控依赖：${moduleName}`);
+    }
+    fs.cpSync(source, path.join(packageDir, "node_modules", moduleName), { recursive: true });
   }
 
   if (platform === "win-x64") {

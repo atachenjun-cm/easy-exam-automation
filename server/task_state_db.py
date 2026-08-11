@@ -10,6 +10,7 @@ STEP_DEFS = [
     ("requirement_parse", "需求单解析"),
     ("formal_session_create", "正式场次创建"),
     ("trial_session_create", "试考场次创建"),
+    ("session_change", "场次信息修改"),
     ("trial_paper_bind", "试考试卷绑定"),
     ("course_create", "科目创建"),
     ("paper_bind", "正式场次绑定科目"),
@@ -287,6 +288,46 @@ class TaskStore:
                 ),
             )
             db.execute("UPDATE exam_tasks SET updated_at=? WHERE task_id=?", (now, task_id))
+        return self.get_task(task_id)
+
+    def sync_session(self, task_id, session_type, session, config=None, requirement_index=0):
+        now = utc_now()
+        try:
+            requirement_index = max(int(requirement_index or 0), 0)
+        except (TypeError, ValueError):
+            requirement_index = 0
+        session_id = str(session.get("session_id") or session.get("id") or "").strip()
+        if not session_id:
+            raise ValueError("Session id is required")
+        with self.connect() as db:
+            task = db.execute("SELECT config_json FROM exam_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if not task:
+                raise ValueError("Task not found")
+            cursor = db.execute(
+                """UPDATE exam_sessions SET name=?, start_time=?, end_time=?, updated_at=?
+                WHERE task_id=? AND requirement_index=? AND session_type=? AND session_id=?""",
+                (
+                    str(session.get("name") or ""),
+                    str(session.get("start") or session.get("start_time") or ""),
+                    str(session.get("end") or session.get("end_time") or ""),
+                    now,
+                    task_id,
+                    requirement_index,
+                    session_type,
+                    session_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Session not found")
+            current_config = loads(task["config_json"], {})
+            next_config = {
+                **current_config,
+                **(config or {}),
+            }
+            db.execute(
+                "UPDATE exam_tasks SET config_json=?, updated_at=? WHERE task_id=?",
+                (json.dumps(next_config, ensure_ascii=False), now, task_id),
+            )
         return self.get_task(task_id)
 
     def update_config(self, task_id, config, project_name=None, source_account=None):
@@ -592,6 +633,7 @@ class TaskStore:
                 (task_id,),
             ).fetchall()
             steps = db.execute("SELECT * FROM exam_task_steps WHERE task_id=?", (task_id,)).fetchall()
+            steps = [row for row in steps if row["step_key"] in STEP_ORDER]
             steps = sorted(steps, key=lambda row: STEP_ORDER.get(row["step_key"], len(STEP_ORDER)))
         result = self._task_summary(task)
         result["config"] = loads(task["config_json"], {})
@@ -603,8 +645,19 @@ class TaskStore:
     def _task_summary(self, row):
         config = loads(row["config_json"], {})
         project_card = config.get("projectCard") if isinstance(config.get("projectCard"), dict) else {}
+        requirements = config.get("examRequirements")
+        if not isinstance(requirements, list) or not requirements:
+            legacy_requirement = config.get("examRequirement")
+            requirements = [legacy_requirement] if isinstance(legacy_requirement, dict) else []
+        exam_name_candidates = [config.get("examName")]
+        for requirement in requirements:
+            fields = requirement.get("fields") if isinstance(requirement.get("fields"), dict) else {}
+            requirement_config = requirement.get("config") if isinstance(requirement.get("config"), dict) else {}
+            exam_name_candidates.extend([fields.get("考试名称"), requirement_config.get("examName")])
+        exam_name = next((str(value).strip() for value in exam_name_candidates if str(value or "").strip()), "")
         return {
             "taskId": row["task_id"], "projectName": row["project_name"],
+            "examName": exam_name,
             "sourceAccount": row["source_account"], "status": row["status"],
             "ownerEmail": row["owner_email"],
             "hiddenAt": row["hidden_at"] if "hidden_at" in row.keys() else None,
@@ -707,6 +760,11 @@ def main():
         result = store.upsert_session(
             payload.get("taskId"), payload.get("sessionType"), payload.get("session") or {},
             payload.get("requirementIndex", 0),
+        )
+    elif action == "sync_session":
+        result = store.sync_session(
+            payload.get("taskId"), payload.get("sessionType"), payload.get("session") or {},
+            payload.get("config") or {}, payload.get("requirementIndex", 0),
         )
     elif action == "upsert_candidates":
         result = store.upsert_candidates(payload.get("taskId"), payload.get("sessionId"), payload.get("candidates") or [])

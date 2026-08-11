@@ -176,16 +176,49 @@ function leaveLimitText(config, session, deviceText) {
   return `${deviceText}，${count}次`;
 }
 
-function notificationText(config, session, hasTrial) {
-  const formalStart = text(config.startTimeDisplay || session.start);
-  const formalEnd = text(config.endTimeDisplay || session.end);
-  const trialStart = text(config.mockStartTimeDisplay);
-  const trialEnd = text(config.mockEndTimeDisplay);
-  const examTitle = notificationExamTitle(config.examName || session.name);
+function sessionIsTrial(session = {}) {
+  return session.kind === "mock" || session.sessionType === "trial";
+}
+
+function sessionRequirementIndex(session = {}) {
+  const index = Number(session.requirementIndex || 0);
+  return Number.isFinite(index) && index >= 0 ? index : 0;
+}
+
+function sessionConfig(config = {}, session = {}) {
+  const requirementIndex = sessionRequirementIndex(session);
+  const requirements = Array.isArray(config.examRequirements) && config.examRequirements.length
+    ? config.examRequirements
+    : config.examRequirement?.fields
+      ? [config.examRequirement]
+      : [];
+  const requirementConfig = requirements[requirementIndex]?.config;
+  if (!requirementConfig || typeof requirementConfig !== "object" || Array.isArray(requirementConfig)) {
+    return config;
+  }
+  return {
+    ...config,
+    ...requirementConfig,
+    // The detail-page SMS ignores a stale task-level override once a requirement config exists.
+    notificationContent: requirementConfig.notificationContent,
+  };
+}
+
+function notificationText(config, session, requirementSessions = []) {
+  const formalSession = requirementSessions.find((item) => !sessionIsTrial(item))
+    || (!sessionIsTrial(session) ? session : {});
+  const trialSession = requirementSessions.find(sessionIsTrial)
+    || (sessionIsTrial(session) ? session : {});
+  const formalStart = text(formalSession.start || config.startTimeDisplay);
+  const formalEnd = text(formalSession.end || config.endTimeDisplay);
+  const trialStart = text(trialSession.start || config.mockStartTimeDisplay);
+  const trialEnd = text(trialSession.end || config.mockEndTimeDisplay);
+  const examTitle = notificationExamTitle(config.examName || formalSession.name || session.name);
   const formalRange = `${fullDateTimeText(formalStart, true)}-${timeOnly(formalEnd)}`;
   const trialRange = trialStart && trialEnd
     ? `${fullDateTimeText(trialStart)}-${monthDayTime(trialEnd)}`
     : "XXX年XX月XX日XX:XX-X月XX日XX:XX";
+  const hasTrial = Boolean(config.mockExamEnabled || requirementSessions.some(sessionIsTrial));
   const trialNotice = hasTrial
     ? `本次考试设置试考环节，请提前参加试考调试考试设备。试考时间为${trialRange}，请在上述时间内完成考前测试。正式考试和试考时，`
     : "";
@@ -216,8 +249,10 @@ function applyTemplate(values, template = []) {
   return row;
 }
 
-function sessionRow(config, session, template = [], hasTrial = false) {
-  const isTrial = session.kind === "mock" || session.sessionType === "trial";
+function sessionRow(config, session, template = [], created = []) {
+  const isTrial = sessionIsTrial(session);
+  const requirementIndex = sessionRequirementIndex(session);
+  const requirementSessions = created.filter((item) => sessionRequirementIndex(item) === requirementIndex);
   const kind = isTrial ? "mock" : "main";
   const start = text(session.start || (isTrial ? config.mockStartTimeDisplay : config.startTimeDisplay));
   const end = text(session.end || (isTrial ? config.mockEndTimeDisplay : config.endTimeDisplay));
@@ -264,7 +299,7 @@ function sessionRow(config, session, template = [], hasTrial = false) {
     config.hawkeye ? "鹰眼" : "",
     text(config.invigilatorText),
     text(config.specialRequirementText) || "声音监控",
-    text(config.notificationContent) || notificationText(config, session, hasTrial),
+    text(config.notificationContent) || notificationText(config, session, requirementSessions),
   ], template);
   row[1] = projectCode;
   row[2] = "";
@@ -273,14 +308,11 @@ function sessionRow(config, session, template = [], hasTrial = false) {
 }
 
 export function buildTencentDocRows({ config = {}, created = [], remoteRows = [] } = {}) {
-  const hasTrial = Boolean(
-    config.mockExamEnabled || created.some((session) => session?.kind === "mock" || session?.sessionType === "trial"),
-  );
   return created
     .filter((session) => text(session?.id || session?.session_id))
     .map((session) => {
       const isTrial = session.kind === "mock" || session.sessionType === "trial";
-      return sessionRow(config, session, templateForSession(remoteRows, isTrial), hasTrial);
+      return sessionRow(sessionConfig(config, session), session, templateForSession(remoteRows, isTrial), created);
     });
 }
 
