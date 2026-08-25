@@ -33,6 +33,13 @@ function normalizeStoredCourses(courses = []) {
     .filter(Boolean);
 }
 
+function sameCourseNames(left = [], right = []) {
+  const current = normalizeCourseChangeNames(left);
+  const suggested = normalizeCourseChangeNames(right);
+  return current.length === suggested.length
+    && current.every((name, index) => name === suggested[index]);
+}
+
 function taskRequirements(task = {}) {
   const requirements = task.config?.examRequirements;
   if (Array.isArray(requirements) && requirements.length) return requirements;
@@ -119,7 +126,7 @@ function latestCourseSourceChange(task = {}, requirementIndex = 0) {
   };
 }
 
-export function courseRequirementChangeForTaskSession(task = {}, session = {}) {
+export function courseRequirementChangeForTaskSession(task = {}, session = {}, currentCourses = null) {
   if (text(session.sessionType) !== "formal") return { pending: false, label: "", suggestedNames: [] };
   const requirementIndex = Math.max(Number(session.requirementIndex || 0), 0);
   const latest = latestCourseSourceChange(task, requirementIndex);
@@ -130,6 +137,13 @@ export function courseRequirementChangeForTaskSession(task = {}, session = {}) {
   }
   const suggestedNames = requirementCourseNames(task, requirementIndex);
   if (!suggestedNames.length) return { pending: false, label: "", changeId, suggestedNames: [] };
+  const currentNames = (Array.isArray(currentCourses)
+    ? currentCourses
+    : taskCoursesForChange(task, requirementIndex))
+    .map((course) => text(course?.name || course?.course_name || course?.title));
+  if (sameCourseNames(currentNames, suggestedNames)) {
+    return { pending: false, label: "", changeId, suggestedNames: [] };
+  }
   return {
     pending: true,
     label: "科目有变请确认",
@@ -142,11 +156,21 @@ export function courseRequirementChangeForTaskSession(task = {}, session = {}) {
   };
 }
 
-export function enrichTaskCourseRequirementChanges(task = {}) {
-  const sessions = (Array.isArray(task.sessions) ? task.sessions : []).map((session) => ({
-    ...session,
-    courseRequirementChange: courseRequirementChangeForTaskSession(task, session),
-  }));
+export function enrichTaskCourseRequirementChanges(task = {}, options = {}) {
+  const currentByRequirementIndex = options.currentByRequirementIndex || {};
+  const confirmedOnly = Boolean(options.confirmedOnly);
+  const sessions = (Array.isArray(task.sessions) ? task.sessions : []).map((session) => {
+    const requirementIndex = String(Math.max(Number(session.requirementIndex || 0), 0));
+    const hasCurrent = Object.hasOwn(currentByRequirementIndex, requirementIndex);
+    const courseRequirementChange = confirmedOnly && !hasCurrent
+      ? { pending: false, label: "", suggestedNames: [] }
+      : courseRequirementChangeForTaskSession(
+        task,
+        session,
+        hasCurrent ? currentByRequirementIndex[requirementIndex] : null,
+      );
+    return { ...session, courseRequirementChange };
+  });
   const pendingCount = sessions.filter((session) => session.courseRequirementChange?.pending).length;
   return {
     ...task,

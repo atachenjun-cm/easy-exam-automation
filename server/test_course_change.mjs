@@ -78,6 +78,51 @@ test("course requirement changes are independent from trial and clear after matc
   assert.equal(courseRequirementChangeForTaskSession(task, task.sessions[0]).pending, false);
 });
 
+test("course requirement reminder clears when created courses already match the latest requirement", () => {
+  const task = {
+    config: {
+      courses: [{ code: "20260812-01-01", name: "OPA测评专业人士情绪倾向" }],
+      examRequirements: [{ config: { subjects: ["OPA测评专业人士情绪倾向"] } }],
+      projectSourceChangeHistory: [{
+        changeId: "course-change-before-create",
+        source: "examRequirement",
+        requirementIndex: 0,
+        changedAt: "2026-08-11T08:56:30.037Z",
+        changes: [{ field: "科目信息", before: "OPA测评", after: "OPA测评专业人士情绪倾向" }],
+      }],
+    },
+    sessions: [{ session_id: "434954", sessionType: "formal", requirementIndex: 0 }],
+    steps: [],
+  };
+
+  const enriched = enrichTaskCourseRequirementChanges(task);
+  assert.equal(enriched.sessions[0].courseRequirementChange.pending, false);
+  assert.equal(enriched.courseRequirementChangeSummary.pendingCount, 0);
+});
+
+test("course requirement reminder uses current tenant course names when provided", () => {
+  const task = {
+    config: {
+      courses: [{ code: "20260812-01-01", name: "旧科目" }],
+      examRequirements: [{ config: { subjects: ["新科目"] } }],
+      projectSourceChangeHistory: [{
+        changeId: "course-change-live-preview",
+        source: "examRequirement",
+        requirementIndex: 0,
+        changes: [{ field: "科目信息", before: "旧科目", after: "新科目" }],
+      }],
+    },
+    steps: [],
+  };
+  const session = { session_id: "434954", sessionType: "formal", requirementIndex: 0 };
+
+  assert.equal(courseRequirementChangeForTaskSession(task, session).pending, true);
+  assert.equal(
+    courseRequirementChangeForTaskSession(task, session, [{ code: "20260812-01-01", name: "新科目" }]).pending,
+    false,
+  );
+});
+
 test("tenant course query reads session and form details through EasyExam APIs", async () => {
   const calls = [];
   const snapshot = await fetchTenantCourseSnapshot({

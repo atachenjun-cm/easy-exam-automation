@@ -192,6 +192,58 @@ class TaskStore:
                     UNIQUE(task_id, session_id, field_code),
                     FOREIGN KEY(task_id) REFERENCES exam_tasks(task_id)
                 );
+                CREATE TABLE IF NOT EXISTS candidate_change_sets (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL DEFAULT 'full_list',
+                    reason TEXT NOT NULL DEFAULT '',
+                    baseline_hash TEXT NOT NULL DEFAULT '',
+                    proposed_hash TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'waiting_review',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    summary_json TEXT NOT NULL DEFAULT '{}',
+                    impact_json TEXT NOT NULL DEFAULT '{}',
+                    error_text TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    applied_at TEXT,
+                    FOREIGN KEY(task_id) REFERENCES exam_tasks(task_id)
+                );
+                CREATE INDEX IF NOT EXISTS candidate_change_sets_task_session_idx
+                    ON candidate_change_sets(task_id, session_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS candidate_change_items (
+                    id TEXT PRIMARY KEY,
+                    change_set_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL DEFAULT 0,
+                    operation TEXT NOT NULL,
+                    old_permit TEXT NOT NULL DEFAULT '',
+                    permit TEXT NOT NULL DEFAULT '',
+                    before_json TEXT NOT NULL DEFAULT 'null',
+                    after_json TEXT NOT NULL DEFAULT 'null',
+                    changed_fields_json TEXT NOT NULL DEFAULT '[]',
+                    risk_level TEXT NOT NULL DEFAULT 'low',
+                    blocked INTEGER NOT NULL DEFAULT 0,
+                    block_reason TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    error_text TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(change_set_id) REFERENCES candidate_change_sets(id)
+                );
+                CREATE INDEX IF NOT EXISTS candidate_change_items_set_idx
+                    ON candidate_change_items(change_set_id, sequence);
+                CREATE TABLE IF NOT EXISTS candidate_roster_snapshots (
+                    id TEXT PRIMARY KEY,
+                    change_set_id TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    roster_hash TEXT NOT NULL DEFAULT '',
+                    roster_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(change_set_id) REFERENCES candidate_change_sets(id)
+                );
+                CREATE INDEX IF NOT EXISTS candidate_roster_snapshots_set_idx
+                    ON candidate_roster_snapshots(change_set_id, created_at);
                 """
             )
             columns = {row["name"] for row in db.execute("PRAGMA table_info(exam_tasks)").fetchall()}
@@ -365,6 +417,15 @@ class TaskStore:
             current = db.execute("SELECT task_id FROM exam_tasks WHERE task_id=?", (task_id,)).fetchone()
             if not current:
                 return False
+            change_set_ids = [
+                row["id"] for row in db.execute(
+                    "SELECT id FROM candidate_change_sets WHERE task_id=?", (task_id,)
+                ).fetchall()
+            ]
+            for change_set_id in change_set_ids:
+                db.execute("DELETE FROM candidate_roster_snapshots WHERE change_set_id=?", (change_set_id,))
+                db.execute("DELETE FROM candidate_change_items WHERE change_set_id=?", (change_set_id,))
+            db.execute("DELETE FROM candidate_change_sets WHERE task_id=?", (task_id,))
             db.execute("DELETE FROM exam_custom_fields WHERE task_id=?", (task_id,))
             db.execute("DELETE FROM exam_candidates WHERE task_id=?", (task_id,))
             db.execute("DELETE FROM exam_task_steps WHERE task_id=?", (task_id,))
@@ -468,6 +529,151 @@ class TaskStore:
                     (task_id, str(session_id or "")),
                 ).fetchall()
         return [self._candidate(row) for row in rows]
+
+    def replace_candidates(self, task_id, session_id, candidates):
+        now = utc_now()
+        session_id = str(session_id or "")
+        saved = 0
+        with self.connect() as db:
+            db.execute(
+                "DELETE FROM exam_candidates WHERE task_id=? AND session_id=?",
+                (task_id, session_id),
+            )
+            for candidate in candidates or []:
+                permit = str(candidate.get("permit") or "").strip()
+                if not permit:
+                    continue
+                custom_fields = candidate.get("custom_fields") or {}
+                if not isinstance(custom_fields, dict):
+                    custom_fields = {}
+                db.execute(
+                    """INSERT INTO exam_candidates
+                    (id, task_id, session_id, permit, full_name, identity_id, course_code, mobile, email,
+                     custom_fields_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        str(uuid.uuid4()), task_id, session_id, permit,
+                        str(candidate.get("full_name") or ""), str(candidate.get("identity_id") or ""),
+                        str(candidate.get("course_code") or ""), str(candidate.get("mobile") or ""),
+                        str(candidate.get("email") or ""), json.dumps(custom_fields, ensure_ascii=False),
+                        now, now,
+                    ),
+                )
+                saved += 1
+            db.execute("UPDATE exam_tasks SET updated_at=? WHERE task_id=?", (now, task_id))
+        return {"savedCount": saved, "taskId": task_id, "sessionId": session_id}
+
+    def create_candidate_change(self, payload):
+        now = utc_now()
+        change_set_id = str(payload.get("id") or uuid.uuid4())
+        task_id = str(payload.get("taskId") or "")
+        session_id = str(payload.get("sessionId") or "")
+        items = payload.get("items") or []
+        before_roster = payload.get("beforeRoster") or []
+        with self.connect() as db:
+            if not db.execute("SELECT task_id FROM exam_tasks WHERE task_id=?", (task_id,)).fetchone():
+                raise ValueError("Task not found")
+            db.execute(
+                """INSERT INTO candidate_change_sets
+                (id, task_id, session_id, source_type, reason, baseline_hash, proposed_hash, status,
+                 created_by, summary_json, impact_json, error_text, created_at, updated_at, applied_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, NULL)""",
+                (
+                    change_set_id, task_id, session_id, str(payload.get("sourceType") or "full_list"),
+                    str(payload.get("reason") or ""), str(payload.get("baselineHash") or ""),
+                    str(payload.get("proposedHash") or ""), str(payload.get("status") or "waiting_review"),
+                    str(payload.get("createdBy") or ""),
+                    json.dumps(payload.get("summary") or {}, ensure_ascii=False),
+                    json.dumps(payload.get("impact") or {}, ensure_ascii=False), now, now,
+                ),
+            )
+            for index, item in enumerate(items):
+                db.execute(
+                    """INSERT INTO candidate_change_items
+                    (id, change_set_id, sequence, operation, old_permit, permit, before_json, after_json,
+                     changed_fields_json, risk_level, blocked, block_reason, status, error_text, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', ?, ?)""",
+                    (
+                        str(item.get("id") or uuid.uuid4()), change_set_id, index,
+                        str(item.get("operation") or ""), str(item.get("old_permit") or ""),
+                        str(item.get("permit") or ""), json.dumps(item.get("before"), ensure_ascii=False),
+                        json.dumps(item.get("after"), ensure_ascii=False),
+                        json.dumps(item.get("changed_fields") or [], ensure_ascii=False),
+                        str(item.get("risk_level") or "low"), 1 if item.get("blocked") else 0,
+                        str(item.get("block_reason") or ""), now, now,
+                    ),
+                )
+            db.execute(
+                """INSERT INTO candidate_roster_snapshots
+                (id, change_set_id, phase, roster_hash, roster_json, created_at)
+                VALUES (?, ?, 'before', ?, ?, ?)""",
+                (
+                    str(uuid.uuid4()), change_set_id, str(payload.get("baselineHash") or ""),
+                    json.dumps(before_roster, ensure_ascii=False), now,
+                ),
+            )
+        return self.get_candidate_change(change_set_id)
+
+    def list_candidate_changes(self, task_id, session_id):
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT * FROM candidate_change_sets
+                WHERE task_id=? AND session_id=? ORDER BY created_at DESC""",
+                (task_id, str(session_id or "")),
+            ).fetchall()
+        return [self._candidate_change_set(row) for row in rows]
+
+    def get_candidate_change(self, change_set_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM candidate_change_sets WHERE id=?", (change_set_id,)).fetchone()
+            if not row:
+                return None
+            items = db.execute(
+                "SELECT * FROM candidate_change_items WHERE change_set_id=? ORDER BY sequence",
+                (change_set_id,),
+            ).fetchall()
+            snapshots = db.execute(
+                "SELECT * FROM candidate_roster_snapshots WHERE change_set_id=? ORDER BY created_at",
+                (change_set_id,),
+            ).fetchall()
+        result = self._candidate_change_set(row)
+        result["items"] = [self._candidate_change_item(item) for item in items]
+        result["snapshots"] = [self._candidate_roster_snapshot(snapshot) for snapshot in snapshots]
+        return result
+
+    def update_candidate_change(self, change_set_id, status, item_results=None, error_text="", after_roster=None, after_hash=""):
+        now = utc_now()
+        terminal = status in {"applied", "partial_failed"}
+        with self.connect() as db:
+            current = db.execute("SELECT id FROM candidate_change_sets WHERE id=?", (change_set_id,)).fetchone()
+            if not current:
+                raise ValueError("Candidate change not found")
+            db.execute(
+                """UPDATE candidate_change_sets
+                SET status=?, error_text=?, updated_at=?, applied_at=CASE WHEN ? THEN ? ELSE applied_at END
+                WHERE id=?""",
+                (str(status or ""), str(error_text or ""), now, 1 if terminal else 0, now, change_set_id),
+            )
+            for item in item_results or []:
+                db.execute(
+                    """UPDATE candidate_change_items SET status=?, error_text=?, updated_at=?
+                    WHERE id=? AND change_set_id=?""",
+                    (
+                        str(item.get("status") or "pending"), str(item.get("error") or ""), now,
+                        str(item.get("id") or ""), change_set_id,
+                    ),
+                )
+            if after_roster is not None:
+                db.execute(
+                    """INSERT INTO candidate_roster_snapshots
+                    (id, change_set_id, phase, roster_hash, roster_json, created_at)
+                    VALUES (?, ?, 'after', ?, ?, ?)""",
+                    (
+                        str(uuid.uuid4()), change_set_id, str(after_hash or ""),
+                        json.dumps(after_roster or [], ensure_ascii=False), now,
+                    ),
+                )
+        return self.get_candidate_change(change_set_id)
 
     def update_step(self, task_id, step_key, status, result=None, requirement_index=None):
         if status not in VALID_STATUSES:
@@ -725,6 +931,35 @@ class TaskStore:
             "updatedAt": row["updated_at"],
         }
 
+    def _candidate_change_set(self, row):
+        return {
+            "id": row["id"], "taskId": row["task_id"], "sessionId": row["session_id"],
+            "sourceType": row["source_type"], "reason": row["reason"],
+            "baselineHash": row["baseline_hash"], "proposedHash": row["proposed_hash"],
+            "status": row["status"], "createdBy": row["created_by"],
+            "summary": loads(row["summary_json"], {}), "impact": loads(row["impact_json"], {}),
+            "error": row["error_text"], "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"], "appliedAt": row["applied_at"],
+        }
+
+    def _candidate_change_item(self, row):
+        return {
+            "id": row["id"], "changeSetId": row["change_set_id"], "sequence": row["sequence"],
+            "operation": row["operation"], "old_permit": row["old_permit"], "permit": row["permit"],
+            "before": loads(row["before_json"], None), "after": loads(row["after_json"], None),
+            "changed_fields": loads(row["changed_fields_json"], []), "risk_level": row["risk_level"],
+            "blocked": bool(row["blocked"]), "block_reason": row["block_reason"],
+            "status": row["status"], "error": row["error_text"],
+            "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+        }
+
+    def _candidate_roster_snapshot(self, row):
+        return {
+            "id": row["id"], "changeSetId": row["change_set_id"], "phase": row["phase"],
+            "rosterHash": row["roster_hash"], "roster": loads(row["roster_json"], []),
+            "createdAt": row["created_at"],
+        }
+
 
 def main():
     if len(sys.argv) < 3:
@@ -770,6 +1005,20 @@ def main():
         result = store.upsert_candidates(payload.get("taskId"), payload.get("sessionId"), payload.get("candidates") or [])
     elif action == "list_candidates":
         result = store.list_candidates(payload.get("taskId"), payload.get("sessionId"))
+    elif action == "replace_candidates":
+        result = store.replace_candidates(payload.get("taskId"), payload.get("sessionId"), payload.get("candidates") or [])
+    elif action == "create_candidate_change":
+        result = store.create_candidate_change(payload)
+    elif action == "list_candidate_changes":
+        result = store.list_candidate_changes(payload.get("taskId"), payload.get("sessionId"))
+    elif action == "get_candidate_change":
+        result = store.get_candidate_change(payload.get("changeSetId"))
+    elif action == "update_candidate_change":
+        result = store.update_candidate_change(
+            payload.get("changeSetId"), payload.get("status"), payload.get("itemResults") or [],
+            payload.get("error") or "", payload.get("afterRoster") if "afterRoster" in payload else None,
+            payload.get("afterHash") or "",
+        )
     elif action == "upsert_custom_fields":
         result = store.upsert_custom_fields(payload.get("taskId"), payload.get("sessionId"), payload.get("fields") or [])
     elif action == "list_custom_fields":

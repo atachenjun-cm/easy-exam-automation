@@ -228,8 +228,8 @@ export function buildOperationBatchDraft(task = {}, overrides = {}) {
     remark: field("", "manual", "备注"),
   };
   for (const [key, value] of Object.entries(overrides.fields || {})) {
-    // Source-owned names and dates must win over stale persisted draft values.
-    if (["projectName", "batchName", "examStartDate", "examEndDate"].includes(key) || !fields[key]) continue;
+    // Source-owned fields must win over stale persisted draft values.
+    if (["projectName", "batchName", "examStartDate", "examEndDate", "servicePersonnel"].includes(key) || !fields[key]) continue;
     // A failed clipboard/encoding path can persist replacement characters in a manual override.
     // Keep the source value so the corrupted text cannot reach the operation console.
     if (hasOperationBatchTextReplacementCharacter(value)) continue;
@@ -274,7 +274,6 @@ export function applyOperationBatchResult(task = {}, result = {}) {
     result.batchName,
     result.batch_name,
     current.batchName,
-    current.draft?.fields?.batchName?.value,
   );
   const events = Array.isArray(current.events) ? current.events.slice() : [];
   events.push({

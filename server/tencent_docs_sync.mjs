@@ -4,9 +4,20 @@ const READ_END_COLUMN = "AD";
 const READ_BATCH_ROWS = 200;
 const READ_MAX_ROWS = 1000;
 const DEFAULT_FONT_SIZE = 10;
+const APPEND_RECHECK_ATTEMPTS = 3;
+
+let syncQueue = Promise.resolve();
 
 function text(value) {
   return value === null || value === undefined ? "" : String(value).trim();
+}
+
+export function projectManagerFromPlatformAccount(value) {
+  const account = text(value).toLowerCase();
+  return {
+    "chenjun@ata.net.cn": "陈军",
+    "siyuanyuan@ata.net.cn": "司园园",
+  }[account] || "";
 }
 
 function parseDate(value) {
@@ -165,6 +176,15 @@ function monitorRule(config) {
   return "不使用";
 }
 
+function invigilatorText(config = {}) {
+  const fanweiArrangement = text(
+    config.businessRequirement?.ata_invigilator_arrangement
+    || config.fanweiSource?.raw?.fields?.["是否需要ATA安排人工监考"],
+  );
+  if (fanweiArrangement.includes("分散")) return "ATA监考";
+  return text(config.invigilatorText);
+}
+
 function leaveLimitText(config, session, deviceText) {
   const isClientExam = deviceText === "客户端";
   const isTrial = session?.kind === "mock" || session?.sessionType === "trial";
@@ -249,7 +269,7 @@ function applyTemplate(values, template = []) {
   return row;
 }
 
-function sessionRow(config, session, template = [], created = []) {
+function sessionRow(config, session, template = [], created = [], platformAccountEmail = "") {
   const isTrial = sessionIsTrial(session);
   const requirementIndex = sessionRequirementIndex(session);
   const requirementSessions = created.filter((item) => sessionRequirementIndex(item) === requirementIndex);
@@ -268,11 +288,12 @@ function sessionRow(config, session, template = [], created = []) {
     : "";
   const projectCode = text(config.businessRequirement?.project_code || config.projectCode);
   const customerName = text(config.fanweiSource?.raw?.fields?.["客户名称（仅供参考）"]) || "蜀道集团";
+  const projectManager = projectManagerFromPlatformAccount(platformAccountEmail);
 
   const row = applyTemplate([
     text(session.name || (isTrial ? config.mockExamName : config.examName)),
     projectCode,
-    "",
+    projectManager,
     examKindText,
     customerName,
     candidateCount,
@@ -297,22 +318,28 @@ function sessionRow(config, session, template = [], created = []) {
     "仅在线客服",
     text(config.personalInfoEditing) || "不允许",
     config.hawkeye ? "鹰眼" : "",
-    text(config.invigilatorText),
+    invigilatorText(config),
     text(config.specialRequirementText) || "声音监控",
     text(config.notificationContent) || notificationText(config, session, requirementSessions),
   ], template);
   row[1] = projectCode;
-  row[2] = "";
+  row[2] = projectManager;
   row[5] = candidateCount;
   return row;
 }
 
-export function buildTencentDocRows({ config = {}, created = [], remoteRows = [] } = {}) {
+export function buildTencentDocRows({ config = {}, created = [], remoteRows = [], platformAccountEmail = "" } = {}) {
   return created
     .filter((session) => text(session?.id || session?.session_id))
     .map((session) => {
       const isTrial = session.kind === "mock" || session.sessionType === "trial";
-      return sessionRow(sessionConfig(config, session), session, templateForSession(remoteRows, isTrial), created);
+      return sessionRow(
+        sessionConfig(config, session),
+        session,
+        templateForSession(remoteRows, isTrial),
+        created,
+        platformAccountEmail,
+      );
     });
 }
 
@@ -321,8 +348,8 @@ export function tencentDocsSettingsFromEnv(env = process.env) {
     clientId: text(env.TENCENT_DOC_CLIENT_ID),
     accessToken: text(env.TENCENT_DOC_ACCESS_TOKEN),
     openId: text(env.TENCENT_DOC_OPEN_ID),
-    fileId: text(env.TENCENT_DOC_FILE_ID || "DR3NiT296WmtpWXVM"),
-    sheetId: text(env.TENCENT_DOC_SHEET_ID || "BB08J2"),
+    fileId: text(env.TENCENT_DOC_FILE_ID || "DY1pQTURrc1BSSlND"),
+    sheetId: text(env.TENCENT_DOC_SHEET_ID || "gd4707"),
   };
   return {
     ...settings,
@@ -377,7 +404,10 @@ function requestForRow(sheetId, rowIndex, values) {
           values: values.slice(0, COLUMN_COUNT).map((value) => ({
             cellValue: { text: text(value) },
             cellFormat: {
-              textFormat: { fontSize: DEFAULT_FONT_SIZE },
+              textFormat: {
+                fontSize: DEFAULT_FONT_SIZE,
+                color: { red: 255, green: 0, blue: 0, alpha: 255 },
+              },
               horizontalAlignment: "CENTER",
               verticalAlignment: "MIDDLE",
             },
@@ -389,16 +419,26 @@ function requestForRow(sheetId, rowIndex, values) {
 }
 
 export function buildBatchUpdateRequests({ sheetId, remoteRows = [], rows = [] } = {}) {
-  const reserved = new Set();
+  const lastContentRow = remoteRows.reduce(
+    (lastIndex, remoteRow, index) => (rowIsBlank(remoteRow) ? lastIndex : index),
+    -1,
+  );
+  let target = Math.max(1, lastContentRow + 1);
   const requests = [];
   for (const row of rows) {
-    let target = remoteRows.findIndex((remoteRow, index) => index > 0 && !reserved.has(index) && rowIsBlank(remoteRow));
-    if (target < 0) target = Math.max(1, remoteRows.length);
-    while (reserved.has(target)) target += 1;
-    reserved.add(target);
     requests.push(requestForRow(sheetId, target, row));
+    target += 1;
   }
   return requests;
+}
+
+async function appendTargetIsBlank({ base, sheetId, settings, requests, fetchImpl }) {
+  if (!requests.length) return true;
+  const startRowIndex = requests[0].updateRangeRequest.gridData.startRow;
+  const endRowIndex = requests.at(-1).updateRangeRequest.gridData.startRow;
+  const rangeUrl = `${base}/${encodeURIComponent(sheetId)}/A${startRowIndex + 1}:${READ_END_COLUMN}${endRowIndex + 1}`;
+  const payload = await readJson(await fetchImpl(rangeUrl, { headers: headers(settings) }), "追加位置复核");
+  return remoteGridRows(payload).every(rowIsBlank);
 }
 
 async function readJson(response, action) {
@@ -427,25 +467,45 @@ function headers(settings, includeContentType = false) {
   };
 }
 
-export async function syncExamConfigToTencentDocs({ config, created, settings, fetchImpl = fetch } = {}) {
+async function runTencentDocsSync({
+  config,
+  created,
+  settings,
+  platformAccountEmail = "",
+  fetchImpl = fetch,
+} = {}) {
   const required = ["clientId", "accessToken", "openId", "fileId", "sheetId"];
   const missing = required.filter((key) => !text(settings?.[key]));
   if (missing.length) throw new Error(`腾讯文档配置缺失：${missing.join(", ")}`);
 
   const base = `https://docs.qq.com/openapi/spreadsheet/v3/files/${encodeURIComponent(settings.fileId)}`;
-  const remoteRows = await readTencentDocRows({
-    base,
-    sheetId: settings.sheetId,
-    settings,
-    fetchImpl,
-  });
-  const rows = buildTencentDocRows({ config, created, remoteRows });
-  const requests = buildBatchUpdateRequests({
-    sheetId: settings.sheetId,
-    remoteRows,
-    rows,
-  });
-  if (!requests.length) return { updatedRows: 0, requests: [] };
+  let requests = [];
+  for (let attempt = 0; attempt < APPEND_RECHECK_ATTEMPTS; attempt += 1) {
+    const remoteRows = await readTencentDocRows({
+      base,
+      sheetId: settings.sheetId,
+      settings,
+      fetchImpl,
+    });
+    const rows = buildTencentDocRows({ config, created, remoteRows, platformAccountEmail });
+    requests = buildBatchUpdateRequests({
+      sheetId: settings.sheetId,
+      remoteRows,
+      rows,
+    });
+    if (!requests.length) return { updatedRows: 0, requests: [] };
+    if (await appendTargetIsBlank({
+      base,
+      sheetId: settings.sheetId,
+      settings,
+      requests,
+      fetchImpl,
+    })) break;
+    requests = [];
+  }
+  if (!requests.length) {
+    throw new Error("腾讯文档末尾追加位置持续被占用，已停止写入以避免覆盖现有内容");
+  }
 
   const updatePayload = await readJson(await fetchImpl(`${base}/batchUpdate`, {
     method: "POST",
@@ -453,4 +513,10 @@ export async function syncExamConfigToTencentDocs({ config, created, settings, f
     body: JSON.stringify({ requests }),
   }), "写入");
   return { updatedRows: requests.length, requests, response: updatePayload };
+}
+
+export function syncExamConfigToTencentDocs(options = {}) {
+  const pending = syncQueue.then(() => runTencentDocsSync(options));
+  syncQueue = pending.catch(() => {});
+  return pending;
 }

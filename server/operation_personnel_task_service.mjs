@@ -5,7 +5,9 @@ import {
   buildOperationPersonnelTaskStatus,
   diffOperationPersonnelTaskDrafts,
   operationPersonnelConfirmedEdits,
+  operationPersonnelTaskBaselineFingerprint,
   operationPersonnelTaskFingerprint,
+  operationPersonnelTaskSnapshot,
 } from "./operation_personnel_task.mjs";
 import {
   normalizeOperationPersonnelSnapshot,
@@ -18,6 +20,7 @@ import { operationPersonnelScheduleGate } from "./operation_personnel_schedule_g
 
 const VALID_ENVIRONMENTS = new Set(["test", "production"]);
 const PREVIEW_TTL_MS = 10 * 60 * 1000;
+const CHANGE_SUMMARY_MAX_LENGTH = 4000;
 const ACTIVE_ATTEMPT_STATUSES = new Set(["queued", "running"]);
 const RECOVERY_STATUSES = new Set(["operation_conflict", "result_unknown", "failed_resumable"]);
 const PENDING_REQUIREMENT_STATUSES = new Set(["pending_internal_review", "pending_review"]);
@@ -48,6 +51,18 @@ function serviceError(code, status, message) {
   error.code = code;
   error.status = status;
   return error;
+}
+
+function operationPersonnelChangeSummary(value) {
+  const summary = text(value);
+  if (summary.length > CHANGE_SUMMARY_MAX_LENGTH) {
+    throw serviceError(
+      "PERSONNEL_CHANGE_SUMMARY_TOO_LONG",
+      400,
+      `人员任务单变更内容不能超过 ${CHANGE_SUMMARY_MAX_LENGTH} 个字符`,
+    );
+  }
+  return summary;
 }
 
 function stableJson(value) {
@@ -197,6 +212,7 @@ function stateDefaults(environment, draft = {}) {
     activePreview: null,
     activeAttempt: null,
     sendHistory: [],
+    initialSendVerification: null,
     changeSummary: "",
     events: [],
   };
@@ -225,6 +241,50 @@ function normalizedState(task, environment, draft = null) {
     activeAttempt,
     sendHistory: structuredClone(existing.sendHistory || []),
     events: structuredClone(existing.events || []),
+  };
+}
+
+function operationPersonnelStateHasSent(state = {}) {
+  return Boolean(
+    state.status === "sent"
+    || state.lastSuccessfulFingerprint
+    || state.initialSendVerification?.status === "verified"
+    || (Array.isArray(state.sendHistory) && state.sendHistory.length > 0)
+  );
+}
+
+function ignoreHistoricalExpiredDateWarning(draft = {}, ignore = false) {
+  if (ignore) {
+    draft.warnings = (draft.warnings || []).filter(
+      (item) => item.code !== "PERSONNEL_DATES_EXPIRED",
+    );
+  }
+  return draft;
+}
+
+function operationPersonnelResendPreview(state = {}, draft = {}) {
+  const history = Array.isArray(state.sendHistory) ? state.sendHistory : [];
+  const hasSent = operationPersonnelStateHasSent(state);
+  const currentTaskSnapshot = operationPersonnelTaskSnapshot(draft);
+  const latestHistory = history.at(-1) || {};
+  const baselineTaskSnapshot = latestHistory.taskSnapshot || state.lastSentTaskSnapshot || null;
+  const changes = hasSent && baselineTaskSnapshot
+    ? diffOperationPersonnelTaskDrafts(baselineTaskSnapshot, currentTaskSnapshot)
+    : { schedules: { added: [], changed: [], deleted: [] }, fields: [], summary: "" };
+  return {
+    isResend: hasSent,
+    sendCount: Math.max(history.length, hasSent ? 1 : 0),
+    suggestedChangeSummary: !hasSent
+      ? ""
+      : baselineTaskSnapshot
+        ? (changes.summary || "与上次发送的任务信息一致")
+        : "上次发送记录未保存完整配置快照，请人工填写并核对本次变更内容",
+    changes,
+    currentFingerprint: operationPersonnelTaskFingerprint(currentTaskSnapshot),
+    baselineAvailable: Boolean(baselineTaskSnapshot),
+    baselineFingerprint: baselineTaskSnapshot
+      ? operationPersonnelTaskFingerprint(baselineTaskSnapshot)
+      : "",
   };
 }
 
@@ -282,7 +342,10 @@ export function operationPersonnelInformationMissing(draft = {}, options = {}) {
     ["收件项目部", Boolean(text(recipients.toGroup))],
     ["收件人项目经理", Array.isArray(recipients.toNames)
       && recipients.toNames.length === 1 && Boolean(text(recipients.toNames[0]))],
-    ["固定抄送部门", text(recipients.ccGroup) === "考站管理&质量控制部"],
+    ["固定抄送部门", Array.isArray(recipients.ccGroups)
+      && recipients.ccGroups.length === 2
+      && recipients.ccGroups[0] === "考站管理&质量控制部"
+      && recipients.ccGroups[1] === "结算组"],
   ].filter(([, complete]) => !complete).map(([label]) => label);
   if (text(dates.start) && text(dates.end) && text(dates.start) > text(dates.end)) {
     missing.push("人员落实日期范围");
@@ -290,8 +353,10 @@ export function operationPersonnelInformationMissing(draft = {}, options = {}) {
   for (const item of requirements) {
     if (!text(item.value)) missing.push(item.name);
   }
-  for (const label of operationPersonnelExpiredDateLabels(draft, options.now ?? Date.now())) {
-    missing.push(`${label}已过期`);
+  if (options.allowExpiredDates !== true) {
+    for (const label of operationPersonnelExpiredDateLabels(draft, options.now ?? Date.now())) {
+      missing.push(`${label}已过期`);
+    }
   }
   return [...new Set(missing)];
 }
@@ -304,8 +369,11 @@ function attachOperationPersonnelTargets(draft = {}) {
   return draft;
 }
 
-function assertOperationPersonnelInformationComplete(draft = {}, nowValue = Date.now()) {
-  const missing = operationPersonnelInformationMissing(draft, { now: nowValue });
+function assertOperationPersonnelInformationComplete(draft = {}, nowValue = Date.now(), options = {}) {
+  const missing = operationPersonnelInformationMissing(draft, {
+    now: nowValue,
+    allowExpiredDates: options.allowExpiredDates === true,
+  });
   if (!missing.length) return;
   throw serviceError(
     "PERSONNEL_DRAFT_INCOMPLETE",
@@ -327,7 +395,9 @@ function targetFromDraft(draft = {}, snapshot = {}) {
   }
   return normalizeOperationPersonnelSnapshot({
     batch,
-    schedules: structuredClone(snapshot.schedules || []),
+    schedules: structuredClone(
+      snapshot.schedules?.length ? snapshot.schedules : (draft.schedules || []),
+    ),
     personnel: draft.personnel || {},
     dates: draft.dates || {},
     requirements: operationPersonnelRequirementsFromPersonnel(
@@ -499,12 +569,26 @@ function attemptHistory(attempt, result, completedAt) {
     draftVersion: attempt.draftVersion,
     fingerprint: attempt.fingerprint,
     recipients: structuredClone(attempt.recipients),
+    taskSnapshot: structuredClone(attempt.taskSnapshot || null),
     operationRecord: structuredClone(result.sendRecord),
     operationSnapshot: structuredClone(result.operationSnapshot || attempt.operationSnapshot || null),
     changeSummary: attempt.changeSummary,
     createdAt: attempt.createdAt,
     completedAt,
   };
+}
+
+function resultRecipients(result = {}, fallback = { to: [], cc: [] }) {
+  const directory = result.operationSnapshot?.directoryMatch || {};
+  const people = (items) => (items || []).map((item) => ({
+    id: text(item?.id),
+    name: text(item?.name),
+    ...(text(item?.kind) ? { kind: text(item.kind) } : {}),
+  }));
+  const recipients = { to: people(directory.to), cc: people(directory.cc) };
+  return recipients.to.length || recipients.cc.length
+    ? recipients
+    : structuredClone(fallback);
 }
 
 function attemptMatchesPreview(attempt, preview) {
@@ -523,6 +607,7 @@ function attemptMatchesPreview(attempt, preview) {
     && attempt.draftVersion === preview.draftVersion
     && attempt.fingerprint === preview.fingerprint
     && stableJson(attempt.recipients) === stableJson(preview.recipients)
+    && text(attempt.changeSummary) === text(preview.changeSummary)
     && stableJson(attempt.target) === stableJson(preview.target)
     && stableJson(attempt.baseline) === stableJson(preview.baseline)
     && stableJson(binding(attempt.previewBinding, attempt.baseline))
@@ -584,16 +669,101 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
     readRequirement = async () => null,
     coordinator,
     runInspection,
+    runInspectionSession,
+    runInspectionInSession,
     runAttempt,
     runRecheck,
+    validateBrowserSession = async () => {},
+    closeBrowserSession,
     environment: rawEnvironment = "",
     activeAttemptIds = new Set(),
+    previewBrowserSessions = new Map(),
     now = Date.now,
     makeToken = randomUUID,
     makeAttemptId = randomUUID,
     defer = (job) => setImmediate(() => void job()),
   } = dependencies;
   const environment = text(rawEnvironment);
+  const openInspectionSession = runInspectionSession || (async (instruction) => ({
+    snapshot: await runInspection(instruction),
+    browserSession: { close: async () => {} },
+  }));
+  const inspectRetainedSession = runInspectionInSession
+    || (async (_browserSession, instruction) => runInspection(instruction));
+  const closeRetainedBrowser = closeBrowserSession
+    || (async (browserSession) => browserSession?.close?.());
+
+  function previewBrowserError() {
+    return serviceError(
+      "PERSONNEL_PREVIEW_BROWSER_STALE",
+      409,
+      "人员任务预览浏览器已失效，请重新预览",
+    );
+  }
+
+  async function disposePreviewBrowser(record) {
+    if (!record || record.status === "closed") return;
+    record.status = "closed";
+    if (record.timer) clearTimeout(record.timer);
+    if (previewBrowserSessions.get(record.previewToken) === record) {
+      previewBrowserSessions.delete(record.previewToken);
+    }
+    try {
+      await closeRetainedBrowser(record.browserSession);
+    } finally {
+      record.releaseProfile?.();
+      record.releaseProfile = null;
+    }
+  }
+
+  async function discardTaskPreviewBrowser(taskId) {
+    const records = [...previewBrowserSessions.values()]
+      .filter((record) => record.taskId === taskId && record.status !== "claimed");
+    await Promise.all(records.map((record) => disposePreviewBrowser(record)));
+  }
+
+  function retainPreviewBrowser(result, browserSession, releaseProfile) {
+    const preview = result.state.activePreview;
+    const record = {
+      taskId: result.taskId,
+      previewToken: result.previewToken,
+      draftVersion: result.draftVersion,
+      requirementVersion: preview.requirementVersion,
+      sourceFingerprint: result.state.sourceFingerprint,
+      operationSnapshotFingerprint: preview.operationSnapshotFingerprint,
+      expiresAt: Date.parse(result.expiresAt),
+      browserSession,
+      releaseProfile,
+      status: "ready",
+      timer: null,
+    };
+    previewBrowserSessions.set(record.previewToken, record);
+    const delay = Math.max(0, record.expiresAt - now());
+    record.timer = setTimeout(() => {
+      void disposePreviewBrowser(record).catch(() => {});
+    }, delay);
+    record.timer.unref?.();
+    return record;
+  }
+
+  function claimPreviewBrowser(taskId, preview, state) {
+    const record = previewBrowserSessions.get(preview.token);
+    const matches = record
+      && record.status === "ready"
+      && record.taskId === taskId
+      && record.previewToken === preview.token
+      && record.draftVersion === preview.draftVersion
+      && record.requirementVersion === preview.requirementVersion
+      && record.sourceFingerprint === state.sourceFingerprint
+      && record.operationSnapshotFingerprint === preview.operationSnapshotFingerprint
+      && Number.isFinite(record.expiresAt)
+      && record.expiresAt > now();
+    if (!matches) throw previewBrowserError();
+    record.status = "claimed";
+    if (record.timer) clearTimeout(record.timer);
+    record.timer = null;
+    return record;
+  }
 
   async function readAuthorized(taskId, actor) {
     return assertTask(await readTask(taskId), actor);
@@ -644,7 +814,9 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
       scheduleCodeMap: task.config?.operationPersonnelTask?.scheduleCodeMap || {},
     }));
     const managed = operationPersonnelScheduleGate(task);
-    if (managed.ok) draft.managedSchedules = managedScheduleProjection(managed.schedules);
+    if (managed.ok) {
+      draft.managedSchedules = operationPersonnelManagedSchedules(draft, managed.schedules);
+    }
     let state = normalizedState(task, environment, draft);
     state = recoverOrphanedAttempt(state, activeAttemptIds);
     const requirementReadback = state.checkpoints?.sync_exam_service_requirements?.status === "completed"
@@ -660,11 +832,12 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
       && !RECOVERY_STATUSES.has(state.status)) {
       state.status = buildOperationPersonnelTaskStatus(task, draft).status;
     }
+    state.resendPreview = operationPersonnelResendPreview(state, draft);
     return { taskId, state };
   }
 
   async function edit(taskId, actor, input = {}) {
-    return withTaskLock(taskId, async () => {
+    const result = await withTaskLock(taskId, async () => {
       const task = await readAuthorized(taskId, actor);
       const state = recoverOrphanedAttempt(
         normalizedState(task, environment),
@@ -691,10 +864,16 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         scheduleCodeMap: state.scheduleCodeMap,
       });
       const managed = operationPersonnelScheduleGate(task);
-      if (managed.ok) draft.managedSchedules = managedScheduleProjection(managed.schedules);
+      if (managed.ok) {
+        draft.managedSchedules = operationPersonnelManagedSchedules(draft, managed.schedules);
+      }
       const edited = editableDraft(draft, input, { now: now() });
+      const historicalDatesAllowed = operationPersonnelStateHasSent(state);
+      ignoreHistoricalExpiredDateWarning(edited.draft, historicalDatesAllowed);
       attachOperationPersonnelTargets(edited.draft);
-      assertOperationPersonnelInformationComplete(edited.draft, now());
+      assertOperationPersonnelInformationComplete(edited.draft, now(), {
+        allowExpiredDates: historicalDatesAllowed,
+      });
       const blockingWarnings = edited.draft.warnings.filter(
         (item) => item.code !== "UNSUPPORTED_PERSONNEL_TASK",
       );
@@ -746,10 +925,13 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         changeSummary: next.changeSummary,
       };
     });
+    if (result.changes.length) await discardTaskPreviewBrowser(taskId);
+    return result;
   }
 
   async function preview(taskId, actor, input = {}) {
     assertEnvironment(environment);
+    await discardTaskPreviewBrowser(taskId);
     const initialTask = await readAuthorized(taskId, actor);
     const initialManaged = requireManagedSchedules(initialTask);
     const initialManagedSnapshotFingerprint = fingerprint(initialManaged.managedSnapshot);
@@ -757,6 +939,7 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
       normalizedState(initialTask, environment),
       activeAttemptIds,
     );
+    const requestedChangeSummary = operationPersonnelChangeSummary(input.changeSummary);
     if (existing.status === "result_unknown") {
       throw serviceError(
         "PERSONNEL_RESULT_UNKNOWN",
@@ -780,6 +963,8 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
     });
     const edited = editableDraft(generated, input, { now: now() });
     const draft = attachOperationPersonnelTargets(edited.draft);
+    const historicalDatesAllowed = operationPersonnelStateHasSent(existing);
+    ignoreHistoricalExpiredDateWarning(draft, historicalDatesAllowed);
     draft.managedSchedules = operationPersonnelManagedSchedules(
       draft,
       initialManaged.schedules,
@@ -791,41 +976,70 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         "当前需求包含人员任务单不支持的监考范围",
       );
     }
-    assertOperationPersonnelInformationComplete(draft, now());
+    assertOperationPersonnelInformationComplete(draft, now(), {
+      allowExpiredDates: historicalDatesAllowed,
+    });
 
+    const resendPreview = operationPersonnelResendPreview(existing, draft);
+    const knownResend = resendPreview.isResend;
+    if (knownResend && !requestedChangeSummary) {
+      throw serviceError(
+        "PERSONNEL_CHANGE_SUMMARY_REQUIRED",
+        400,
+        "重新发送人员任务单必须填写变更内容",
+      );
+    }
+    if (knownResend && (
+      text(input.previewDraftFingerprint) !== resendPreview.currentFingerprint
+      || text(input.previewBaselineFingerprint) !== resendPreview.baselineFingerprint
+    )) {
+      throw serviceError(
+        "PERSONNEL_PREVIEW_STALE",
+        409,
+        "人员任务配置或上次发送基线已变化，请重新查看变更内容",
+      );
+    }
+    const knownResendDirectoryProbeSummary = knownResend
+      ? requestedChangeSummary
+      : "";
     const releaseProfile = coordinator.acquireProfile();
+    let browserSession;
+    let retained = false;
     let snapshot;
     let kind;
     let externalBaseline;
     let target;
     let baseline;
     let operationChanges;
-    const knownResend = Boolean(existing.lastSuccessfulFingerprint);
-    const knownResendDirectoryProbeSummary = knownResend
-      ? text(
-        diffOperationPersonnelTaskDrafts(existing.draft || {}, draft).summary
-        || "本次人员任务重发收件目录核验",
-      )
-      : "";
     try {
-      snapshot = normalizeOperationPersonnelSnapshot(await runInspection({
+      const inspected = await openInspectionSession({
         environment,
         batch: draft.batch,
         batchCode: draft.batch.code,
+        detailUrl: text(initialTask.config?.operationBatch?.detailUrl),
         allowUnpublishedPreview: true,
         ...(knownResendDirectoryProbeSummary
           ? { directoryProbeSummary: knownResendDirectoryProbeSummary }
           : {}),
-      }));
+      });
+      browserSession = inspected.browserSession;
+      snapshot = normalizeOperationPersonnelSnapshot(inspected.snapshot);
       draft.displaySchedules = operationPersonnelDisplaySchedules(
         draft.managedSchedules,
-        snapshot.schedules,
+        snapshot.schedules.length ? snapshot.schedules : draft.schedules,
       );
       externalBaseline = !existing.lastSuccessfulFingerprint
         && snapshot.sendRecords.length > 0;
-      kind = existing.lastSuccessfulFingerprint || externalBaseline
+      kind = knownResend || externalBaseline
         ? "resend"
         : "initial";
+      if (kind === "initial" && requestedChangeSummary) {
+        throw serviceError(
+          "PERSONNEL_CHANGE_SUMMARY_UNEXPECTED",
+          400,
+          "首次发送人员任务单不应填写变更内容",
+        );
+      }
       target = targetFromDraft(draft, snapshot);
       baseline = existing.lastSuccessfulFingerprint
         ? normalizeOperationPersonnelSnapshot(existing.lastOperationSnapshot || {})
@@ -840,12 +1054,15 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
           || suggestedChangeSummary(confirmationOperationChanges(operationChanges))
           || "本次人员任务重发收件目录核验",
         );
-        const fullSnapshot = normalizeOperationPersonnelSnapshot(await runInspection({
+        const fullSnapshot = normalizeOperationPersonnelSnapshot(await inspectRetainedSession(
+          browserSession,
+          {
           environment,
           batch: draft.batch,
           batchCode: draft.batch.code,
           directoryProbeSummary,
-        }));
+          },
+        ));
         const drift = operationSnapshotChanges(
           withoutDirectory(snapshot),
           withoutDirectory(fullSnapshot),
@@ -863,18 +1080,102 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         if (externalBaseline) baseline = structuredClone(fullSnapshot);
         target = targetFromDraft(draft, fullSnapshot);
         operationChanges = operationSnapshotChanges(snapshot, target);
-        if (externalBaseline && !operationChanges.length) {
-          throw serviceError(
-            "PERSONNEL_CONTENT_UNCHANGED",
-            409,
-            "人员任务内容未变化，不允许重复发送",
-          );
-        }
       }
-    } finally {
+    } catch (error) {
+      await closeRetainedBrowser(browserSession).catch(() => {});
       releaseProfile();
+      throw error;
     }
-    const conflictBaseline = existing.status === "failed_resumable"
+    if (externalBaseline) {
+      try {
+        const recognized = await withTaskLock(taskId, async () => {
+          const freshTask = await readAuthorized(taskId, actor);
+          const freshState = normalizedState(freshTask, environment);
+          if (freshState.lastSuccessfulFingerprint
+            || freshState.initialSendVerification?.status === "verified") {
+            throw serviceError(
+              "PERSONNEL_PREVIEW_STALE",
+              409,
+              "人员任务首次发送状态已被其他操作更新，请刷新后重试",
+            );
+          }
+          const initialRecords = snapshot.sendRecords.filter(
+            (record) => record.type === "首次发送",
+          );
+          if (initialRecords.length !== 1) {
+            throw serviceError(
+              "PERSONNEL_INITIAL_SEND_RECORD_AMBIGUOUS",
+              409,
+              `运控首次发送记录必须唯一，实际 ${initialRecords.length} 条`,
+            );
+          }
+          const sendRecord = structuredClone(initialRecords[0]);
+          const verifiedAt = nowIso(now);
+          const verificationFingerprint = `external:${fingerprint({ sendRecord, snapshot })}`;
+          const sourceFingerprint = draftSourceFingerprint(draft);
+          const historyEntry = {
+            attemptId: verificationFingerprint,
+            kind: "initial",
+            operator: "external",
+            environment,
+            requirementVersion: inspectedRequirementVersion,
+            draftVersion: Number(freshState.draftVersion || 1),
+            fingerprint: verificationFingerprint,
+            recipients: resultRecipients({ operationSnapshot: snapshot }),
+            operationRecord: sendRecord,
+            operationSnapshot: structuredClone(snapshot),
+            changeSummary: "",
+            createdAt: sendRecord.sentAt,
+            completedAt: sendRecord.sentAt,
+          };
+          const sendHistory = freshState.sendHistory.some((item) => (
+            item.kind === "initial"
+            && item.operationRecord?.sentAt === sendRecord.sentAt
+          ))
+            ? freshState.sendHistory
+            : [...freshState.sendHistory, historyEntry];
+          const next = {
+            ...freshState,
+            status: operationChanges.length ? "changes_pending" : "sent",
+            draft,
+            sourceFingerprint,
+            lastSuccessfulFingerprint: verificationFingerprint,
+            lastOperationSnapshot: structuredClone(snapshot),
+            activePreview: null,
+            activeAttempt: null,
+            sendHistory,
+            initialSendVerification: {
+              status: "verified",
+              sendRecord,
+              verifiedAt,
+              evidence: "operation_record_readback",
+            },
+            events: [...freshState.events, {
+              type: "operation_personnel_initial_send_recognized",
+              actor: text(actor?.email),
+              sendRecord,
+              createdAt: verifiedAt,
+            }],
+          };
+          await persistState(taskId, next);
+          return {
+            taskId,
+            state: next,
+            initialSendRecognized: true,
+            sendRecord,
+            changes: diffOperationPersonnelTaskDrafts(freshState.draft || {}, draft),
+            operationChanges: confirmationOperationChanges(operationChanges),
+          };
+        });
+        return recognized;
+      } finally {
+        await closeRetainedBrowser(browserSession).catch(() => {});
+        releaseProfile();
+      }
+    }
+    let result;
+    try {
+      const conflictBaseline = existing.status === "failed_resumable"
       && existing.activeAttempt
       ? operationPersonnelResumeBaseline(
         operationPersonnelFailedResumeConflictBaseline(
@@ -904,7 +1205,7 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
       throw error;
     }
 
-    return withTaskLock(taskId, async () => {
+      result = await withTaskLock(taskId, async () => {
       const freshTask = await readAuthorized(taskId, actor);
       const freshManaged = requireManagedSchedules(freshTask);
       if (fingerprint(freshManaged.managedSnapshot) !== initialManagedSnapshotFingerprint) {
@@ -953,11 +1254,14 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         requirementVersion: currentRequirementVersion,
         draftVersion,
         kind,
+        changeSummary: kind === "resend" ? requestedChangeSummary : "",
         externalBaseline,
         baselineSendRecord: externalBaseline
           ? structuredClone(baseline.sendRecords[0] || null)
           : null,
         baselineSnapshotFingerprint: fingerprint(previewBaseline),
+        taskSnapshotFingerprint: resendPreview.currentFingerprint,
+        baselineTaskSnapshotFingerprint: resendPreview.baselineFingerprint,
         operationSnapshotFingerprint: fingerprint(snapshot),
         directoryMatchFingerprint: fingerprint(snapshot.directoryMatch),
         managedScheduleFingerprint: fingerprint(draft.managedSchedules),
@@ -1005,7 +1309,16 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         changes: diffOperationPersonnelTaskDrafts(freshState.draft || {}, draft),
         operationChanges: confirmationOperationChanges(operationChanges),
       };
-    });
+      });
+      retainPreviewBrowser(result, browserSession, releaseProfile);
+      retained = true;
+      return result;
+    } finally {
+      if (!retained) {
+        await closeRetainedBrowser(browserSession).catch(() => {});
+        releaseProfile();
+      }
+    }
   }
 
   async function persistCheckpoint(taskId, attemptId, checkpoint) {
@@ -1056,16 +1369,29 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
           }],
         };
       }
+      const completedAttempt = {
+        ...attempt,
+        recipients: resultRecipients(result, attempt.recipients),
+      };
       const history = state.sendHistory.some((item) => item.attemptId === attemptId)
         ? state.sendHistory
-        : [...state.sendHistory, attemptHistory(attempt, result, completedAt)];
+        : [...state.sendHistory, attemptHistory(completedAttempt, result, completedAt)];
       return {
         ...state,
         status: "sent",
         lastSuccessfulFingerprint: attempt.fingerprint,
+        ...(completedAttempt.taskSnapshot
+          ? { lastSentTaskSnapshot: structuredClone(completedAttempt.taskSnapshot) }
+          : {}),
         lastOperationSnapshot: structuredClone(result.operationSnapshot),
-        activeAttempt: { ...attempt, status: "sent", completedAt },
+        activeAttempt: { ...completedAttempt, status: "sent", completedAt },
         sendHistory: history,
+        initialSendVerification: attempt.kind === "initial" ? {
+          status: "verified",
+          sendRecord: structuredClone(result.sendRecord),
+          verifiedAt: completedAt,
+          evidence: "operation_record_readback",
+        } : state.initialSendVerification,
         changeSummary: attempt.changeSummary,
         events: [...state.events, {
           type: "operation_personnel_sent",
@@ -1102,18 +1428,18 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
     });
   }
 
-  async function runQueuedAttempt(taskId, attemptId) {
+  async function runQueuedAttempt(taskId, attemptId, previewBrowser) {
     activeAttemptIds.add(attemptId);
-    let releaseProfile;
     try {
-      releaseProfile = coordinator.acquireProfile();
       const running = await withTaskLock(taskId, async () => {
         const freshTask = await readTask(taskId);
         const freshAttempt = freshTask?.config?.operationPersonnelTask?.activeAttempt;
         if (!freshTask || freshAttempt?.attemptId !== attemptId) return null;
         const freshManaged = requireManagedSchedules(freshTask);
         const state = normalizedState(freshTask, environment);
-        assertOperationPersonnelInformationComplete(state.draft, now());
+        assertOperationPersonnelInformationComplete(state.draft, now(), {
+          allowExpiredDates: operationPersonnelStateHasSent(state),
+        });
         const freshManagedFingerprint = fingerprint(
           operationPersonnelManagedSchedules(state.draft, freshManaged.schedules),
         );
@@ -1151,6 +1477,7 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         checkpoints: running.checkpoints,
       }, {
         now,
+        browserSession: previewBrowser.browserSession,
         onCheckpoint: (checkpoint) => persistCheckpoint(taskId, attemptId, checkpoint),
         onVerification: (verification) => persistVerification(taskId, attemptId, verification),
       });
@@ -1158,7 +1485,7 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
     } catch (error) {
       await failAttempt(taskId, attemptId, error);
     } finally {
-      releaseProfile?.();
+      await disposePreviewBrowser(previewBrowser).catch(() => {});
       activeAttemptIds.delete(attemptId);
     }
   }
@@ -1173,7 +1500,10 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
 
   async function send(taskId, actor, input = {}) {
     assertEnvironment(environment);
-    const queued = await withTaskLock(taskId, async () => {
+    let claimedBrowser;
+    let queued;
+    try {
+      queued = await withTaskLock(taskId, async () => {
       const task = await readAuthorized(taskId, actor);
       const requirement = await readRequirementFor(task);
       if (hasPendingRequirementChange(requirement)) {
@@ -1202,6 +1532,7 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         );
       }
       const preview = state.activePreview;
+      const resendPreview = operationPersonnelResendPreview(state, state.draft);
       const expiresAt = Date.parse(preview?.expiresAt);
       const stale = !preview
         || preview.token !== text(input.previewToken)
@@ -1213,6 +1544,8 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         || state.environment !== environment
         || state.draft.environment !== environment
         || state.sourceFingerprint !== draftSourceFingerprint(state.draft)
+        || preview.taskSnapshotFingerprint !== resendPreview.currentFingerprint
+        || preview.baselineTaskSnapshotFingerprint !== resendPreview.baselineFingerprint
         || preview.baselineSnapshotFingerprint
           !== fingerprint(state.draft.previewBaselineSnapshot || {})
         || preview.operationSnapshotFingerprint
@@ -1247,6 +1580,9 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
       }
       const edited = editableDraft(state.draft, input.edits || {}, { now: now() });
       const finalDraft = attachOperationPersonnelTargets(edited.draft);
+      const historicalDatesAllowed = preview.kind === "resend"
+        || operationPersonnelStateHasSent(state);
+      ignoreHistoricalExpiredDateWarning(finalDraft, historicalDatesAllowed);
       if (finalDraft.warnings.length) {
         throw serviceError(
           "PERSONNEL_DRAFT_INCOMPLETE",
@@ -1254,11 +1590,13 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
           "人员任务字段无效，请检查日期、监考人数和监考比例",
         );
       }
-      assertOperationPersonnelInformationComplete(finalDraft, now());
+      assertOperationPersonnelInformationComplete(finalDraft, now(), {
+        allowExpiredDates: historicalDatesAllowed,
+      });
       const finalDraftVersion = Number(state.draftVersion || 0) + (edited.changes.length ? 1 : 0);
       const currentFingerprint = operationPersonnelTaskFingerprint(finalDraft);
-      if (state.lastSuccessfulFingerprint
-        && state.lastSuccessfulFingerprint === currentFingerprint) {
+      const baselineFingerprint = operationPersonnelTaskBaselineFingerprint(state);
+      if (baselineFingerprint && baselineFingerprint === currentFingerprint) {
         throw serviceError(
           "PERSONNEL_CONTENT_UNCHANGED",
           409,
@@ -1273,12 +1611,26 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
           "人员任务预览已失效，请重新检查",
         );
       }
-      const changeSummary = text(input.changeSummary);
+      const changeSummary = operationPersonnelChangeSummary(input.changeSummary);
       if (kind === "resend" && !changeSummary) {
         throw serviceError(
           "PERSONNEL_CHANGE_SUMMARY_REQUIRED",
           400,
-          "重新发送人员任务必须填写已复核的变化摘要",
+          "重新发送人员任务单必须填写变更内容",
+        );
+      }
+      if (kind === "initial" && changeSummary) {
+        throw serviceError(
+          "PERSONNEL_CHANGE_SUMMARY_UNEXPECTED",
+          400,
+          "首次发送人员任务单不应填写变更内容",
+        );
+      }
+      if (kind === "resend" && changeSummary !== text(preview.changeSummary)) {
+        throw serviceError(
+          "PERSONNEL_CHANGE_SUMMARY_MISMATCH",
+          409,
+          "人员任务单变更内容与预览时填写内容不一致，请重新预览",
         );
       }
       const target = targetFromDraft(
@@ -1318,6 +1670,7 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         target,
         baseline,
         previewBinding,
+        changeSummary,
       });
       const attemptId = resumeSameAttempt ? previous.attemptId : text(makeAttemptId());
       const createdAt = resumeSameAttempt ? previous.createdAt : nowIso(now);
@@ -1331,6 +1684,7 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         draftVersion: finalDraftVersion,
         fingerprint: currentFingerprint,
         recipients,
+        taskSnapshot: operationPersonnelTaskSnapshot(finalDraft),
         managedSchedules: managedScheduleProjection(finalDraft.managedSchedules),
         displaySchedules: structuredClone(finalDraft.displaySchedules),
         changeSummary,
@@ -1342,6 +1696,17 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         baseline,
         previewBinding,
       };
+      claimedBrowser = claimPreviewBrowser(taskId, preview, state);
+      try {
+        await validateBrowserSession(claimedBrowser.browserSession, {
+          environment,
+          batch: finalDraft.batch,
+          batchCode: finalDraft.batch.code,
+        });
+      } catch (error) {
+        if (error?.code === "PERSONNEL_PREVIEW_BROWSER_STALE") throw error;
+        throw previewBrowserError();
+      }
       const inspectCheckpoint = completedPreviewInspectionCheckpoint(
         kind,
         baseline,
@@ -1373,8 +1738,17 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
       await persistState(taskId, next);
       activeAttemptIds.add(attemptId);
       return attempt;
-    });
-    defer(() => runQueuedAttempt(taskId, queued.attemptId).catch(
+      });
+    } catch (error) {
+      const readyBrowser = previewBrowserSessions.get(text(input.previewToken));
+      const ownedBrowser = claimedBrowser
+        || (readyBrowser?.taskId === taskId && readyBrowser.status === "ready"
+          ? readyBrowser
+          : null);
+      await disposePreviewBrowser(ownedBrowser).catch(() => {});
+      throw error;
+    }
+    defer(() => runQueuedAttempt(taskId, queued.attemptId, claimedBrowser).catch(
       (error) => handleQueuedAttemptRejection(taskId, queued.attemptId, error),
     ));
     return { statusCode: 202, attemptId: queued.attemptId };
@@ -1413,9 +1787,13 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         environment,
         kind: state.activeAttempt.kind,
         batch: state.activeAttempt.target?.batch || state.draft.batch,
+        detailUrl: text(task.config?.operationBatch?.detailUrl),
         attempt: {
           kind: state.activeAttempt.kind,
           startedAt: submitStartedAt,
+          beforeSendRecords: structuredClone(
+            state.checkpoints.submit_send?.readback?.beforeSendRecords || [],
+          ),
         },
       });
     } finally {
@@ -1451,6 +1829,9 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         ...freshState,
         status: "sent",
         lastSuccessfulFingerprint: freshAttempt.fingerprint,
+        ...(freshAttempt.taskSnapshot
+          ? { lastSentTaskSnapshot: structuredClone(freshAttempt.taskSnapshot) }
+          : {}),
         lastOperationSnapshot: operationSnapshot,
         confirmedEdits: operationPersonnelConfirmedEdits(freshAttempt.target || freshState.draft),
         activeAttempt: {
@@ -1461,6 +1842,12 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
           operationSnapshot,
         },
         sendHistory: history,
+        initialSendVerification: freshAttempt.kind === "initial" ? {
+          status: "verified",
+          sendRecord: structuredClone(result.sendRecord),
+          verifiedAt: checkedAt,
+          evidence: "operation_record_readback",
+        } : freshState.initialSendVerification,
         events: [...freshState.events, {
           type: "operation_personnel_rechecked",
           attemptId: originalAttemptId,

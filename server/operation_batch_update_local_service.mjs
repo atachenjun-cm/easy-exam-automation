@@ -38,6 +38,14 @@ function fingerprint(value) {
   return createHash("sha256").update(stableJson(value)).digest("hex");
 }
 
+function comparableUpdateSnapshot(snapshot, changes = []) {
+  const comparable = structuredClone(snapshot);
+  if (!changes.some((change) => change?.path === "servicePersonnel")) {
+    delete comparable.servicePersonnel;
+  }
+  return comparable;
+}
+
 function tokenHash(value) {
   return createHash("sha256").update(text(value)).digest("hex");
 }
@@ -90,6 +98,15 @@ function batchCode(task = {}) {
     throw serviceError("OPERATION_BATCH_CODE_REQUIRED", 409, "缺少有效的运控批次代码");
   }
   return code;
+}
+
+function batchReference(task, code) {
+  const current = task.config?.operationBatch || {};
+  return {
+    code,
+    ...(text(current.batchName) ? { name: text(current.batchName) } : {}),
+    ...(text(current.detailUrl) ? { detailUrl: text(current.detailUrl) } : {}),
+  };
 }
 
 function desiredSnapshot(task = {}) {
@@ -185,10 +202,14 @@ export function createOperationBatchLocalUpdateService(dependencies = {}) {
     }
   }
 
-  function activePreparation(taskId, kind) {
+  function activePreparation(taskId, kind, expectedActorFingerprint = "") {
     cleanupPreparations();
     for (const [preparationId, preparation] of preparations) {
-      if (preparation.taskId === taskId && preparation.kind === kind) {
+      if (
+        preparation.taskId === taskId
+        && preparation.kind === kind
+        && (!expectedActorFingerprint || preparation.actorFingerprint === expectedActorFingerprint)
+      ) {
         return { preparationId, preparation };
       }
     }
@@ -233,29 +254,21 @@ export function createOperationBatchLocalUpdateService(dependencies = {}) {
     const task = await readAuthorized(taskId, actor);
     const code = batchCode(task);
     const desired = desiredSnapshot(task);
+    const applied = appliedSnapshot(task);
     const version = taskVersion(task);
     const desiredFingerprint = fingerprint(desired);
-    const active = activePreparation(taskId, "preview");
-    if (active) {
-      const sameActor = active.preparation.actorFingerprint === actorFingerprint(actor);
-      const current = active.preparation.taskVersion === version
-        && active.preparation.desiredFingerprint === desiredFingerprint;
-      if (!sameActor) {
-        throw serviceError(
-          "OPERATION_BATCH_UPDATE_LOCKED",
-          409,
-          "该项目正在另一台电脑上检查运营批次，请稍后重试",
-        );
-      }
-      if (current) return { ...active, instruction: active.preparation.instruction };
-      preparations.delete(active.preparationId);
-    }
+    const currentActorFingerprint = actorFingerprint(actor);
     const preparationId = text(makePreparationId());
-    const instruction = { batch: { code } };
+    const includeServicePersonnel = !applied || operationBatchManagedDiff(applied, desired)
+      .some((change) => change?.path === "servicePersonnel");
+    const instruction = {
+      batch: batchReference(task, code),
+      includeServicePersonnel,
+    };
     const preparation = {
       kind: "preview",
       taskId,
-      actorFingerprint: actorFingerprint(actor),
+      actorFingerprint: currentActorFingerprint,
       taskVersion: version,
       desiredFingerprint,
       instruction,
@@ -299,42 +312,53 @@ export function createOperationBatchLocalUpdateService(dependencies = {}) {
       );
     }
     const applied = appliedSnapshot(task);
-    if (applied) {
-      const differingFields = differingManagedFields(applied, inspected);
-      if (differingFields.length) {
-        throw serviceError(
-          "OPERATION_BATCH_UPDATE_CONFLICT",
-          409,
-          "运控当前信息与上次已确认快照不一致，请人工核对",
-          { differingFields, inspectedCurrent: inspected },
-        );
-      }
+    const comparableInspected = structuredClone(inspected);
+    if (
+      applied
+      && Object.hasOwn(applied, "servicePersonnel")
+      && !Object.hasOwn(comparableInspected, "servicePersonnel")
+    ) {
+      comparableInspected.servicePersonnel = applied.servicePersonnel;
     }
-    if (inspected.schedules.length > desired.schedules.length) {
+    const changes = operationBatchManagedDiff(comparableInspected, desired);
+    const appliedDifferences = applied
+      ? differingManagedFields(applied, comparableInspected)
+      : [];
+    if (comparableInspected.schedules.length > desired.schedules.length) {
       throw serviceError(
         "OPERATION_BATCH_UPDATE_CONFLICT",
         409,
         "不允许减少已存在的运营批次日程数量",
-        { differingFields: differingManagedFields(desired, inspected) },
+        { differingFields: differingManagedFields(desired, comparableInspected) },
       );
     }
-    const changes = operationBatchManagedDiff(inspected, desired);
     const current = task.config?.operationBatch || {};
     preparations.delete(preparationId);
     if (!changes.length) {
-      const patch = applied
-        ? { operationBatch: current }
-        : applyOperationBatchManagedResult(task, {
+      const alreadyManuallyAligned = appliedDifferences.length > 0;
+      const upgradesLegacyPersonnelBaseline = Boolean(
+        applied
+        && Object.hasOwn(desired, "servicePersonnel")
+        && !Object.hasOwn(applied, "servicePersonnel"),
+      );
+      const patch = !applied || upgradesLegacyPersonnelBaseline || alreadyManuallyAligned
+        ? applyOperationBatchManagedResult(task, {
           verified: true,
-          snapshot: inspected,
-          action: "baseline",
+          snapshot: comparableInspected,
+          action: alreadyManuallyAligned
+            ? "verified_current"
+            : upgradesLegacyPersonnelBaseline ? "baseline_upgrade" : "baseline",
           syncedAt: nowIso(now),
           detailUrl: result.detailUrl,
           checkpoints: result.checkpoints,
-        });
+        })
+        : { operationBatch: current };
       const updatedTask = await persistOperationBatch(taskId, {
         ...patch.operationBatch,
         status: "success",
+        scheduleStatus: "synced",
+        scheduleErrorCode: "",
+        scheduleErrorMessage: "",
         activeUpdatePreview: null,
         errorCode: "",
         errorMessage: "",
@@ -343,10 +367,18 @@ export function createOperationBatchLocalUpdateService(dependencies = {}) {
       return {
         action: "none",
         changes: [],
-        inspectedCurrent: inspected,
+        inspectedCurrent: comparableInspected,
         desiredSnapshot: desired,
         task: updatedTask,
       };
+    }
+    if (appliedDifferences.length) {
+      throw serviceError(
+        "OPERATION_BATCH_UPDATE_CONFLICT",
+        409,
+        "运控当前信息与上次已确认快照不一致，请人工核对",
+        { differingFields: appliedDifferences, inspectedCurrent: comparableInspected },
+      );
     }
     const previewToken = text(makePreviewToken());
     const activeUpdatePreview = {
@@ -413,7 +445,7 @@ export function createOperationBatchLocalUpdateService(dependencies = {}) {
       throw serviceError("OPERATION_BATCH_PREVIEW_STALE", 409, "运营批次预览已过期，请重新检查");
     }
     const applied = appliedSnapshot(task);
-    if (applied && fingerprint(applied) !== preview.inspectedCurrentFingerprint) {
+    if (applied && differingManagedFields(applied, preview.inspectedCurrent).length) {
       throw serviceError("OPERATION_BATCH_PREVIEW_STALE", 409, "已应用快照在确认前发生变化，请重新检查");
     }
     const activeAttempt = (current.updateAttempts || []).find((attempt) => (
@@ -426,7 +458,7 @@ export function createOperationBatchLocalUpdateService(dependencies = {}) {
     const preparationId = text(makePreparationId());
     const instruction = {
       batch: {
-        code,
+        ...batchReference(task, code),
         expectedAppliedSnapshot: structuredClone(preview.inspectedCurrent),
       },
       desiredSnapshot: structuredClone(desired),
@@ -491,7 +523,10 @@ export function createOperationBatchLocalUpdateService(dependencies = {}) {
         inspectedAfter = null;
       }
     }
-    const reachedDesired = inspectedAfter && fingerprint(inspectedAfter) === fingerprint(desired);
+    const changes = preparation.instruction.changes || [];
+    const reachedDesired = inspectedAfter
+      && fingerprint(comparableUpdateSnapshot(inspectedAfter, changes))
+        === fingerprint(comparableUpdateSnapshot(desired, changes));
     const verifiedSuccess = result?.status === "success" && result?.verified === true && reachedDesired;
     const completedAt = nowIso(now);
     let updatedTask;
@@ -507,6 +542,9 @@ export function createOperationBatchLocalUpdateService(dependencies = {}) {
       updatedTask = await persistOperationBatch(taskId, {
         ...patch.operationBatch,
         status: "success",
+        scheduleStatus: "synced",
+        scheduleErrorCode: "",
+        scheduleErrorMessage: "",
         activeUpdatePreview: null,
         updateAttempts: replaceAttempt(patch.operationBatch, preparation.attemptId, {
           status: "succeeded",
@@ -520,7 +558,9 @@ export function createOperationBatchLocalUpdateService(dependencies = {}) {
         updatedAt: completedAt,
       });
     } else {
-      const unchanged = inspectedAfter && fingerprint(inspectedAfter) === fingerprint(expected);
+      const unchanged = inspectedAfter
+        && fingerprint(comparableUpdateSnapshot(inspectedAfter, changes))
+          === fingerprint(comparableUpdateSnapshot(expected, changes));
       const conflict = Boolean(inspectedAfter && !unchanged);
       const error = serializedError(
         result,

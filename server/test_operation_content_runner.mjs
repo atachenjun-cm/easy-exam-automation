@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  clearOperationContentMultiSelect,
   operationContentSectionsChanged,
   operationContentSnapshotFromApi,
+  operationContentSubjectFillSteps,
 } from "./operation_content_runner.mjs";
 
 function desiredSnapshot() {
@@ -88,4 +90,51 @@ test("operation content changes are isolated by section", () => {
     configuration: false,
     subjects: true,
   });
+});
+
+test("operation content fills the existing blank subject row before adding another", () => {
+  const subjects = [
+    { name: "建设项目管理岗", durationMinutes: "120", remark: "" },
+    { name: "电力交易员岗", durationMinutes: "120", remark: "" },
+  ];
+
+  assert.deepEqual(operationContentSubjectFillSteps(1, subjects), [
+    { action: "fill", index: 0, subject: subjects[0] },
+    { action: "add", index: 1 },
+    { action: "fill", index: 1, subject: subjects[1] },
+  ]);
+});
+
+test("operation content clears rerendering multi-select choices without locator clicks", async () => {
+  let choiceCount = 3;
+  let evaluateCalls = 0;
+  const root = {
+    locator(selector) {
+      assert.equal(selector, ".ant-select-selection__choice__remove");
+      return { count: async () => choiceCount };
+    },
+    async evaluate(_callback, options) {
+      assert.equal(options.previousCount, choiceCount);
+      evaluateCalls += 1;
+      choiceCount -= 1;
+    },
+  };
+
+  await clearOperationContentMultiSelect(root, "item_type");
+
+  assert.equal(choiceCount, 0);
+  assert.equal(evaluateCalls, 3);
+});
+
+test("operation content rejects a multi-select choice that does not disappear", async () => {
+  const root = {
+    locator: () => ({ count: async () => 1 }),
+    evaluate: async () => {},
+  };
+
+  await assert.rejects(
+    () => clearOperationContentMultiSelect(root, "item_type"),
+    (error) => error?.code === "OPERATION_CONTENT_MULTI_SELECT_CLEAR_FAILED"
+      && /item_type/.test(error.message),
+  );
 });

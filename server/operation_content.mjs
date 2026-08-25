@@ -1,5 +1,15 @@
 import { createHash } from "node:crypto";
 
+import {
+  CONTENT_PERSON_EMAIL_DIRECTORY,
+  DEFAULT_CONTENT_EMAIL_CC,
+  contentEmailDefaultsForTask,
+} from "./content_email_directory.mjs";
+import {
+  normalizeOperationProjectDepartment,
+  operationProjectDepartmentForOwner,
+} from "./operation_batch.mjs";
+
 function text(value) {
   return String(value ?? "").trim();
 }
@@ -26,6 +36,91 @@ function fingerprint(value) {
 
 function splitOptions(value) {
   return unique(Array.isArray(value) ? value : text(value).split(/[、,，;；]+/));
+}
+
+function emailList(value) {
+  const values = Array.isArray(value) ? value : text(value).split(/[\s,，;；]+/);
+  return unique(values.map((item) => text(item).toLowerCase()));
+}
+
+function dispatchTargetError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  error.status = 400;
+  throw error;
+}
+
+function projectManagerDirectoryGroup(department = "") {
+  if (/^项目实施[一二三四]部$/.test(department)) return `${department}(项目经理)`;
+  if (department === "项目实施五部") return `${department}（项目经理）`;
+  return department;
+}
+
+export function buildOperationContentDispatchTarget(task = {}, input = {}) {
+  const defaults = contentEmailDefaultsForTask(task);
+  const recipients = Object.hasOwn(input, "recipients") && input.recipients !== undefined
+    ? emailList(input.recipients)
+    : emailList(defaults.recipients);
+  if (!recipients.length) {
+    dispatchTargetError("OPERATION_CONTENT_RECIPIENTS_REQUIRED", "内容任务单至少需要一个收件人");
+  }
+  const recipientSet = new Set(recipients);
+  const cc = (Object.hasOwn(input, "cc") && input.cc !== undefined
+    ? emailList(input.cc)
+    : emailList(defaults.cc))
+    .filter((email) => !recipientSet.has(email));
+  const projectCode = text(
+    task.config?.businessRequirement?.project_code
+    || task.config?.projectCode
+    || task.projectCode,
+  );
+  if (!projectCode) {
+    dispatchTargetError("OPERATION_CONTENT_PROJECT_CODE_REQUIRED", "缺少内容任务对应的项目编码");
+  }
+  const projectOwnerEmail = text(task.ownerEmail).toLowerCase();
+  const contentEmails = new Set(Object.values(CONTENT_PERSON_EMAIL_DIRECTORY).map((email) => email.toLowerCase()));
+  const contentRecipients = recipients.filter((email) => email !== projectOwnerEmail && contentEmails.has(email));
+  const projectRecipients = recipients.filter((email) => email === projectOwnerEmail);
+  const unassignedRecipients = recipients.filter((email) => (
+    !contentRecipients.includes(email) && !projectRecipients.includes(email)
+  ));
+  if (unassignedRecipients.length) {
+    dispatchTargetError(
+      "OPERATION_CONTENT_RECIPIENT_GROUP_UNKNOWN",
+      `收件人无法匹配内容开发部或项目经理分组：${unassignedRecipients.join("、")}`,
+    );
+  }
+  const allowedCc = new Set(DEFAULT_CONTENT_EMAIL_CC.map((email) => email.toLowerCase()));
+  const unassignedCc = cc.filter((email) => !allowedCc.has(email));
+  if (unassignedCc.length) {
+    dispatchTargetError(
+      "OPERATION_CONTENT_CC_GROUP_UNKNOWN",
+      `抄送人无法匹配内容开发部抄送分组：${unassignedCc.join("、")}`,
+    );
+  }
+  const projectDepartment = normalizeOperationProjectDepartment(
+    task.config?.operationBatch?.draft?.fields?.projectDepartment?.value
+    || task.config?.operationBatch?.projectDepartmentDefault
+    || operationProjectDepartmentForOwner(projectOwnerEmail),
+  );
+  if (projectRecipients.length && !projectDepartment) {
+    dispatchTargetError("OPERATION_CONTENT_PROJECT_GROUP_REQUIRED", "缺少项目经理所属项目实施部门");
+  }
+  return {
+    projectCode,
+    recipients,
+    cc,
+    directoryGroups: {
+      recipients: [
+        ...(contentRecipients.length ? [{ name: "内容开发部", emails: contentRecipients }] : []),
+        ...(projectRecipients.length ? [{
+          name: projectManagerDirectoryGroup(projectDepartment),
+          emails: projectRecipients,
+        }] : []),
+      ],
+      cc: cc.length ? [{ name: "内容开发部抄送", emails: cc }] : [],
+    },
+  };
 }
 
 function yesNo(value) {
@@ -100,11 +195,61 @@ function requirementRange(requirement = {}, fallback = {}) {
   return combined.start && combined.end ? combined : { start, end };
 }
 
-function operationClosureRange(task = {}, requirements = []) {
-  const ranges = requirements.map((requirement) => requirementRange(requirement, {
-    start: task.config?.startTimeDisplay || task.config?.startTimeIso,
-    end: task.config?.endTimeDisplay || task.config?.endTimeIso,
-  })).filter((range) => range.start && range.end);
+function operationTrialRange(task = {}, requirements = []) {
+  const sessions = Array.isArray(task.sessions) ? task.sessions : [];
+  const ranges = requirements.map((requirement, requirementIndex) => {
+    const fields = requirement.fields || {};
+    const config = requirement.config || {};
+    const explicit = dateTimeParts(fields["试考日期时间"]);
+    if (explicit.start && explicit.end) return explicit;
+    const session = sessions.find((item) => (
+      text(item.sessionType || item.session_type) === "trial"
+      && Number(item.requirementIndex ?? item.requirement_index ?? 0) === requirementIndex
+    )) || {};
+    const start = text(
+      config.mockStartTimeDisplay
+      || config.mockStartTimeIso
+      || session.start
+      || session.start_time,
+    );
+    const end = text(
+      config.mockEndTimeDisplay
+      || config.mockEndTimeIso
+      || session.end
+      || session.end_time,
+    );
+    const combined = dateTimeParts(`${start}-${end}`);
+    return combined.start && combined.end ? combined : { start, end };
+  }).filter((range) => range.start && range.end);
+  if (!ranges.length) {
+    const businessRange = dateTimeParts(task.config?.businessRequirement?.mock_exam_time_range);
+    if (businessRange.start && businessRange.end) ranges.push(businessRange);
+  }
+  if (!ranges.length) {
+    const formalRanges = requirements.map((requirement) => requirementRange(requirement, {
+      start: task.config?.startTimeDisplay || task.config?.startTimeIso,
+      end: task.config?.endTimeDisplay || task.config?.endTimeIso,
+    })).filter((range) => range.start && range.end);
+    if (!formalRanges.length) {
+      const businessFormal = dateTimeParts(task.config?.businessRequirement?.formal_exam_time_range);
+      if (businessFormal.start && businessFormal.end) formalRanges.push(businessFormal);
+    }
+    const earliestFormalStart = formalRanges.map((range) => range.start).sort()[0];
+    const dateMatch = text(earliestFormalStart).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (dateMatch) {
+      const previousDay = new Date(
+        Number(dateMatch[1]),
+        Number(dateMatch[2]) - 1,
+        Number(dateMatch[3]) - 1,
+      );
+      const date = [
+        previousDay.getFullYear(),
+        String(previousDay.getMonth() + 1).padStart(2, "0"),
+        String(previousDay.getDate()).padStart(2, "0"),
+      ].join("-");
+      ranges.push({ start: `${date} 10:00:00`, end: `${date} 17:00:00` });
+    }
+  }
   if (!ranges.length) return { start: "", end: "" };
   return {
     start: ranges.map((range) => range.start).sort()[0],
@@ -139,11 +284,10 @@ function opaDurationForSubject(subjectName, business = {}) {
 
 function subjectRemark(task = {}, requirement = {}, requirementIndex = 0, course = {}) {
   const remarks = task.config?.contentTaskRemarks || {};
-  const saved = Object.hasOwn(remarks, `formal:${requirementIndex}`)
-    ? text(remarks[`formal:${requirementIndex}`])
-    : "";
+  const remarkKey = `formal:${requirementIndex}`;
+  if (Object.hasOwn(remarks, remarkKey)) return text(remarks[remarkKey]);
   const tenantId = text(requirement.config?.tenantId || task.config?.tenantId);
-  const base = saved || (tenantId ? `租户 ID：${tenantId}` : text(requirement.fields?.["备注"] || requirement.config?.remark));
+  const base = tenantId ? `租户 ID：${tenantId}` : text(requirement.fields?.["备注"] || requirement.config?.remark);
   if (!course.code || base.includes(course.code)) return base;
   return [base, `科目编号：${course.name ? `${course.name}（${course.code}）` : course.code}`].filter(Boolean).join("；");
 }
@@ -218,10 +362,128 @@ export function operationContentFingerprint(value = {}) {
   return fingerprint(normalizeOperationContentSnapshot(value));
 }
 
+function operationContentDisplay(value) {
+  if (Array.isArray(value)) return unique(value).join("、") || "无";
+  return text(value) || "无";
+}
+
+function operationContentChangedValue(label, before, after, prefix = "") {
+  const beforeValue = Array.isArray(before) ? unique(before) : text(before);
+  const afterValue = Array.isArray(after) ? unique(after) : text(after);
+  if (stableJson(beforeValue) === stableJson(afterValue)) return "";
+  return `${prefix}${label}：由“${operationContentDisplay(beforeValue)}”调整为“${operationContentDisplay(afterValue)}”`;
+}
+
+function operationContentSubjectRows(rows = []) {
+  const counts = new Map();
+  return new Map((Array.isArray(rows) ? rows : []).map((row) => {
+    const name = text(row?.name);
+    const occurrence = (counts.get(name) || 0) + 1;
+    counts.set(name, occurrence);
+    return [`${name}\u0000${occurrence}`, row];
+  }));
+}
+
+export function diffOperationContentSnapshots(baseline = {}, current = {}) {
+  const before = normalizeOperationContentSnapshot(baseline);
+  const after = normalizeOperationContentSnapshot(current);
+  const changes = [
+    operationContentChangedValue("批次代码", before.batch.code, after.batch.code),
+    operationContentChangedValue("批次名称", before.batch.name, after.batch.name),
+  ].filter(Boolean);
+  const configurationLabels = {
+    background: "界面背景",
+    loginMode: "登录方式",
+    itemTypes: "试题类型",
+    contentSources: "内容来源",
+    closePaper: "封闭制题",
+    reviewPaper: "人工阅卷",
+    singleMaxSubjects: "单科最大科次",
+    paperLanguages: "试卷使用语言",
+    osLanguages: "操作系统语言",
+    closureStart: "封场或试考开始时间",
+    closureEnd: "封场或试考结束时间",
+  };
+  for (const [field, label] of Object.entries(configurationLabels)) {
+    const change = operationContentChangedValue(
+      label,
+      before.configuration[field],
+      after.configuration[field],
+    );
+    if (change) changes.push(change);
+  }
+
+  const beforeSubjects = operationContentSubjectRows(before.subjects);
+  const afterSubjects = operationContentSubjectRows(after.subjects);
+  for (const [key, subject] of beforeSubjects) {
+    if (afterSubjects.has(key)) continue;
+    changes.push(`删除科目：科目名称“${operationContentDisplay(subject.name)}”，时长（分钟）“${operationContentDisplay(subject.durationMinutes)}”，备注“${operationContentDisplay(subject.remark)}”`);
+  }
+  for (const [key, subject] of afterSubjects) {
+    const previous = beforeSubjects.get(key);
+    if (!previous) {
+      changes.push(`新增科目：科目名称“${operationContentDisplay(subject.name)}”，时长（分钟）“${operationContentDisplay(subject.durationMinutes)}”，备注“${operationContentDisplay(subject.remark)}”`);
+      continue;
+    }
+    for (const [field, label] of [["durationMinutes", "时长（分钟）"], ["remark", "备注"]]) {
+      const change = operationContentChangedValue(
+        label,
+        previous[field],
+        subject[field],
+        `${operationContentDisplay(subject.name)} / `,
+      );
+      if (change) changes.push(change);
+    }
+  }
+  const beforeOrder = [...beforeSubjects.keys()].filter((key) => afterSubjects.has(key));
+  const afterOrder = [...afterSubjects.keys()].filter((key) => beforeSubjects.has(key));
+  if (beforeOrder.length > 1 && beforeOrder.join("\n") !== afterOrder.join("\n")) {
+    const orderText = (keys, rows) => keys.map((key) => operationContentDisplay(rows.get(key)?.name)).join(" → ");
+    changes.push(`科目顺序：由“${orderText(beforeOrder, beforeSubjects)}”调整为“${orderText(afterOrder, afterSubjects)}”`);
+  }
+  return changes;
+}
+
+export function operationContentDispatchPreview(task = {}) {
+  const state = task.config?.operationContentSync || {};
+  const history = Array.isArray(state.dispatchHistory) ? state.dispatchHistory : [];
+  const hasSent = Boolean(
+    history.length
+    || state.initialSendVerification?.status === "verified"
+    || state.dispatchStatus === "sent"
+    || text(state.lastDispatchedAt),
+  );
+  const currentSnapshot = normalizeOperationContentSnapshot(buildOperationContentDraft(task));
+  const latestHistory = history.at(-1) || {};
+  const baseline = latestHistory.contentSnapshot || state.lastDispatchedSnapshot || null;
+  const changes = hasSent && baseline
+    ? diffOperationContentSnapshots(baseline, currentSnapshot)
+    : [];
+  const sendCount = Math.max(
+    history.length,
+    ...history.map((item) => Number(item?.sendNumber || 0)).filter(Number.isFinite),
+    hasSent ? 1 : 0,
+  );
+  return {
+    isResend: hasSent,
+    sendCount,
+    suggestedChangeSummary: !hasSent
+      ? ""
+      : baseline
+        ? (changes.length ? changes.join("\n") : "与上次发送的任务信息一致")
+        : "上次发送记录未保存完整配置快照，请人工填写并核对本次变更内容",
+    changes,
+    currentSnapshot,
+    currentFingerprint: operationContentFingerprint(currentSnapshot),
+    baselineAvailable: Boolean(baseline),
+    baselineFingerprint: baseline ? operationContentFingerprint(baseline) : "",
+  };
+}
+
 export function buildOperationContentDraft(task = {}) {
   const business = task.config?.businessRequirement || {};
   const requirements = operationRequirements(task);
-  const closure = operationClosureRange(task, requirements);
+  const trial = operationTrialRange(task, requirements);
   const snapshot = normalizeOperationContentSnapshot({
     batch: {
       code: task.config?.operationBatchCode || task.config?.operationBatch?.code,
@@ -238,8 +500,8 @@ export function buildOperationContentDraft(task = {}) {
       singleMaxSubjects: maximumSubjectCount(task, business),
       paperLanguages: splitOptions(task.config?.paperLanguage || "简体中文"),
       osLanguages: splitOptions(task.config?.systemLanguage || "简体中文"),
-      closureStart: closure.start,
-      closureEnd: closure.end,
+      closureStart: trial.start,
+      closureEnd: trial.end,
     },
     subjects: operationSubjects(task, requirements, business),
   });
@@ -253,8 +515,8 @@ export function buildOperationContentDraft(task = {}) {
     ["configuration.closePaper", snapshot.configuration.closePaper, "缺少封闭制题配置"],
     ["configuration.reviewPaper", snapshot.configuration.reviewPaper, "缺少人工阅卷配置"],
     ["configuration.singleMaxSubjects", snapshot.configuration.singleMaxSubjects, "缺少单科最大科次"],
-    ["configuration.closureStart", snapshot.configuration.closureStart, "缺少内容任务考试开始时间"],
-    ["configuration.closureEnd", snapshot.configuration.closureEnd, "缺少内容任务考试结束时间"],
+    ["configuration.closureStart", snapshot.configuration.closureStart, "缺少内容任务试考开始时间"],
+    ["configuration.closureEnd", snapshot.configuration.closureEnd, "缺少内容任务试考结束时间"],
     ["subjects", snapshot.subjects.length, "缺少科目信息"],
   ];
   for (const [field, value, message] of required) {

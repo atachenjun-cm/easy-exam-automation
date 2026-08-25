@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+
+import { FANWEI_LOCAL_HELPER_VERSION } from "./fanwei_local_helper_version.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const nodeBin = process.execPath;
@@ -99,11 +102,14 @@ for (const platform of ["win-x64", "darwin-x64", "darwin-arm64"]) {
       const installerName = platform === "win-x64" ? "install-windows.bat" : "install-macos.command";
       const expectedFiles = [
         "config.env",
+        "helper-package.json",
         installerName,
         runtimeName,
         "server/fanwei_auto_read.mjs",
         "server/fanwei_local_helper.mjs",
         "server/fanwei_local_helper_cli.mjs",
+        "server/fanwei_local_helper_update.mjs",
+        "server/fanwei_local_helper_version.mjs",
         "server/operation_batch_runner.mjs",
         "server/operation_batch_update_runner.mjs",
         "server/operation_personnel_console_runner.mjs",
@@ -119,6 +125,12 @@ for (const platform of ["win-x64", "darwin-x64", "darwin-arm64"]) {
       }
       assert.equal(fs.existsSync(path.join(outputDir, `${packageName}.zip`)), true);
       assert.match(fs.readFileSync(path.join(packageDir, "config.env"), "utf8"), new RegExp(consoleOrigin.replaceAll(".", "\\.")));
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(packageDir, "helper-package.json"), "utf8")), {
+        schemaVersion: 1,
+        helperVersion: FANWEI_LOCAL_HELPER_VERSION,
+        platform,
+        updateStrategy: "server-files-v1",
+      });
       assert.match(output, new RegExp(`${packageName}\\.zip`));
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
@@ -187,6 +199,10 @@ test("authenticated server downloads a prebuilt helper zip and validates platfor
 
     const unauthenticated = await fetch(`${base}/api/fanwei/helper-installer?platform=windows`, { redirect: "manual" });
     assert.equal(unauthenticated.status, 401);
+    const unauthenticatedManifest = await fetch(
+      `${base}/api/fanwei/helper-update-manifest?platform=windows&currentVersion=${FANWEI_LOCAL_HELPER_VERSION - 1}`,
+    );
+    assert.equal(unauthenticatedManifest.status, 401);
 
     const login = await fetch(`${base}/api/auth/login`, {
       method: "POST",
@@ -196,6 +212,45 @@ test("authenticated server downloads a prebuilt helper zip and validates platfor
     assert.equal(login.status, 200);
     const cookie = login.headers.get("set-cookie")?.split(";")[0] || "";
     assert.ok(cookie);
+
+    const latestManifestResponse = await fetch(
+      `${base}/api/fanwei/helper-update-manifest?platform=windows&currentVersion=${FANWEI_LOCAL_HELPER_VERSION}`,
+      { headers: { Cookie: cookie } },
+    );
+    assert.equal(latestManifestResponse.status, 200);
+    assert.deepEqual(await latestManifestResponse.json(), {
+      updateAvailable: false,
+      currentVersion: FANWEI_LOCAL_HELPER_VERSION,
+      latestVersion: FANWEI_LOCAL_HELPER_VERSION,
+    });
+
+    const updateManifestResponse = await fetch(
+      `${base}/api/fanwei/helper-update-manifest?platform=windows&currentVersion=${FANWEI_LOCAL_HELPER_VERSION - 1}`,
+      { headers: { Cookie: cookie } },
+    );
+    assert.equal(updateManifestResponse.status, 200);
+    const updateManifest = await updateManifestResponse.json();
+    assert.equal(updateManifest.updateAvailable, true);
+    assert.equal(updateManifest.version, FANWEI_LOCAL_HELPER_VERSION);
+    assert.match(updateManifest.packageUrl, new RegExp(`^${base.replaceAll(".", "\\.")}\/api\/fanwei\/helper-update-package\\?token=[0-9a-f]{64}$`));
+    assert.match(updateManifest.sha256, /^[0-9a-f]{64}$/);
+    const updatePackageResponse = await fetch(updateManifest.packageUrl);
+    assert.equal(updatePackageResponse.status, 200);
+    const updatePackage = Buffer.from(await updatePackageResponse.arrayBuffer());
+    assert.equal(createHash("sha256").update(updatePackage).digest("hex"), updateManifest.sha256);
+    const updateZip = path.join(tempDir, "auto-update.zip");
+    fs.writeFileSync(updateZip, updatePackage);
+    assert.deepEqual(JSON.parse(execFileSync(
+      "unzip",
+      ["-p", updateZip, `${packageName}/helper-package.json`],
+      { encoding: "utf8" },
+    )), {
+      schemaVersion: 1,
+      helperVersion: FANWEI_LOCAL_HELPER_VERSION,
+      platform: "win-x64",
+      updateStrategy: "server-files-v1",
+    });
+    assert.equal((await fetch(updateManifest.packageUrl)).status, 404);
 
     const download = await fetch(`${base}/api/fanwei/helper-installer?platform=windows`, {
       headers: { Cookie: cookie },

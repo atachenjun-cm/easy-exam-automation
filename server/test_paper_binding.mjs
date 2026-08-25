@@ -3,11 +3,48 @@ import test from "node:test";
 
 import {
   bindPapersToFormalSession,
+  buildSessionSubjectPaperSnapshot,
   detectSessionPaperBindings,
   validatePaperBinding,
 } from "./paper_binding.mjs";
 
 const MISSING_FORM_CODES_MESSAGE = "科目已创建成功，但未获取到有效试卷 code，无法绑定到考试场次";
+
+test("readback matches bound papers to tenant subjects without changing EasyExam", () => {
+  const snapshot = buildSessionSubjectPaperSnapshot({
+    formsPayload: {
+      session: 435819,
+      forms: [
+        { code: "FORM-1", name: "20260625_01项目管理类-四川公路桥梁建设" },
+        { code: "FORM-2", name: "20260625_02安全环保类-四川公路桥梁建设" },
+      ],
+    },
+    courseListPayload: {
+      status: 0,
+      data: [
+        { code: "20260625-01-01", name: "项目管理类" },
+        { code: "20260625-01-02", name: "安全环保类" },
+        { code: "20260725-01-01", name: "其他科目" },
+      ],
+    },
+  });
+
+  assert.deepEqual(snapshot.courses.map((course) => [course.code, course.name, course.form_codes]), [
+    ["20260625-01-01", "项目管理类", ["FORM-1"]],
+    ["20260625-01-02", "安全环保类", ["FORM-2"]],
+  ]);
+  assert.equal(snapshot.papers.length, 2);
+  assert.deepEqual(snapshot.unmatchedPapers, []);
+});
+
+test("readback keeps a paper visible when its subject cannot be identified", () => {
+  const snapshot = buildSessionSubjectPaperSnapshot({
+    formsPayload: { forms: [{ code: "FORM-X", name: "无法关联的试卷" }] },
+    courseListPayload: { data: [{ code: "COURSE-A", name: "语文" }] },
+  });
+  assert.deepEqual(snapshot.courses, []);
+  assert.deepEqual(snapshot.unmatchedPapers, [{ code: "FORM-X", name: "无法关联的试卷" }]);
+});
 
 test("matches the active paper by course code before posting it to the formal session", async () => {
   const calls = [];
@@ -187,6 +224,114 @@ test("uses subject code first and workflow serial plus name as the multi-subject
   assert.equal(calls.filter((call) => call.options.method === "POST").length, 2);
 });
 
+test("adds formal exam date plus subject name as a multi-subject fallback", async () => {
+  const calls = [];
+  const logs = [];
+  const requestJson = async (_login, url, options) => {
+    calls.push({ url: String(url), options });
+    if (String(url).includes("/tenant/api/form/list/")) {
+      return {
+        form_list: [
+          { code: "FORM-MANAGER", name: "20260820_01设备副经理-蜀道投资集团有限责任公司招聘笔试（四川蜀能矿产公司）" },
+          { code: "FORM-ENGINEER", name: "20260820_02设备工程师-蜀道投资集团有限责任公司招聘笔试（四川蜀能矿产公司）" },
+          { code: "FORM-PURCHASE", name: "20260820_04采购专员-蜀道投资集团有限责任公司招聘笔试（四川蜀能矿产公司）" },
+          { code: "FORM-TECHNICIAN", name: "20260820_03设备技术员-蜀道投资集团有限责任公司招聘笔试（四川蜀能矿产公司）" },
+        ],
+      };
+    }
+    return { __tenantResponse: true, httpStatus: 200, body: {} };
+  };
+
+  const result = await bindPapersToFormalSession({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "435773",
+    courses: [
+      { name: "设备副经理", code: "20260820-01-01" },
+      { name: "设备技术员", code: "20260820-01-02" },
+      { name: "设备工程师", code: "20260820-01-03" },
+      { name: "采购专员", code: "20260820-01-04" },
+    ],
+    workflowSerial: "R0043186",
+    examDate: "2026-08-20 19:00",
+    requestJson,
+    emitLog: (message) => logs.push(message),
+  });
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.results.map((item) => item.form_codes), [
+    ["FORM-MANAGER"],
+    ["FORM-TECHNICIAN"],
+    ["FORM-ENGINEER"],
+    ["FORM-PURCHASE"],
+  ]);
+  assert.equal(calls.filter((call) => call.options.method === "PUT").length, 4);
+  assert.equal(calls.filter((call) => call.options.method === "POST").length, 4);
+  assert.ok(logs.some((message) => message.includes("按考试日期及科目名称“20260820 / 设备副经理”")));
+});
+
+test("date plus subject fallback ignores an active paper for the same subject on another exam date", async () => {
+  const requestJson = async (_login, url) => {
+    if (String(url).includes("/tenant/api/form/list/")) {
+      return {
+        form_list: [
+          { code: "FORM-OLD", name: "20260819_01设备副经理-旧考试" },
+          { code: "FORM-CURRENT", name: "20260820_01设备副经理-当前考试" },
+          { code: "FORM-CURRENT-2", name: "20260820_02采购专员-当前考试" },
+        ],
+      };
+    }
+    return { __tenantResponse: true, httpStatus: 200, body: {} };
+  };
+
+  const result = await bindPapersToFormalSession({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "S-DATE",
+    courses: [
+      { name: "设备副经理", code: "CURRENT-C1" },
+      { name: "采购专员", code: "CURRENT-C2" },
+    ],
+    examDate: "2026-08-20 19:00",
+    requestJson,
+    emitLog: () => {},
+  });
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.results[0].form_codes, ["FORM-CURRENT"]);
+});
+
+test("date plus subject fallback stays manual when the same exam date has duplicate subject papers", async () => {
+  const calls = [];
+  const requestJson = async (_login, url, options) => {
+    calls.push({ url: String(url), options });
+    return {
+      form_list: [
+        { code: "FORM-A", name: "20260820_01设备副经理-A卷" },
+        { code: "FORM-B", name: "20260820_02设备副经理-B卷" },
+      ],
+    };
+  };
+
+  const result = await bindPapersToFormalSession({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "S-DUPLICATE",
+    courses: [
+      { name: "设备副经理", code: "CURRENT-C1" },
+      { name: "采购专员", code: "CURRENT-C2" },
+    ],
+    examDate: "2026-08-20 19:00",
+    requestJson,
+    emitLog: () => {},
+  });
+
+  assert.equal(result.status, "waiting_manual");
+  assert.equal(result.duplicatePaperMatches[0].matched_by, "exam_date_and_course_name");
+  assert.deepEqual(result.duplicatePaperMatches[0].candidates.map((paper) => paper.code), ["FORM-A", "FORM-B"]);
+  assert.equal(calls.some((call) => call.options.method === "PUT" || call.options.method === "POST"), false);
+});
+
 test("uses the closest subject name inside the shared workflow serial candidates", async () => {
   const logs = [];
   const requestJson = async (_login, url) => {
@@ -282,6 +427,102 @@ test("fuzzily matches a unique paper when most of the course name appears in the
     "20260802_R0042726_交通设计院公司2026年市政与建筑设计分院中层管理人员公开竞聘",
   ]);
   assert.ok(logs.some((message) => message.includes("已按科目名称近似")));
+});
+
+test("selects the closest paper title instead of the longer title that merely contains the course name", async () => {
+  const calls = [];
+  const logs = [];
+  const requestJson = async (_login, url, options) => {
+    calls.push({ url: String(url), options });
+    if (String(url).includes("/tenant/api/form/list/")) {
+      return {
+        form_list: [
+          {
+            code: "FORM-BROAD",
+            name: "蜀道OPA测评-专业人士-情绪倾向报告+全方位胜任力报告（30Min）",
+          },
+          {
+            code: "FORM-CLOSEST",
+            name: "OPA测评蜀道SHL-专业人士-情绪倾向报告（30Min）",
+          },
+        ],
+      };
+    }
+    return { __tenantResponse: true, httpStatus: 200, body: { ok: true } };
+  };
+
+  const result = await bindPapersToFormalSession({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "434954",
+    courses: [{ name: "OPA测评专业人士情绪倾向", code: "20260812-01-01" }],
+    requestJson,
+    emitLog: (message) => logs.push(message),
+  });
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.results[0].form_codes, ["FORM-CLOSEST"]);
+  assert.deepEqual(result.results[0].paper_names, [
+    "OPA测评蜀道SHL-专业人士-情绪倾向报告（30Min）",
+  ]);
+  assert.deepEqual(JSON.parse(calls[2].options.body), {
+    course_code: "20260812-01-01",
+    form_codes: ["FORM-CLOSEST"],
+  });
+  assert.ok(logs.some((message) => message.includes("已按科目名称近似")));
+});
+
+test("waits for manual confirmation when paper title similarity is tied", async () => {
+  const calls = [];
+  const requestJson = async (_login, url, options) => {
+    calls.push({ url: String(url), options });
+    return {
+      form_list: [
+        { code: "FORM-A", name: "综合能力正式卷" },
+        { code: "FORM-B", name: "综合能力正式卷" },
+      ],
+    };
+  };
+
+  const result = await bindPapersToFormalSession({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "S-01",
+    courses: [{ name: "综合能力", code: "20260812-02-01" }],
+    requestJson,
+    emitLog: () => {},
+  });
+
+  assert.equal(result.status, "waiting_manual");
+  assert.deepEqual(result.missingCourseCodes, ["20260812-02-01"]);
+  assert.equal(result.duplicatePaperMatches[0].matched_by, "course_name_fuzzy");
+  assert.equal(calls.some((call) => call.options.method === "PUT" || call.options.method === "POST"), false);
+});
+
+test("prefers full course-name coverage over a shorter partial title", async () => {
+  const requestJson = async (_login, url) => {
+    if (String(url).includes("/tenant/api/form/list/")) {
+      return {
+        form_list: [
+          { code: "FORM-PARTIAL", name: "专业人士情绪倾向" },
+          { code: "FORM-FULL", name: "OPA测评SHL专业人士情绪倾向报告（30Min）" },
+        ],
+      };
+    }
+    return { __tenantResponse: true, httpStatus: 200, body: { ok: true } };
+  };
+
+  const result = await bindPapersToFormalSession({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "434954",
+    courses: [{ name: "OPA测评专业人士情绪倾向", code: "20260812-01-01" }],
+    requestJson,
+    emitLog: () => {},
+  });
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.results[0].form_codes, ["FORM-FULL"]);
 });
 
 test("falls back to a unique Fanwei serial when course code and course name do not appear", async () => {

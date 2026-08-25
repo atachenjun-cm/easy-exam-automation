@@ -121,12 +121,13 @@ function taskExamRequirements(task = {}) {
 
 function requirementSubjects(requirement = {}) {
   const values = [
-    ...text(requirement.fields?.["科目信息"]).split(/[、,，;；]+/),
+    ...text(requirement.fields?.["科目信息"]).split(/[\n、,，;；]+/),
     ...(Array.isArray(requirement.config?.courses) ? requirement.config.courses : [])
       .map((course) => typeof course === "object" && course !== null ? course.name : course),
-    ...(Array.isArray(requirement.config?.subjects) ? requirement.config.subjects : []),
+    ...(Array.isArray(requirement.config?.subjects) ? requirement.config.subjects : [])
+      .map((subject) => typeof subject === "object" && subject !== null ? subject.name : subject),
   ].map((item) => text(item)).filter(Boolean);
-  return [...new Set(values)].join("、");
+  return [...new Set(values)];
 }
 
 function successfulStepResult(task = {}, stepKey, requirementIndex, requirementCount) {
@@ -174,14 +175,22 @@ function contentExamRows({ task = {}, subjects = [], projectName = "", formalExa
     );
     const formalCourses = successfulStepResult(task, "course_create", requirementIndex, requirements.length)?.courses;
     const formalRemark = savedRemark(`formal:${requirementIndex}`) ?? firstValue(tenantRemark, fields["备注"], config.remark);
-    rows.push({
-      examName: firstValue(fields["考试名称"], config.examName, formalSession?.name, projectName, `考试 ${requirementIndex + 1}`),
-      time: formalTime,
-      subject: requirementSubjects(requirement),
-      duration: durationMinutes(formalTime),
-      remark: contentTaskRemarkWithCourseCodes(formalRemark, formalCourses),
-      order: requirementIndex * 2,
-      start: dateTimeTimestamp(dateTimeRange(formalTime).start),
+    const requirementSubjectNames = requirementSubjects(requirement);
+    (requirementSubjectNames.length ? requirementSubjectNames : [""]).forEach((subject, subjectIndex) => {
+      const matchingCourses = (Array.isArray(formalCourses) ? formalCourses : [])
+        .filter((course) => text(course?.name || course?.courseName) === subject);
+      const subjectCourses = matchingCourses.length
+        ? matchingCourses
+        : (formalCourses?.length === requirementSubjectNames.length ? [formalCourses[subjectIndex]] : []);
+      rows.push({
+        examName: firstValue(fields["考试名称"], config.examName, formalSession?.name, projectName, `考试 ${requirementIndex + 1}`),
+        time: formalTime,
+        subject,
+        duration: durationMinutes(formalTime),
+        remark: contentTaskRemarkWithCourseCodes(formalRemark, subjectCourses),
+        order: requirementIndex * 1_000 + subjectIndex,
+        start: dateTimeTimestamp(dateTimeRange(formalTime).start),
+      });
     });
 
   });
@@ -238,6 +247,118 @@ function renderInfoRows(rows) {
   return rows.map(([label, value]) => `<tr><th>${escapeHtml(label)}</th><td>${escapeHtml(display(value))}</td></tr>`).join("");
 }
 
+function contentSnapshot({ subject = "", customerName = "", projectManager = "", basicInfo = [], examRows = [] } = {}) {
+  return {
+    schemaVersion: 2,
+    subject: text(subject),
+    customerName: text(customerName),
+    projectManager: text(projectManager),
+    basicInfo: Object.fromEntries(basicInfo.map(([label, value]) => [label, text(value)])),
+    examRows: examRows.map((row) => ({
+      examName: text(row.examName),
+      time: text(row.time),
+      subject: text(row.subject),
+      duration: text(row.duration),
+      remark: text(row.remark),
+    })),
+  };
+}
+
+function contentEmailLatestSnapshot(task = {}) {
+  const contentEmail = task.config?.contentRequirementEmail || {};
+  const history = Array.isArray(contentEmail.history) ? contentEmail.history : [];
+  const latestSnapshot = history.at(-1)?.contentSnapshot;
+  if (latestSnapshot) return latestSnapshot;
+  return history.length <= 1 ? (contentEmail.firstContentSnapshot || null) : null;
+}
+
+function contentEmailHasSent(task = {}) {
+  const contentEmail = task.config?.contentRequirementEmail || {};
+  return Boolean(
+    (Array.isArray(contentEmail.history) && contentEmail.history.length)
+    || text(contentEmail.lastSentAt),
+  );
+}
+
+function changedValue(label, before, after, prefix = "") {
+  if (text(before) === text(after)) return "";
+  return `${prefix}${label}：由“${display(before)}”调整为“${display(after)}”`;
+}
+
+function examRowKeys(rows = []) {
+  const counts = new Map();
+  return new Map(rows.map((row) => {
+    const base = `${text(row.examName)}\u0000${text(row.subject)}`;
+    const occurrence = (counts.get(base) || 0) + 1;
+    counts.set(base, occurrence);
+    return [`${base}\u0000${occurrence}`, row];
+  }));
+}
+
+export function diffContentRequirementEmailSnapshots(baseline = {}, current = {}) {
+  const changes = [
+    ...(Object.hasOwn(baseline, "subject")
+      ? [changedValue("邮件主题", baseline.subject, current.subject)]
+      : []),
+    changedValue("客户名称", baseline.customerName, current.customerName),
+    changedValue("项目经理", baseline.projectManager, current.projectManager),
+  ].filter(Boolean);
+  const beforeInfo = baseline.basicInfo || {};
+  const afterInfo = current.basicInfo || {};
+  for (const label of new Set([...Object.keys(beforeInfo), ...Object.keys(afterInfo)])) {
+    const change = changedValue(label, beforeInfo[label], afterInfo[label]);
+    if (change) changes.push(change);
+  }
+
+  const beforeRows = examRowKeys(Array.isArray(baseline.examRows) ? baseline.examRows : []);
+  const afterRows = examRowKeys(Array.isArray(current.examRows) ? current.examRows : []);
+  const rowLabels = { examName: "考试名称", time: "考试时间", subject: "科目名称", duration: "时长（分钟）", remark: "备注" };
+  for (const [key, row] of beforeRows) {
+    if (afterRows.has(key)) continue;
+    changes.push(`删除科目：考试名称“${display(row.examName)}”，考试时间“${display(row.time)}”，科目名称“${display(row.subject)}”，时长（分钟）“${display(row.duration)}”，备注“${display(row.remark)}”`);
+  }
+  for (const [key, row] of afterRows) {
+    const before = beforeRows.get(key);
+    if (!before) {
+      changes.push(`新增科目：考试名称“${display(row.examName)}”，考试时间“${display(row.time)}”，科目名称“${display(row.subject)}”，时长（分钟）“${display(row.duration)}”，备注“${display(row.remark)}”`);
+      continue;
+    }
+    const prefix = `${display(row.subject)} / `;
+    for (const field of ["time", "duration", "remark"]) {
+      const change = changedValue(rowLabels[field], before[field], row[field], prefix);
+      if (change) changes.push(change);
+    }
+  }
+  const beforeOrder = [...beforeRows.keys()].filter((key) => afterRows.has(key));
+  const afterOrder = [...afterRows.keys()].filter((key) => beforeRows.has(key));
+  if (beforeOrder.length > 1 && beforeOrder.join("\n") !== afterOrder.join("\n")) {
+    const orderText = (keys, rows) => keys.map((key) => {
+      const row = rows.get(key) || {};
+      return `${display(row.subject)}（${display(row.examName)}）`;
+    }).join(" → ");
+    changes.push(`科目顺序：由“${orderText(beforeOrder, beforeRows)}”调整为“${orderText(afterOrder, afterRows)}”`);
+  }
+  return changes;
+}
+
+function fallbackContentUpdateFromHistory(task = {}) {
+  const contentEmailHistory = Array.isArray(task.config?.contentRequirementEmail?.history)
+    ? task.config.contentRequirementEmail.history
+    : [];
+  const latestSentAt = Date.parse(contentEmailHistory.at(-1)?.sentAt || task.config?.contentRequirementEmail?.lastSentAt || "");
+  const sourceHistory = Array.isArray(task.config?.projectSourceChangeHistory)
+    ? task.config.projectSourceChangeHistory
+    : [];
+  const changes = sourceHistory
+    .filter((record) => !Number.isFinite(latestSentAt) || Date.parse(record?.changedAt || "") >= latestSentAt)
+    .flatMap((record) => (Array.isArray(record?.changes) ? record.changes : []))
+    .map((change) => changedValue(text(change?.field) || "内容", change?.before, change?.after))
+    .filter(Boolean);
+  return changes.length
+    ? [...new Set(changes)].join("\n")
+    : "最近一次发送记录未保存内容快照，请人工填写并核对本次内容更新";
+}
+
 export function normalizeEmailSettings(input = {}, existing = {}) {
   const password = input.clearPassword === true
     ? ""
@@ -292,7 +413,7 @@ export async function writeEmailSettingsFile(filePath, settings) {
   }
 }
 
-export function buildContentRequirementEmail({ task = {}, requirement = {} } = {}) {
+export function buildContentRequirementEmail({ task = {}, requirement = {}, contentUpdate = "" } = {}) {
   const business = task.config?.businessRequirement || {};
   const examRequirement = task.config?.examRequirement || {};
   const requirementConfig = examRequirement.config || {};
@@ -362,9 +483,11 @@ export function buildContentRequirementEmail({ task = {}, requirement = {} } = {
   const requirementVersion = firstValue(requirement?.latest?.version, examRequirement.version);
   const subjects = subjectRows(firstValue(latest.subjects, latest.examSubjects, requirementConfig.courses, requirementConfig.subjects, requirementFields["科目信息"], legacyBusiness.subjects));
   const examRows = contentExamRows({ task, subjects, projectName: examName, formalExamTime, trialExamTime });
-  const sendCount = Array.isArray(task.config?.contentRequirementEmail?.history)
+  const historyCount = Array.isArray(task.config?.contentRequirementEmail?.history)
     ? task.config.contentRequirementEmail.history.length
     : 0;
+  const sendCount = historyCount || (contentEmailHasSent(task) ? 1 : 0);
+  const normalizedContentUpdate = sendCount ? text(contentUpdate) : "";
   const title = `${projectManager ? `${projectManager}_` : ""}${batchName || projectName || task.taskId || "未命名项目"}、内容任务单`;
   const basicInfo = [
     ["项目编码", projectCode],
@@ -397,6 +520,7 @@ export function buildContentRequirementEmail({ task = {}, requirement = {} } = {
     "内容任务单",
     "",
     `发送记录：${sendCount ? "再次发送" : "首次发送"}`,
+    ...(sendCount ? [`内容更新：${display(normalizedContentUpdate)}`] : []),
     `客户名称：${display(customerName)}`,
     `项目经理：${display(projectManager)}`,
     "",
@@ -410,11 +534,35 @@ export function buildContentRequirementEmail({ task = {}, requirement = {} } = {
     "系统自动发送，请勿回复本邮件，有问题请联系项目经理。",
   ];
   const subjectHtml = examRows.map((item) => `<tr><td>${escapeHtml(display(item.examName))}</td><td>${escapeHtml(display(item.time))}</td><td>${escapeHtml(display(item.subject))}</td><td>${escapeHtml(display(item.duration))}</td><td>${escapeHtml(display(item.remark))}</td></tr>`).join("");
-  const html = `<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;padding:24px;background:#f5f7fb;color:#1f2937;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}.mail{max-width:1100px;margin:0 auto;background:#fff;border:1px solid #d9e2ef}.head{padding:22px 28px;background:#1867b7;color:#fff}.head h1{margin:0;font-size:22px}.section{padding:20px 28px 0}.section h2{margin:0 0 10px;font-size:17px;color:#1d3656}table{width:100%;border-collapse:collapse}th,td{padding:9px 10px;border:1px solid #d9e2ef;text-align:left;vertical-align:top}th{width:34%;background:#f3f7fc;font-weight:600}.subject th{width:auto}.foot{margin-top:20px;padding:16px 28px;background:#f3f7fc;color:#607086;font-size:12px}</style></head><body><main class="mail"><header class="head"><h1>内容任务单</h1></header><section class="section"><p>发送记录：${sendCount ? "再次发送" : "首次发送"}</p><p>客户名称：${escapeHtml(display(customerName))}<br>项目经理：${escapeHtml(display(projectManager))}</p><h2>基本信息</h2><table>${renderInfoRows(basicInfo)}</table></section><section class="section"><h2>科目信息</h2><table class="subject"><thead><tr><th>考试名称</th><th>考试时间</th><th>科目名称</th><th>时长（分钟）</th><th>备注</th></tr></thead><tbody>${subjectHtml}</tbody></table></section><footer class="foot">系统自动发送，请勿回复本邮件，有问题请联系项目经理。</footer></main></body></html>`;
+  const updateHtml = normalizedContentUpdate
+    ? `<div class="update"><strong>内容更新：</strong><div>${escapeHtml(normalizedContentUpdate).replaceAll("\n", "<br>")}</div></div>`
+    : "";
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;padding:24px;background:#f5f7fb;color:#1f2937;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}.mail{max-width:1100px;margin:0 auto;background:#fff;border:1px solid #d9e2ef}.head{padding:22px 28px;background:#1867b7;color:#fff}.head h1{margin:0;font-size:22px}.section{padding:20px 28px 0}.section h2{margin:0 0 10px;font-size:17px;color:#1d3656}.update{margin:10px 0 14px;padding:12px 14px;border-left:4px solid #d78b00;background:#fff8e8}.update strong{display:block;margin-bottom:4px;color:#7a4b00}table{width:100%;border-collapse:collapse}th,td{padding:9px 10px;border:1px solid #d9e2ef;text-align:left;vertical-align:top}th{width:34%;background:#f3f7fc;font-weight:600}.subject th{width:auto}.foot{margin-top:20px;padding:16px 28px;background:#f3f7fc;color:#607086;font-size:12px}</style></head><body><main class="mail"><header class="head"><h1>内容任务单</h1></header><section class="section"><p>发送记录：${sendCount ? "再次发送" : "首次发送"}</p>${updateHtml}<p>客户名称：${escapeHtml(display(customerName))}<br>项目经理：${escapeHtml(display(projectManager))}</p><h2>基本信息</h2><table>${renderInfoRows(basicInfo)}</table></section><section class="section"><h2>科目信息</h2><table class="subject"><thead><tr><th>考试名称</th><th>考试时间</th><th>科目名称</th><th>时长（分钟）</th><th>备注</th></tr></thead><tbody>${subjectHtml}</tbody></table></section><footer class="foot">系统自动发送，请勿回复本邮件，有问题请联系项目经理。</footer></main></body></html>`;
   return {
     subject: title,
     text: lines.join("\n"),
     html,
+    contentSnapshot: contentSnapshot({ subject: title, customerName, projectManager, basicInfo, examRows }),
+  };
+}
+
+export function contentRequirementEmailPreview({ task = {}, requirement = {} } = {}) {
+  const history = Array.isArray(task.config?.contentRequirementEmail?.history)
+    ? task.config.contentRequirementEmail.history
+    : [];
+  const currentSnapshot = buildContentRequirementEmail({ task, requirement }).contentSnapshot;
+  const hasSent = contentEmailHasSent(task);
+  if (!hasSent) return { isResend: false, sendCount: 0, suggestedUpdate: "", currentSnapshot };
+  const baseline = contentEmailLatestSnapshot(task);
+  const changes = baseline ? diffContentRequirementEmailSnapshots(baseline, currentSnapshot) : [];
+  return {
+    isResend: true,
+    sendCount: history.length || 1,
+    suggestedUpdate: baseline
+      ? (changes.length ? changes.join("\n") : "与上次发送内容一致")
+      : fallbackContentUpdateFromHistory(task),
+    currentSnapshot,
+    baselineAvailable: Boolean(baseline),
   };
 }
 
@@ -432,6 +580,7 @@ export function contentRequirementEmailFingerprint({ task = {}, requirement = {}
   const message = buildContentRequirementEmail({ task: stableTask, requirement });
   const operationalText = message.text
     .replace(/^发送记录：.*$/m, "")
+    .replace(/^内容更新：.*$/m, "")
     .replace(/^需求版本：.*$/m, "");
   return createHash("sha256").update(`${message.subject}\n${operationalText}`).digest("hex");
 }
@@ -441,6 +590,7 @@ export async function sendContentRequirementEmail({
   requirement = {},
   recipients,
   ccRecipients,
+  contentUpdate,
   emailSettings,
   sendMail = sendSmtpMail,
 } = {}) {
@@ -451,7 +601,15 @@ export async function sendContentRequirementEmail({
   if (!settings.fromEmail) throw new Error("请先配置发件邮箱");
   if (!settings.username) throw new Error("请先配置 SMTP 用户名");
   if (!settings.password) throw new Error("请先配置 SMTP 密码或应用密码");
-  const message = buildContentRequirementEmail({ task, requirement });
+  const message = buildContentRequirementEmail({ task, requirement, contentUpdate });
+  const sendHistory = Array.isArray(task.config?.contentRequirementEmail?.history)
+    ? task.config.contentRequirementEmail.history
+    : [];
+  const previousSendCount = Math.max(
+    sendHistory.length,
+    ...sendHistory.map((item) => Number(item?.sendNumber || 0)).filter(Number.isFinite),
+    contentEmailHasSent(task) ? 1 : 0,
+  );
   const sent = await sendMail({
     settings,
     from: { email: settings.fromEmail, name: settings.fromName },
@@ -468,5 +626,9 @@ export async function sendContentRequirementEmail({
     subject: message.subject,
     messageId: sent?.messageId || "",
     sourceFingerprint: contentRequirementEmailFingerprint({ task, requirement }),
+    sendType: contentEmailHasSent(task) ? "再次发送" : "首次发送",
+    sendNumber: previousSendCount + 1,
+    contentUpdate: contentEmailHasSent(task) ? text(contentUpdate) : "",
+    contentSnapshot: message.contentSnapshot,
   };
 }

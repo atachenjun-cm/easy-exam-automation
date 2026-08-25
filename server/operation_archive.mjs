@@ -73,30 +73,29 @@ function nextDate(value) {
   return date.toISOString().slice(0, 10);
 }
 
-function shanghaiDate(now = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(now);
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${values.year}-${values.month}-${values.day}`;
-}
-
 export function operationArchiveActualDataWindow(task = {}, options = {}) {
   const endDates = formalSessions(task)
     .map((session) => normalizeDate(session?.end || session?.end_time))
     .filter(Boolean)
     .sort();
-  if (!endDates.length) return { ready: false, lastFormalDate: "", availableDate: "" };
+  if (!endDates.length) {
+    return { ready: false, lastFormalDate: "", availableDate: "", availableAt: "", availableText: "" };
+  }
   const lastFormalDate = endDates.at(-1);
   const availableDate = nextDate(lastFormalDate);
-  const today = normalizeDate(options.today) || shanghaiDate(options.now ? new Date(options.now) : new Date());
+  const availableAt = availableDate ? `${availableDate}T08:00:00+08:00` : "";
+  const availableText = availableDate ? `${availableDate} 08:00` : "";
+  const current = options.now
+    ? new Date(options.now)
+    : options.today
+      ? new Date(`${normalizeDate(options.today)}T00:00:00+08:00`)
+      : new Date();
   return {
-    ready: Boolean(availableDate && today >= availableDate),
+    ready: Boolean(availableAt && Number.isFinite(current.getTime()) && current.getTime() >= Date.parse(availableAt)),
     lastFormalDate,
     availableDate,
+    availableAt,
+    availableText,
   };
 }
 
@@ -376,7 +375,7 @@ export function buildOperationArchiveDraft(task = {}, options = {}) {
     warnings.push({
       code: "ARCHIVE_ACTUAL_RESULT_NOT_READY",
       field: "attendedSubjects",
-      message: `正式考试数据将在 ${text(options.actuals.availableDate) || "考试结束次日"} 通过接口获取`,
+      message: `正式考试数据将在 ${text(options.actuals.availableText) || "考试结束次日 08:00"} 通过接口获取`,
     });
   }
   const actualOrder = Object.keys(fields);

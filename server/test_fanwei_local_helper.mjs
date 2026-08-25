@@ -14,7 +14,12 @@ import {
   isAllowedHelperOrigin,
   normalizeAllowedOrigins,
 } from "./fanwei_local_helper.mjs";
-import { helperConfigFromEnv, mergeHelperConfigEnv } from "./fanwei_local_helper_cli.mjs";
+import {
+  helperConfigFromEnv,
+  mergeHelperConfigEnv,
+  scheduleFanweiHelperRestart,
+} from "./fanwei_local_helper_cli.mjs";
+import { FANWEI_LOCAL_HELPER_VERSION } from "./fanwei_local_helper_version.mjs";
 
 const allowedOrigin = "http://172.16.13.214:8765";
 
@@ -197,6 +202,38 @@ test("helperConfigFromEnv trims and normalizes explicit settings", () => {
     chromePort: 29222,
     allowedOrigins: [allowedOrigin, "https://console.example.com"],
     runtimeDir,
+  });
+});
+
+test("helper restart scheduling leaves macOS to LaunchAgent and detaches Windows restart", () => {
+  let spawnCalls = 0;
+  assert.deepEqual(scheduleFanweiHelperRestart({
+    platform: "darwin",
+    runtimeDir: "/tmp/YikaoFanweiHelper",
+    spawnImpl: () => { spawnCalls += 1; },
+  }), { strategy: "launchd-keepalive" });
+  assert.equal(spawnCalls, 0);
+
+  const spawned = [];
+  const child = { pid: 321, unrefCalled: false, unref() { this.unrefCalled = true; } };
+  const result = scheduleFanweiHelperRestart({
+    platform: "win32",
+    runtimeDir: "C:\\Users\\tester\\YikaoFanweiHelper",
+    currentPid: 123,
+    spawnImpl: (command, args, options) => {
+      spawned.push({ command, args, options });
+      return child;
+    },
+  });
+  assert.deepEqual(result, { strategy: "windows-detached-restart", pid: 321 });
+  assert.equal(child.unrefCalled, true);
+  assert.equal(spawned[0].command, "powershell.exe");
+  assert.match(spawned[0].args.at(-1), /Wait-Process -Id \$oldPid/);
+  assert.match(spawned[0].args.at(-1), /fanwei_local_helper_cli\.mjs/);
+  assert.deepEqual(spawned[0].options, {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
   });
 });
 
@@ -491,7 +528,7 @@ test("GET /health reports platform and Chrome/Fanwei status with strict CORS", a
   assert.deepEqual(await response.json(), {
     available: true,
     platform: "darwin",
-    helperVersion: 8,
+    helperVersion: FANWEI_LOCAL_HELPER_VERSION,
     capabilities: {
       fanweiRead: true,
       scoreStampApplication: true,
@@ -501,6 +538,7 @@ test("GET /health reports platform and Chrome/Fanwei status with strict CORS", a
       operationBatchUpdate: true,
       operationArchive: true,
       operationContentSync: true,
+      selfUpdate: true,
     },
     chromeConnected: true,
     fanweiTabFound: true,
@@ -521,7 +559,7 @@ test("GET /health can be opened directly for local helper diagnostics", async (t
   assert.deepEqual(await response.json(), {
     available: true,
     platform: "darwin",
-    helperVersion: 8,
+    helperVersion: FANWEI_LOCAL_HELPER_VERSION,
     capabilities: {
       fanweiRead: true,
       scoreStampApplication: true,
@@ -531,10 +569,58 @@ test("GET /health can be opened directly for local helper diagnostics", async (t
       operationBatchUpdate: true,
       operationArchive: true,
       operationContentSync: true,
+      selfUpdate: true,
     },
     chromeConnected: true,
     fanweiTabFound: false,
   });
+});
+
+test("POST /update blocks operations until restart and can recover if restart scheduling fails", async (t) => {
+  let received;
+  const updateResult = {
+    fromVersion: FANWEI_LOCAL_HELPER_VERSION,
+    toVersion: FANWEI_LOCAL_HELPER_VERSION + 1,
+    backupServerDir: "/tmp/backup",
+    restartRequired: true,
+  };
+  const { server, baseUrl } = await startHelper({
+    fetchImpl: async () => jsonResponse([]),
+    runHelperUpdateImpl: async (payload, options) => {
+      received = { payload, options };
+      return updateResult;
+    },
+  });
+  t.after(() => stopHelper(server));
+  const updateApplied = once(server, "helper-update-applied");
+  const payload = {
+    version: FANWEI_LOCAL_HELPER_VERSION + 1,
+    packageUrl: `${allowedOrigin}/api/fanwei/helper-update-package?token=${"a".repeat(64)}`,
+    sha256: "b".repeat(64),
+  };
+
+  const response = await helperFetch(baseUrl, "/update", { method: "POST", body: payload });
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), { ok: true, update: updateResult });
+  const [appliedUpdate, controls] = await updateApplied;
+  assert.deepEqual(appliedUpdate, updateResult);
+  assert.deepEqual(received.payload, payload);
+  assert.equal(received.options.currentVersion, FANWEI_LOCAL_HELPER_VERSION);
+  assert.deepEqual(received.options.allowedOrigins, [allowedOrigin]);
+
+  const blocked = await helperFetch(baseUrl, "/operation-content/sync", {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(blocked.status, 409);
+  assert.equal((await blocked.json()).error.code, "helper_update_in_progress");
+
+  controls.resumeAfterRestartFailure();
+  const recovered = await helperFetch(baseUrl, "/fanwei/read", {
+    method: "POST",
+    body: { serialNo: "EA123456" },
+  });
+  assert.notEqual((await recovered.json()).error?.code, "helper_update_in_progress");
 });
 
 test("POST /operation-content/sync runs the guarded local content synchronizer", async (t) => {
@@ -549,9 +635,16 @@ test("POST /operation-content/sync runs the guarded local content synchronizer",
       receivedDraft = { draft, options };
       return {
         status: "success",
-        verified: true,
-        snapshot: draft,
-        checkpoints: ["content_readback_verified"],
+        contentReady: true,
+        batch: draft.batch,
+        dispatch: {
+          status: "sent",
+          confirmed: true,
+          projectCode: options.dispatchTarget.projectCode,
+          recipients: options.dispatchTarget.recipients,
+          cc: options.dispatchTarget.cc,
+        },
+        checkpoints: ["content_draft_complete", "content_fields_ready", "send_item_response_verified"],
       };
     },
   });
@@ -571,15 +664,34 @@ test("POST /operation-content/sync runs the guarded local content synchronizer",
       requestId: "00000000-0000-4000-8000-000000000036",
       baseUrl: "https://dashboard.ata.net.cn",
       draft,
+      sendKind: "resend",
+      changeSummary: "调整考试日期和科目",
+      dispatchTarget: {
+        projectCode: "F0020795",
+        recipients: ["chenjun@ata.net.cn"],
+        cc: [],
+        directoryGroups: {
+          recipients: [{
+            name: "项目实施一部(项目经理)",
+            emails: ["chenjun@ata.net.cn"],
+          }],
+          cc: [],
+        },
+      },
     },
   });
   assert.equal(response.status, 200);
   const payload = await response.json();
   assert.equal(payload.operationContentSync.status, "success");
-  assert.equal(payload.operationContentSync.verified, true);
+  assert.equal(payload.operationContentSync.contentReady, true);
+  assert.equal(payload.operationContentSync.dispatch.status, "sent");
   assert.equal(receivedDraft.draft.batch.code, "EZT261036");
   assert.equal(receivedDraft.options.baseUrl, "https://dashboard.ata.net.cn");
   assert.deepEqual(receivedDraft.options.context, { kind: "operation-context" });
+  assert.equal(receivedDraft.options.confirmDispatch, true);
+  assert.equal(receivedDraft.options.sendKind, "resend");
+  assert.equal(receivedDraft.options.changeSummary, "调整考试日期和科目");
+  assert.deepEqual(receivedDraft.options.dispatchTarget.recipients, ["chenjun@ata.net.cn"]);
 });
 
 test("GET /health aborts a stalled Chrome DevTools request", async (t) => {
@@ -1220,8 +1332,11 @@ test("POST /operation-archive/inspect asks for schedules only after checking the
   assert.equal(archiveCalled, true);
 });
 
-test("POST /operation-batch/create uses the local Chrome and deduplicates a prepared request", async (t) => {
-  const context = { name: "local-operation-context" };
+test("POST /operation-batch/create searches by code once, then schedules and publishes on that detail page", async (t) => {
+  const detailPage = {
+    url: () => "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-3",
+  };
+  const context = { name: "local-operation-context", pages: () => [detailPage] };
   let connectCalls = 0;
   let creationCalls = 0;
   let initializationCalls = 0;
@@ -1245,6 +1360,8 @@ test("POST /operation-batch/create uses the local Chrome and deduplicates a prep
       assert.equal(options.publishAfterCreate, false);
       return {
         operationBatchCode: "EZT260003",
+        batchName: "创建阶段草稿名",
+        detailUrl: "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-3",
         status: "created_unpublished",
       };
     },
@@ -1252,18 +1369,34 @@ test("POST /operation-batch/create uses the local Chrome and deduplicates a prep
       initializationCalls += 1;
       sequence.push("schedule");
       assert.equal(instruction.batch.code, "EZT260003");
+      assert.equal(instruction.batch.name, "运控实际批次名");
+      assert.equal(instruction.desiredSnapshot.batchName, "运控实际批次名");
       assert.strictEqual(options.context, context);
+      assert.strictEqual(options.page, detailPage);
+      assert.equal(options.reuseVerifiedDetail, true);
+      assert.equal(
+        options.verifiedDetailUrl,
+        "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-3",
+      );
       return { verified: true, snapshot: { schedules: [] } };
     },
     runOperationBatchReconciliationImpl: async (draft, options) => {
-      sequence.push("publish");
+      sequence.push("locate");
       assert.equal(draft.fields.batchName.value, "本机批次");
       assert.equal(options.operationBatchCode, "EZT260003");
-      assert.equal(options.publishAfterCreate, true);
+      assert.equal(options.publishAfterCreate, false);
+      assert.strictEqual(options.page, detailPage);
       return {
         operationBatchCode: "EZT260003",
-        status: "published",
+        batchName: "运控实际批次名",
+        detailUrl: "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-3",
+        status: "created_unpublished",
       };
+    },
+    clickOperationBatchPublishImpl: async (page) => {
+      sequence.push("publish");
+      assert.strictEqual(page, detailPage);
+      return { status: "published", detailUrl: detailPage.url() };
     },
   });
   t.after(() => stopHelper(server));
@@ -1290,14 +1423,150 @@ test("POST /operation-batch/create uses the local Chrome and deduplicates a prep
   assert.equal(firstPayload.operationBatch.status, "success");
   assert.equal(firstPayload.operationBatch.operationBatchCode, "EZT260003");
   assert.equal(firstPayload.operationBatch.created.status, "published");
-  assert.deepEqual(sequence, ["create", "schedule", "publish"]);
+  assert.equal(firstPayload.operationBatch.created.batchName, "运控实际批次名");
+  assert.deepEqual(sequence, ["create", "locate", "schedule", "publish"]);
   assert.equal(connectCalls, 1);
   assert.equal(creationCalls, 1);
   assert.equal(initializationCalls, 1);
 });
 
+test("POST /operation-batch/create keeps the published result when schedule synchronization fails", async (t) => {
+  const sequence = [];
+  const detailPage = {
+    url: () => "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-7",
+  };
+  const { server, baseUrl } = await startHelper({
+    fetchImpl: async () => jsonResponse([]),
+    connectOperationBrowserImpl: async () => ({
+      contexts: () => [{ pages: () => [detailPage] }],
+      once() {},
+    }),
+    runOperationBatchCreationImpl: async () => {
+      sequence.push("create");
+      return {
+        operationBatchCode: "EZT260007",
+        batchName: "日程失败实际批次",
+        detailUrl: "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-7",
+        status: "created_unpublished",
+      };
+    },
+    runOperationBatchScheduleInitializationImpl: async (_instruction, options) => {
+      sequence.push("schedule");
+      assert.equal(options.reuseVerifiedDetail, true);
+      assert.equal(
+        options.verifiedDetailUrl,
+        "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-7",
+      );
+      throw new Error("日程写入失败");
+    },
+    runOperationBatchReconciliationImpl: async () => {
+      sequence.push("locate");
+      return {
+        operationBatchCode: "EZT260007",
+        batchName: "日程失败实际批次",
+        detailUrl: "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-7",
+        status: "created_unpublished",
+      };
+    },
+    clickOperationBatchPublishImpl: async () => {
+      sequence.push("publish");
+      return { status: "published", detailUrl: detailPage.url() };
+    },
+  });
+  t.after(() => stopHelper(server));
+
+  const response = await helperFetch(baseUrl, "/operation-batch/create", {
+    method: "POST",
+    body: {
+      requestId: "55555555-6666-4777-8888-aaaaaaaaaaaa",
+      baseUrl: "https://dashboard.ata.net.cn",
+      draft: { fields: { batchName: { value: "日程失败批次" } } },
+      desired: { complete: true, snapshot: { schedules: [{ name: "正式考试" }] } },
+    },
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.operationBatch.status, "success");
+  assert.equal(payload.operationBatch.publishStatus, "published");
+  assert.equal(payload.operationBatch.created.status, "published");
+  assert.equal(payload.operationBatch.scheduleStatus, "failed");
+  assert.match(payload.operationBatch.scheduleErrorMessage, /日程写入失败/);
+  assert.deepEqual(sequence, ["create", "locate", "schedule", "publish"]);
+});
+
+test("POST /operation-batch/create retries the batch-code search once before using the matched detail", async (t) => {
+  const sequence = [];
+  const detailPage = {
+    url: () => "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-9",
+    waitForTimeout: async () => sequence.push("wait"),
+  };
+  let locateCalls = 0;
+  const { server, baseUrl } = await startHelper({
+    fetchImpl: async () => jsonResponse([]),
+    connectOperationBrowserImpl: async () => ({ contexts: () => [{ pages: () => [detailPage] }], once() {} }),
+    runOperationBatchCreationImpl: async () => ({
+      operationBatchCode: "EZT260009",
+      batchName: "恢复搜索实际批次",
+      detailUrl: detailPage.url(),
+      status: "created_unpublished",
+    }),
+    runOperationBatchReconciliationImpl: async (_draft, options) => {
+      locateCalls += 1;
+      sequence.push(`locate-${locateCalls}`);
+      assert.equal(options.operationBatchCode, "EZT260009");
+      assert.equal(options.publishAfterCreate, false);
+      assert.strictEqual(options.page, detailPage);
+      if (locateCalls === 1) {
+        throw Object.assign(new Error("首次尚未检索到批次"), {
+          code: "OPERATION_BATCH_RECONCILIATION_REQUIRED",
+        });
+      }
+      return {
+        operationBatchCode: "EZT260009",
+        batchName: "恢复搜索实际批次",
+        detailUrl: detailPage.url(),
+        status: "created_unpublished",
+      };
+    },
+    runOperationBatchScheduleInitializationImpl: async (_instruction, options) => {
+      sequence.push("schedule");
+      assert.equal(options.reuseVerifiedDetail, true);
+      assert.equal(options.verifiedDetailUrl, detailPage.url());
+      assert.strictEqual(options.page, detailPage);
+      return { verified: true, snapshot: { schedules: [] } };
+    },
+    clickOperationBatchPublishImpl: async (page) => {
+      sequence.push("publish");
+      assert.strictEqual(page, detailPage);
+      return { status: "published", detailUrl: detailPage.url() };
+    },
+  });
+  t.after(() => stopHelper(server));
+
+  const response = await helperFetch(baseUrl, "/operation-batch/create", {
+    method: "POST",
+    body: {
+      requestId: "77777777-8888-4999-8aaa-cccccccccccc",
+      baseUrl: "https://dashboard.ata.net.cn",
+      draft: { fields: { batchName: { value: "恢复搜索批次" } } },
+      desired: { complete: true, snapshot: { schedules: [] } },
+    },
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.operationBatch.scheduleStatus, "synced");
+  assert.equal(payload.operationBatch.publishStatus, "published");
+  assert.equal(locateCalls, 2);
+  assert.deepEqual(sequence, ["locate-1", "wait", "locate-2", "schedule", "publish"]);
+});
+
 test("POST /operation-batch/create reconciles a batch that was submitted before result verification failed", async (t) => {
-  const context = { name: "local-operation-context" };
+  const detailPage = {
+    url: () => "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-4",
+  };
+  const context = { name: "local-operation-context", pages: () => [detailPage] };
   let reconciliationCalls = 0;
   let inspectionCalls = 0;
   const { server, baseUrl } = await startHelper({
@@ -1312,20 +1581,17 @@ test("POST /operation-batch/create reconciles a batch that was submitted before 
       reconciliationCalls += 1;
       assert.equal(draft.fields.batchName.value, "已提交批次");
       assert.strictEqual(options.context, context);
-      if (options.publishAfterCreate) {
-        return {
-          operationBatchCode: "EZT260004",
-          batchGuid: "batch-guid-4",
-          detailUrl: "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-4",
-          status: "published",
-        };
-      }
       return {
         operationBatchCode: "EZT260004",
+        batchName: "已提交实际批次",
         batchGuid: "batch-guid-4",
         detailUrl: "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-4",
         status: "created_unpublished",
       };
+    },
+    clickOperationBatchPublishImpl: async (page) => {
+      assert.strictEqual(page, detailPage);
+      return { status: "published", detailUrl: detailPage.url() };
     },
     inspectOperationBatchManagedSnapshotImpl: async (instruction, options) => {
       inspectionCalls += 1;
@@ -1352,24 +1618,30 @@ test("POST /operation-batch/create reconciles a batch that was submitted before 
   const payload = await response.json();
 
   assert.equal(response.status, 200);
-  assert.equal(payload.operationBatch.status, "waiting_schedule");
+  assert.equal(payload.operationBatch.status, "success");
+  assert.equal(payload.operationBatch.scheduleStatus, "waiting_schedule");
   assert.equal(payload.operationBatch.operationBatchCode, "EZT260004");
   assert.equal(payload.operationBatch.created.operationBatchCode, "EZT260004");
   assert.equal(payload.operationBatch.created.status, "published");
   assert.equal(payload.operationBatch.reconciled, true);
-  assert.equal(payload.operationBatch.managedResult.verified, true);
-  assert.equal(payload.operationBatch.managedResult.allowEmptySchedules, true);
-  assert.deepEqual(payload.operationBatch.managedResult.snapshot.schedules, []);
+  assert.equal(payload.operationBatch.managedResult, undefined);
   assert.equal(reconciliationCalls, 2);
-  assert.equal(inspectionCalls, 1);
+  assert.equal(inspectionCalls, 0);
 });
 
 test("POST /operation-batch/reconcile publishes a uniquely matched pending batch", async (t) => {
-  const context = { name: "local-operation-context" };
+  const detailPage = {
+    url: () => "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-5",
+  };
+  const context = {
+    name: "local-operation-context",
+    pages: () => [detailPage],
+  };
   const sequence = [];
   const { server, baseUrl } = await startHelper({
     fetchImpl: async () => jsonResponse([]),
     connectOperationBrowserImpl: async () => ({ contexts: () => [context], once() {} }),
+    clickOperationBatchPublishImpl: async () => ({ status: "published" }),
     runOperationBatchReconciliationImpl: async (draft, options) => {
       sequence.push(options.publishAfterCreate ? "publish" : "locate");
       assert.equal(draft.fields.batchName.value, "待发布批次");
@@ -1378,6 +1650,7 @@ test("POST /operation-batch/reconcile publishes a uniquely matched pending batch
       if (!options.publishAfterCreate) {
         return {
           operationBatchCode: "EZT260005",
+          batchName: "运控实际待发布批次",
           batchGuid: "batch-guid-5",
           detailUrl: "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-5",
           status: "created_unpublished",
@@ -1385,6 +1658,7 @@ test("POST /operation-batch/reconcile publishes a uniquely matched pending batch
       }
       return {
         operationBatchCode: "EZT260005",
+        batchName: "运控实际待发布批次",
         batchGuid: "batch-guid-5",
         detailUrl: "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-5",
         status: "published",
@@ -1393,8 +1667,15 @@ test("POST /operation-batch/reconcile publishes a uniquely matched pending batch
     synchronizeOperationBatchScheduleForArchiveImpl: async (instruction, options) => {
       sequence.push("schedule");
       assert.equal(instruction.batch.code, "EZT260005");
+      assert.equal(instruction.batch.name, "运控实际待发布批次");
+      assert.equal(instruction.desiredSnapshot.batchName, "运控实际待发布批次");
       assert.equal(instruction.desiredSnapshot.schedules.length, 1);
       assert.strictEqual(options.context, context);
+      assert.equal(options.reuseVerifiedDetail, true);
+      assert.equal(
+        options.verifiedDetailUrl,
+        "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-5",
+      );
       return { verified: true, snapshot: instruction.desiredSnapshot };
     },
   });
@@ -1425,7 +1706,51 @@ test("POST /operation-batch/reconcile publishes a uniquely matched pending batch
   assert.equal(payload.operationBatch.operationBatchCode, "EZT260005");
   assert.equal(payload.operationBatch.created.status, "published");
   assert.equal(payload.operationBatch.reconciled, true);
-  assert.deepEqual(sequence, ["locate", "schedule", "publish"]);
+  assert.deepEqual(sequence, ["locate", "schedule"]);
+});
+
+test("POST /operation-batch/create stops schedule writes when the actual batch name is missing", async (t) => {
+  const sequence = [];
+  const detailPage = {
+    url: () => "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-8",
+  };
+  const { server, baseUrl } = await startHelper({
+    fetchImpl: async () => jsonResponse([]),
+    connectOperationBrowserImpl: async () => ({ contexts: () => [{ pages: () => [detailPage] }], once() {} }),
+    runOperationBatchCreationImpl: async () => ({
+      operationBatchCode: "EZT260008",
+      detailUrl: detailPage.url(),
+      status: "created_unpublished",
+    }),
+    runOperationBatchReconciliationImpl: async () => ({
+      operationBatchCode: "EZT260008",
+      detailUrl: detailPage.url(),
+      status: "created_unpublished",
+    }),
+    clickOperationBatchPublishImpl: async () => ({ status: "published", detailUrl: detailPage.url() }),
+    runOperationBatchScheduleInitializationImpl: async () => {
+      sequence.push("schedule");
+      return { verified: true };
+    },
+  });
+  t.after(() => stopHelper(server));
+
+  const response = await helperFetch(baseUrl, "/operation-batch/create", {
+    method: "POST",
+    body: {
+      requestId: "66666666-7777-4888-8999-bbbbbbbbbbbb",
+      baseUrl: "https://dashboard.ata.net.cn",
+      draft: { fields: { batchName: { value: "只能作为草稿的名称" } } },
+      desired: { complete: true, snapshot: { batchName: "泛微原始名称", schedules: [] } },
+    },
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.operationBatch.scheduleStatus, "failed");
+  assert.equal(payload.operationBatch.scheduleErrorCode, "OPERATION_BATCH_ACTUAL_NAME_MISSING");
+  assert.match(payload.operationBatch.scheduleErrorMessage, /未取得实际批次名/);
+  assert.deepEqual(sequence, []);
 });
 
 test("POST /operation-batch/create requires a server request id and the fixed operation origin", async (t) => {

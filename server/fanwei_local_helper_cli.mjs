@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { spawn } from "node:child_process";
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,8 @@ import {
   loopbackBaseUrl,
   normalizeAllowedOrigins,
 } from "./fanwei_local_helper.mjs";
+import { markFanweiHelperUpdateVerified } from "./fanwei_local_helper_update.mjs";
+import { FANWEI_LOCAL_HELPER_VERSION } from "./fanwei_local_helper_version.mjs";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 18765;
@@ -64,6 +67,53 @@ function portFromEnv(value, name, fallback) {
     throw new TypeError(`${name} must be an integer from 1 to 65535`);
   }
   return port;
+}
+
+function powershellLiteral(value = "") {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+export function scheduleFanweiHelperRestart({
+  platform = process.platform,
+  runtimeDir,
+  currentPid = process.pid,
+  spawnImpl = spawn,
+} = {}) {
+  if (platform === "darwin") {
+    return { strategy: "launchd-keepalive" };
+  }
+  if (platform !== "win32") {
+    throw new Error(`Unsupported helper restart platform: ${platform}`);
+  }
+  const nodePath = path.join(runtimeDir, "node.exe");
+  const entryPath = path.join(runtimeDir, "server", "fanwei_local_helper_cli.mjs");
+  const stdoutPath = path.join(runtimeDir, "helper.log");
+  const stderrPath = path.join(runtimeDir, "helper-error.log");
+  const pidPath = path.join(runtimeDir, "helper.pid");
+  const command = [
+    `$oldPid=${Number(currentPid)};`,
+    "Wait-Process -Id $oldPid -ErrorAction SilentlyContinue;",
+    `Remove-Item -LiteralPath ${powershellLiteral(pidPath)} -Force -ErrorAction SilentlyContinue;`,
+    `$next=Start-Process -FilePath ${powershellLiteral(nodePath)} `
+      + `-ArgumentList @(${powershellLiteral(entryPath)}) `
+      + `-WorkingDirectory ${powershellLiteral(runtimeDir)} -WindowStyle Hidden `
+      + `-RedirectStandardOutput ${powershellLiteral(stdoutPath)} `
+      + `-RedirectStandardError ${powershellLiteral(stderrPath)} -PassThru;`,
+    `Set-Content -LiteralPath ${powershellLiteral(pidPath)} -Value $next.Id -Encoding ascii;`,
+  ].join(" ");
+  const child = spawnImpl("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    command,
+  ], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref?.();
+  return { strategy: "windows-detached-restart", pid: child.pid || null };
 }
 
 export function helperConfigFromEnv(env = process.env) {
@@ -135,8 +185,26 @@ export async function runFanweiLocalHelperCli(env = process.env) {
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+  server.once("helper-update-applied", (update, controls = {}) => {
+    try {
+      const restart = scheduleFanweiHelperRestart({
+        platform: process.platform,
+        runtimeDir: config.runtimeDir,
+      });
+      console.log(
+        `Fanwei local helper update applied: v${update?.fromVersion || "?"} -> v${update?.toVersion || "?"}; restart=${restart.strategy}`,
+      );
+      setTimeout(shutdown, 50);
+    } catch (error) {
+      console.error(`Fanwei local helper restart scheduling failed: ${error?.message || error}`);
+      controls.resumeAfterRestartFailure?.();
+    }
+  });
 
   if (!server.listening) await once(server, "listening");
+  await markFanweiHelperUpdateVerified(config.runtimeDir, FANWEI_LOCAL_HELPER_VERSION).catch((error) => {
+    console.error(`Fanwei local helper update verification marker failed: ${error?.message || error}`);
+  });
   console.log(
     `Fanwei local helper: ${loopbackBaseUrl(config.host, config.port)}; allowed origins: ${config.allowedOrigins.join(", ")}`,
   );

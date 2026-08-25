@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { buildFanweiHelperPackageManifest } from "../server/fanwei_local_helper_version.mjs";
+
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const supportedPlatforms = new Set(["win-x64", "darwin-x64", "darwin-arm64"]);
 
@@ -71,6 +73,8 @@ function writePackage({ platform, runtimePath, origin, packageDir }) {
   for (const moduleName of [
     "fanwei_local_helper_cli.mjs",
     "fanwei_local_helper.mjs",
+    "fanwei_local_helper_update.mjs",
+    "fanwei_local_helper_version.mjs",
     "fanwei_auto_read.mjs",
     "score_stamp_application.mjs",
     "operation_batch_runner.mjs",
@@ -110,6 +114,11 @@ function writePackage({ platform, runtimePath, origin, packageDir }) {
     `YIKAO_CONSOLE_ORIGINS=${origin}`,
     "",
   ].join("\n"), { mode: 0o600 });
+  fs.writeFileSync(
+    path.join(packageDir, "helper-package.json"),
+    `${JSON.stringify(buildFanweiHelperPackageManifest(platform), null, 2)}\n`,
+    { mode: 0o600 },
+  );
 }
 
 function main() {

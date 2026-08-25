@@ -91,16 +91,33 @@ function parseRange(value) {
   };
 }
 
-function businessBatchName(task = {}) {
-  return text(task.config?.businessRequirement?.batch_name);
+function confirmedBatchName(task = {}) {
+  return text(task.config?.operationBatch?.batchName);
 }
 
-function confirmedBatchName(task = {}) {
-  return first(
-    task.config?.operationBatch?.batchName,
-    task.config?.operationBatch?.draft?.fields?.batchName?.value,
-    businessBatchName(task),
-  );
+function hasInvalidReplacementCharacter(value) {
+  return text(value).includes("\uFFFD");
+}
+
+function repairManagedBatchName(value, current = {}) {
+  const managedName = text(value);
+  if (!hasInvalidReplacementCharacter(managedName)) return managedName;
+  const confirmedName = first(current.batchName, current.name);
+  return confirmedName && !hasInvalidReplacementCharacter(confirmedName)
+    ? confirmedName
+    : managedName;
+}
+
+function desiredPersonnelService(task = {}) {
+  const value = text(task.config?.businessRequirement?.ata_invigilator_arrangement);
+  if (!value) return "";
+  return /(?:不需要|无需)/.test(value) ? "不需要" : "在线监考";
+}
+
+function legacyManagedPersonnelService(task = {}) {
+  const value = text(task.config?.operationBatch?.draft?.fields?.servicePersonnel?.value);
+  if (!value) return "";
+  return /(?:不需要|无需)/.test(value) ? "不需要" : "在线监考";
 }
 
 function parseManagedSchedule(requirement = {}, requirementIndex) {
@@ -134,10 +151,12 @@ function parseManagedSchedule(requirement = {}, requirementIndex) {
 function snapshotFromSchedules(task, schedules) {
   const byStart = [...schedules].sort((left, right) => left.startValue - right.startValue);
   const byEnd = [...schedules].sort((left, right) => left.endValue - right.endValue);
+  const servicePersonnel = desiredPersonnelService(task);
   return {
-    batchName: businessBatchName(task),
+    batchName: confirmedBatchName(task),
     examStartDate: dateString(dateTimeParts(byStart[0]?.start)),
     examEndDate: dateString(dateTimeParts(byEnd.at(-1)?.end)),
+    ...(servicePersonnel ? { servicePersonnel } : {}),
     schedules: schedules.map(({ requirementIndex, name, start, end, scene, code, timezone, durationMinutes: duration, earlyLoginMinutes, trial, remark }) => ({
       requirementIndex,
       scene,
@@ -149,7 +168,7 @@ function snapshotFromSchedules(task, schedules) {
       durationMinutes: duration,
       earlyLoginMinutes,
       trial,
-      remark: first(task.config?.contentTaskRemarks?.[`formal:${requirementIndex}`], remark),
+      remark,
     })),
   };
 }
@@ -162,13 +181,15 @@ export function buildDesiredOperationBatchSnapshot(task = {}) {
     .filter((item) => item.missing.length)
     .map(({ requirementIndex, missing: fields }) => ({ requirementIndex, fields }));
   if (!requirements.length || missing.length) {
+    const servicePersonnel = desiredPersonnelService(task);
     return {
       complete: false,
       missing,
       snapshot: {
-        batchName: businessBatchName(task),
+        batchName: confirmedBatchName(task),
         examStartDate: "",
         examEndDate: "",
+        ...(servicePersonnel ? { servicePersonnel } : {}),
         schedules: [],
       },
     };
@@ -209,10 +230,7 @@ function formalSessionSchedule(task, session, scheduleIndex, requirements) {
       requirement.fields?.["提前登录时间"] ?? requirement.config?.earlyLoginMinutes ?? 0,
     ) || "0",
     trial: false,
-    remark: first(
-      task.config?.contentTaskRemarks?.[`formal:${sourceRequirementIndex}`],
-      requirement.fields?.["备注"],
-    ),
+    remark: text(requirement.fields?.["备注"]),
     missing,
   };
 }
@@ -270,6 +288,9 @@ function normalizedSnapshotForDiff(snapshot = {}) {
     batchName: text(snapshot.batchName),
     examStartDate: normalizedDate(snapshot.examStartDate),
     examEndDate: normalizedDate(snapshot.examEndDate),
+    ...(Object.hasOwn(snapshot, "servicePersonnel")
+      ? { servicePersonnel: text(snapshot.servicePersonnel) }
+      : {}),
     schedules: schedules.map((schedule) => ({
       requirementIndex: Number(schedule?.requirementIndex),
       scene: text(schedule?.scene),
@@ -308,6 +329,17 @@ export function operationBatchManagedDiff(applied = {}, desired = {}) {
     if (before[path] !== after[path]) {
       changes.push(managedChange(path, label, before[path], after[path]));
     }
+  }
+  if (
+    Object.hasOwn(after, "servicePersonnel")
+    && before.servicePersonnel !== after.servicePersonnel
+  ) {
+    changes.push(managedChange(
+      "servicePersonnel",
+      "人员服务",
+      before.servicePersonnel || "",
+      after.servicePersonnel,
+    ));
   }
   const beforeByIndex = new Map(before.schedules.map((schedule) => [
     schedule.requirementIndex,
@@ -368,7 +400,14 @@ export function operationBatchUpdateState(task = {}) {
     && typeof current.managedSnapshot === "object"
     && !Array.isArray(current.managedSnapshot),
   );
-  const applied = hasManagedSnapshot ? current.managedSnapshot : {};
+  const applied = hasManagedSnapshot ? structuredClone(current.managedSnapshot) : {};
+  if (Object.hasOwn(applied, "batchName")) {
+    applied.batchName = repairManagedBatchName(applied.batchName, current);
+  }
+  if (!Object.hasOwn(applied, "servicePersonnel")) {
+    const legacyPersonnelService = legacyManagedPersonnelService(task);
+    if (legacyPersonnelService) applied.servicePersonnel = legacyPersonnelService;
+  }
   const desiredScheduleCount = examRequirements(task).length;
   const appliedScheduleCount = Array.isArray(applied.schedules) ? applied.schedules.length : 0;
   const changes = desired.complete ? operationBatchManagedDiff(applied, desired.snapshot) : [];
@@ -459,6 +498,9 @@ function normalizedOperationBatchSnapshot(snapshot, { requireSchedules = true } 
     batchName,
     examStartDate,
     examEndDate,
+    ...(Object.hasOwn(snapshot, "servicePersonnel")
+      ? { servicePersonnel: text(snapshot.servicePersonnel) }
+      : {}),
     schedules: normalizedSchedules,
   };
 }
@@ -475,10 +517,21 @@ export function applyOperationBatchManagedResult(task = {}, result = {}) {
   if (result.verified !== true) {
     throw new Error("运营批次受管结果未通过回读验证");
   }
-  const managedSnapshot = result.allowEmptySchedules === true
-    ? normalizedOperationBatchInspectedSnapshot(result.snapshot)
-    : normalizedOperationBatchManagedSnapshot(result.snapshot);
   const current = task.config?.operationBatch || {};
+  const snapshot = { ...(result.snapshot || {}) };
+  if (
+    !Object.hasOwn(snapshot, "servicePersonnel")
+    && Object.hasOwn(current.managedSnapshot || {}, "servicePersonnel")
+  ) {
+    snapshot.servicePersonnel = current.managedSnapshot.servicePersonnel;
+  }
+  snapshot.batchName = repairManagedBatchName(snapshot.batchName, current);
+  if (hasInvalidReplacementCharacter(snapshot.batchName)) {
+    throw new Error("运营批次受管快照中的批次名称包含异常字符");
+  }
+  const managedSnapshot = result.allowEmptySchedules === true
+    ? normalizedOperationBatchInspectedSnapshot(snapshot)
+    : normalizedOperationBatchManagedSnapshot(snapshot);
   const managedSnapshotVersion = Number(current.managedSnapshotVersion || 0) + 1;
   const lastManagedSyncAt = text(result.syncedAt) || new Date().toISOString();
   const event = {
@@ -496,6 +549,7 @@ export function applyOperationBatchManagedResult(task = {}, result = {}) {
   return {
     operationBatch: {
       ...current,
+      ...(text(result.detailUrl) ? { detailUrl: text(result.detailUrl) } : {}),
       managedSnapshot,
       managedSnapshotVersion,
       lastManagedSyncAt,
