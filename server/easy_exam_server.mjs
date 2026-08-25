@@ -4,27 +4,36 @@ import { createReadStream } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { randomInt, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   bindCoursesToFormalSession,
   createSessionsThenConfigureCourses,
 } from "./course_session_binding.mjs";
-import { bindPapersToFormalSession, detectSessionPaperBindings } from "./paper_binding.mjs";
 import {
-  millisecondsUntilNextHour,
-  shouldSkipFailedPaperBindCheckInCurrentHour,
-} from "./paper_bind_scheduler.mjs";
+  bindPapersToFormalSession,
+  detectSessionPaperBindings,
+  fetchSessionSubjectPaperSnapshot,
+} from "./paper_binding.mjs";
+import { millisecondsUntilNextHour } from "./paper_bind_scheduler.mjs";
 import { fetchPaperUnitInfo } from "./paper_unit_info.mjs";
 import { bindDefaultTrialPaperToSession } from "./trial_default_paper.mjs";
 import {
-  assignCourseCodesForExamConfig,
   ensureFormalCoursesCreated,
   normalizeCourseRecords,
 } from "./course_creation.mjs";
 import { prepareCandidatesForCourseImport } from "./candidate_course_assignment.mjs";
 import { buildTenantCandidateEntries } from "./candidate_tenant_payload.mjs";
+import {
+  buildCandidateChangePreview,
+  candidateChangeImpact,
+  candidateRosterForValidation,
+  candidateChangeSessionPhase,
+  candidateRosterHash,
+  normalizeCandidateChangeRow,
+  normalizeCandidateRoster,
+} from "./candidate_change.mjs";
 import {
   normalizeCustomPersonalFieldNames,
   normalizeCustomPersonalFieldRequests,
@@ -32,6 +41,15 @@ import {
   syncImportPersonalFields,
 } from "./candidate_personal_fields.mjs";
 import { isFrontendRoute, webContentType } from "./frontend_routes.mjs";
+import { createPublicExamAssistantResponse } from "./public_exam_assistant.mjs";
+import {
+  appendAssistantQueryLog,
+  appendPlatformApiLog,
+  buildAssistantQueryLogEntry,
+  buildPlatformApiLogEntry,
+  readAssistantQueryLogs,
+  readPlatformApiLogs,
+} from "./platform_api_audit.mjs";
 import {
   buildAuthContext,
   buildLoginCookie,
@@ -48,6 +66,7 @@ import {
   restoreSessions,
   sanitizeUsers,
   serializeSessions,
+  shouldAllowInternalWechatCollectorRequest,
   shouldAllowWithoutAuth,
   updateLocalUser,
   upsertLocalUser,
@@ -58,14 +77,48 @@ import {
   acquireOperationBatchCreation,
   applyOperationBatchResult,
   buildOperationBatchDraft,
+  initializeOperationBatchDefaults,
+  normalizeOperationProjectDepartment,
+  operationBatchCodeIsValid,
   releaseOperationBatchCreation,
 } from "./operation_batch.mjs";
+import { defaultOperationBatchName, resolveOperationBatchName } from "./operation_batch_name.mjs";
+import {
+  editOperationArchiveDraft,
+  operationArchiveActualsFromScoreRows,
+  operationArchiveAssessmentFromPapers,
+  operationArchiveActualDataWindow,
+  operationArchiveFingerprint,
+  operationArchiveState,
+  refreshOperationArchiveEvidenceDraft,
+} from "./operation_archive.mjs";
+import { assertOperationArchiveBatchIdentity } from "./operation_archive_runner.mjs";
+import {
+  applyOperationBatchManagedResult,
+  buildDesiredOperationBatchSnapshot,
+  buildFormalOperationBatchSnapshot,
+} from "./operation_batch_update.mjs";
+import { createOperationBatchLocalUpdateService } from "./operation_batch_update_local_service.mjs";
+import {
+  buildOperationContentDraft,
+  operationContentDispatchPreview,
+} from "./operation_content.mjs";
+import { createOperationContentSyncService } from "./operation_content_service.mjs";
+import { createOperationPersonnelTaskService } from "./operation_personnel_task_service.mjs";
+import {
+  closeOperationPersonnelBrowserSession,
+  runOperationPersonnelAttempt,
+  runOperationPersonnelInspectionInSession,
+  runOperationPersonnelInspectionSession,
+  runOperationPersonnelRecheck,
+  validateOperationPersonnelBrowserSession,
+} from "./operation_personnel_task_runner.mjs";
 import {
   checkOperationConsoleAutomationEnvironment,
   enableOperationConsoleAutomation,
   installOperationConsoleAutomationDeps,
 } from "./operation_console_env.mjs";
-import { runOperationBatchCreation } from "./operation_batch_runner.mjs";
+import { DEFAULT_OPERATION_CONSOLE_BASE_URL } from "./operation_batch_runner.mjs";
 import { deleteTaskSessionsFromTenant } from "./session_deletion.mjs";
 import { enableSessionVideoRecording } from "./session_video_recording.mjs";
 import { calculateRoomSizes } from "./room_assignment.mjs";
@@ -86,25 +139,57 @@ import {
   upsertApiKeyProfileInRecord,
 } from "./user_settings.mjs";
 import { runCustomerServiceSchedulerForTargets } from "./customer_service_scheduler.mjs";
+import { fetchSimplePrftAssessmentReports } from "./simple_prft_assessment_report.mjs";
 import {
+  buildFanweiHelperPackageManifest,
+  FANWEI_LOCAL_HELPER_VERSION,
+} from "./fanwei_local_helper_version.mjs";
+import {
+  applyTenantCourseChanges,
+  buildCourseChangePlan,
+  courseRequirementChangeForTaskSession,
+  enrichTaskCourseRequirementChanges,
+  fetchTenantCourseSnapshots,
+  normalizeCourseChangeNames,
+  taskCoursesForChange,
+  tenantCourseChangeErrorMessage,
+} from "./course_change.mjs";
+import {
+  allowedSessionChangeFields,
   appendSessionChangeHistory,
   buildSessionChangeDiff,
+  editableSessionFieldNamesFromDetail,
   editableSessionFieldsFromDetail,
+  ensureSessionCreationOptions,
+  enrichTaskSessionRequirementChanges,
+  featureEnabledForRuntime,
   fetchTenantSessionDetail,
+  fetchTenantSessionDetailWithListFallback,
   localSessionFieldsForChange,
   mergeSessionChangePayload,
   putTenantSessionDetail,
+  requirementSessionOptionsFromFields,
   sessionChangeBasePayloadFromTask,
   sessionChangeHistoryFromStep,
+  sessionChangeMatchesSuggested,
   sessionChangeSummary,
+  sessionRequirementChangeForTaskSession,
   tenantSessionChangeErrorMessage,
   validateSessionChangeRequest,
 } from "./session_change.mjs";
 import {
+  SESSION_SYNC_ACTION,
+  buildSessionSyncConfigPatch,
+  buildSessionSyncPreview,
+  sessionSyncDetailCacheFromPreview,
+  sessionSyncListCacheFromPreview,
+  sessionSyncErrorMessage,
+} from "./session_sync.mjs";
+import {
   syncExamConfigToTencentDocs,
   tencentDocsSettingsFromEnv,
 } from "./tencent_docs_sync.mjs";
-import { handleWechatCollector } from "./wechat_collector_api.mjs";
+import { createWechatCollectorHandler } from "./wechat_collector_api.mjs";
 import { createFanweiBridgeStore } from "./fanwei_bridge.mjs";
 import {
   buildFanweiRequirementModel,
@@ -112,11 +197,23 @@ import {
   validateFanweiReadPayload,
 } from "./fanwei_requirement_mapper.mjs";
 import {
+  applyVirtualFanweiRequirementDefaults,
+  buildVirtualFanweiReadPayload,
+  isVirtualFanweiSerial,
+} from "./fanwei_virtual_requirement.mjs";
+import {
+  appendProjectExamRequirement,
   buildFanweiProjectConfig,
   buildProjectWorkflow,
   normalizeFanweiBusinessRequirement,
+  removeProjectExamRequirement,
 } from "./project_workflow.mjs";
-import { buildAutoConfigFromRequirement } from "./requirement_auto_config_adapter.mjs";
+import {
+  buildAutoConfigFromRequirement,
+  buildAutoConfigPreviewRows,
+} from "./requirement_auto_config_adapter.mjs";
+import { createProjectWechatBindingResolver } from "./project_wechat_binding.mjs";
+import { syncAcceptedRequirementToTask } from "./project_requirement_change.mjs";
 import {
   buildWindowsChromeLaunchArgs,
   createChromeDevToolsTab,
@@ -136,33 +233,52 @@ import {
   buildScoreStampApplicationSaveScript,
 } from "./score_stamp_application.mjs";
 import {
+  contentRequirementEmailPreview,
   normalizeEmailSettings,
   redactEmailSettings,
   sendContentRequirementEmail,
   writeEmailSettingsFile,
 } from "./content_requirement_email.mjs";
+import {
+  contentEmailDefaultsForTask,
+  contentEmailDeliveryForTask,
+} from "./content_email_directory.mjs";
+import {
+  paperBindReminderDecision,
+  sendPaperBindReminderEmail,
+} from "./paper_bind_reminder.mjs";
+import {
+  projectSharedSheetReminderDecision,
+  sendProjectSharedSheetReminderEmail,
+} from "./project_shared_sheet_reminder.mjs";
 import { convertScoreFeedbackToPdf } from "./score_feedback_pdf.mjs";
+import {
+  captureEasyExamArchiveScreenshots,
+  EASY_EXAM_ARCHIVE_SCREENSHOT_LIMIT_BYTES,
+} from "./easy_exam_archive_screenshot.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const webFile = path.join(rootDir, "outputs", "web_prototype", "easy_exam_automation.html");
+const publicAssistantFile = path.join(rootDir, "web", "public_exam_assistant.html");
 const webModulesDir = path.join(rootDir, "web");
 const runtimeDir = path.resolve(rootDir, process.env.EASY_EXAM_RUNTIME_DIR || ".easy_exam_runtime");
-const sessionChangeFeatureEnabled =
-  process.env.SESSION_CHANGE_ENABLED === "1" ||
-  path.basename(runtimeDir) === ".easy_exam_runtime_test";
+const sessionChangeFeatureEnabled = featureEnabledForRuntime(runtimeDir);
 const uploadsDir = path.join(runtimeDir, "uploads");
 const generatedDir = path.join(runtimeDir, "generated");
 const settingsPath = path.join(runtimeDir, "settings.json");
 const authSettingsPath = path.join(runtimeDir, "auth.json");
 const authUsersPath = path.join(runtimeDir, "auth_users.json");
 const authSessionsPath = path.join(runtimeDir, "auth_sessions.json");
+const assistantQueryLogPath = path.join(runtimeDir, "assistant_query_logs.jsonl");
+const platformApiLogPath = path.join(runtimeDir, "platform_api_logs.jsonl");
 const userSettingsPath = path.join(runtimeDir, "user_settings.json");
 const emailSettingsPath = path.join(runtimeDir, "email_settings.json");
 const parserScript = path.join(__dirname, "exam_request_parser.py");
 const fanweiWorkbookScript = path.join(__dirname, "fanwei_requirement_workbook.py");
 const candidateParserScript = path.join(__dirname, "candidate_list_parser.py");
 const monitorAccountExporterScript = path.join(__dirname, "monitor_account_exporter.py");
+const notStartedCandidateExporterScript = path.join(__dirname, "not_started_candidate_exporter.py");
 const scoreFeedbackExporterScript = path.join(__dirname, "score_feedback_exporter.py");
 const zipDirectoryScript = path.join(__dirname, "zip_directory.py");
 const taskStateScript = path.join(__dirname, "task_state_db.py");
@@ -196,7 +312,12 @@ function resolvePythonBin() {
 }
 const pythonBin = resolvePythonBin();
 const PAPER_BIND_SCHEDULER_WINDOW_MS = 24 * 60 * 60 * 1000;
+const SCORE_PROCESS_SCHEDULER_INTERVAL_MS = 60 * 1000;
+const SCORE_PROCESS_SCHEDULER_WINDOW_MS = 48 * 60 * 60 * 1000;
+const SCORE_PROCESS_SCHEDULER_RETRY_MS = 30 * 60 * 1000;
+const SCORE_PROCESS_SCHEDULER_MAX_RETRIES = 3;
 const fanweiBridge = createFanweiBridgeStore();
+const scoreProcessInFlight = new Set();
 
 async function loadEnvFile() {
   const envPath = path.join(rootDir, ".env");
@@ -228,6 +349,7 @@ const state = {
     login: {
       url: "",
       username: "",
+      tenantId: "",
       password: "",
       tenantApiKey: "",
     },
@@ -387,19 +509,61 @@ function tenantErrorMessage(status, action) {
         : `租户 API ${action}失败：${status}`;
 }
 
+async function readResponsePayload(response) {
+  const text = await response.text();
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return text;
+  }
+}
+
+async function fetchTenantResponseWithAudit(
+  login,
+  tenantUrl,
+  options = {},
+  action = "请求",
+  responseReader = readResponsePayload,
+) {
+  const requestTime = new Date().toISOString();
+  let response = null;
+  let responseData = null;
+  let requestError = null;
+  try {
+    response = await fetch(tenantUrl, options);
+    responseData = await responseReader(response);
+    return { response, responseData };
+  } catch (error) {
+    requestError = error;
+    throw error;
+  } finally {
+    const entry = buildPlatformApiLogEntry({
+      requestTime,
+      login,
+      url: tenantUrl,
+      options,
+      action,
+      responseStatus: response?.status ?? requestError?.status ?? null,
+      responseData,
+      error: requestError?.message || "",
+    });
+    await appendPlatformApiLog(platformApiLogPath, entry).catch((error) => {
+      console.warn(`[平台接口日志] 写入失败：${error?.message || error}`);
+    });
+  }
+}
+
 async function readTenantJsonWithLogin(login, tenantUrl, options = {}, action = "请求") {
   const { includeResponseMeta = false, ...fetchOptions } = options;
-  const response = await fetch(tenantUrl, {
-    ...fetchOptions,
-    headers: tenantHeadersForLogin(login, fetchOptions.headers || {}),
-  });
-  const text = await response.text();
-  let payload = null;
-  try {
-    payload = text ? JSON.parse(text) : null;
-  } catch {
-    payload = text;
-  }
+  const { response, responseData: payload } = await fetchTenantResponseWithAudit(
+    login,
+    tenantUrl,
+    {
+      ...fetchOptions,
+      headers: tenantHeadersForLogin(login, fetchOptions.headers || {}),
+    },
+    action,
+  );
   if (!response.ok) {
     const error = new Error(tenantErrorMessage(response.status, action));
     error.status = response.status;
@@ -566,6 +730,13 @@ async function saveApiCreationCapture(job, created) {
 function buildSessionPayloads(config) {
   const videoMonitor = boolValue(config.videoMonitor);
   const clientExam = boolValue(config.clientExam) || String(config.examType || "").includes("客户端");
+  const manualScore = boolValue(config.manualScore);
+  const newMark = manualScore && String(config.manualScoreText || "").includes("新版");
+  const explicitSessionOptions = config.sessionOptions?.explicit === true;
+  const sessionOptionsPublic = Object.fromEntries(
+    Object.entries(config.sessionOptions?.public || {})
+      .filter(([, value]) => value !== null && value !== undefined),
+  );
   const preLoginPrompt = normalizeRequirementRichField(config.preLoginPrompt);
   const pledgeContent = normalizeRequirementRichField(config.pledgeContent);
   const usePostPoliceVerify = videoMonitor && String(config.loginVerifyMode || "考后公安验证").includes("考后公安");
@@ -586,11 +757,11 @@ function buildSessionPayloads(config) {
     show_score_detail: false,
     publish_score: false,
     send_result_email: false,
-    manual_score: boolValue(config.manualScore),
-    new_mark: false,
+    manual_score: manualScore,
+    new_mark: newMark,
     practice_mode: false,
     monitor: videoMonitor,
-    monitor_replay: true,
+    monitor_replay: false,
     anonymous_monitor: true,
     audio_monitor: videoMonitor,
     eagle_eye: boolValue(config.hawkeye),
@@ -602,34 +773,41 @@ function buildSessionPayloads(config) {
     nda_notice: pledgeContent,
     personal: buildPersonalInformation(),
   };
+  if (explicitSessionOptions) Object.assign(common, sessionOptionsPublic);
 
   const main = {
     ...common,
     name: String(config.examName || "").trim(),
     start: normalizeSessionDate(config.startTimeDisplay),
     end: normalizeSessionDate(config.endTimeDisplay),
-    save_video: videoMonitor && boolValue(config.videoRecord),
+    save_video: explicitSessionOptions ? boolValue(sessionOptionsPublic.save_video) : videoMonitor && boolValue(config.videoRecord),
   };
+  const monitorReplayRequested = !explicitSessionOptions
+    || !Object.hasOwn(sessionOptionsPublic, "monitor_replay")
+    || boolValue(sessionOptionsPublic.monitor_replay);
+  main.monitor_replay = Boolean(boolValue(main.monitor) && monitorReplayRequested);
   applyTimeRule(main, config.timeRule);
   const early = positiveNumber(config.earlyLoginMinutes);
   const later = positiveNumber(config.lateLimitMinutes);
   if (early !== undefined && early > 0) main.early = early;
   if (later !== undefined && later > 0) main.later = later;
-  if (clientExam) {
-    Object.assign(main, {
-      client_required: true,
-      lock_screen: true,
-      exclusive_network: true,
-      login_times: positiveNumber(config.clientLoginLimit, 10),
-    });
-  } else {
-    Object.assign(main, {
-      client_required: false,
-      lock_screen: true,
-      login_times: positiveNumber(config.clientLoginLimit, 10),
-      lock_screen_exit_sec: positiveNumber(config.webLeaveSeconds, 5),
-      lock_screen_time: positiveNumber(config.leaveLimit, 5),
-    });
+  if (!explicitSessionOptions) {
+    if (clientExam) {
+      Object.assign(main, {
+        client_required: true,
+        lock_screen: true,
+        exclusive_network: true,
+        login_times: positiveNumber(config.clientLoginLimit, 10),
+      });
+    } else {
+      Object.assign(main, {
+        client_required: false,
+        lock_screen: true,
+        login_times: positiveNumber(config.clientLoginLimit, 10),
+        lock_screen_exit_sec: positiveNumber(config.webLeaveSeconds, 5),
+        lock_screen_time: positiveNumber(config.leaveLimit, 5),
+      });
+    }
   }
 
   const payloads = [{ kind: "main", payload: main }];
@@ -643,24 +821,27 @@ function buildSessionPayloads(config) {
       nda: false,
       nda_notice: "",
     };
+    trial.monitor_replay = Boolean(boolValue(trial.monitor) && monitorReplayRequested);
     applyTimeRule(trial, "不扣时");
     delete trial.early;
     delete trial.later;
-    if (clientExam) {
-      Object.assign(trial, {
-        client_required: true,
-        lock_screen: true,
-        exclusive_network: true,
-        login_times: 20,
-      });
-    } else {
-      Object.assign(trial, {
-        client_required: false,
-        lock_screen: true,
-        login_times: positiveNumber(config.clientLoginLimit, 10),
-        lock_screen_exit_sec: positiveNumber(config.webLeaveSeconds, 5),
-        lock_screen_time: positiveNumber(config.leaveLimit, 10),
-      });
+    if (!explicitSessionOptions) {
+      if (clientExam) {
+        Object.assign(trial, {
+          client_required: true,
+          lock_screen: true,
+          exclusive_network: true,
+          login_times: 20,
+        });
+      } else {
+        Object.assign(trial, {
+          client_required: false,
+          lock_screen: true,
+          login_times: positiveNumber(config.clientLoginLimit, 10),
+          lock_screen_exit_sec: positiveNumber(config.webLeaveSeconds, 5),
+          lock_screen_time: positiveNumber(config.leaveLimit, 10),
+        });
+      }
     }
     payloads.push({ kind: "mock", payload: trial });
   }
@@ -711,6 +892,15 @@ async function runYikaoApiCreationJob({ job, login }) {
           "创建考试场次",
         );
         const sessionId = extractSessionId(result);
+        emitLog(`[API 创建] 校验新版阅卷与监控回放：PUT /tenant/api/session/${sessionId}/`);
+        await ensureSessionCreationOptions({
+          apiBase,
+          login,
+          sessionId,
+          sessionPayload: item.payload,
+          requestJson: readTenantJsonWithLogin,
+        });
+        emitLog(`[API 创建] 关键场次配置已回读确认，session_id=${sessionId}`);
         if (item.kind === "main" && item.payload.save_video === true) {
           emitLog(`[API 创建] 正式考试开启视频录制：PUT /tenant/api/session/${sessionId}/`);
           await enableSessionVideoRecording({
@@ -754,10 +944,14 @@ async function runYikaoApiCreationJob({ job, login }) {
         activeStep = "course_create";
         await updateJobStep("course_create", "running", { message: "开始创建并确认正式考试科目" });
         emitStage("正式考试科目", 85);
+        const currentTask = await runTaskState("get", { taskId: job.taskId });
+        const existingProjectCourses = taskRequirementIndexes(currentTask)
+          .flatMap((requirementIndex) => taskCoursesForChange(currentTask, requirementIndex));
         const courses = await ensureFormalCoursesCreated({
           login,
           apiBase,
           config: job.config,
+          existingProjectCourses,
           requestJson: readTenantJsonWithLogin,
           emitLog,
         });
@@ -828,6 +1022,12 @@ async function runYikaoApiCreationJob({ job, login }) {
     pushEvent(job, { type: "captures", captures: [creationCapture], ts: ts() });
     emitLog("[API 创建] 已生成创建完成确认截图，可在网页最后确认截图区域查看");
     emitLog("[腾讯文档] 项目共享大表未自动填写，请在考试详情中点击“触发填写”。");
+    const pendingInternalConfigs = Array.isArray(job.config.sessionOptions?.pendingInternal)
+      ? job.config.sessionOptions.pendingInternal
+      : [];
+    if (pendingInternalConfigs.length) {
+      emitLog(`[需报备后人工开启] ${pendingInternalConfigs.map((item) => `${item.label}：${item.value}`).join("；")}。请先完成报备，再由人工在易考后台开启并回读核验。`, "warn");
+    }
     emitStage("完成", 100);
     pushEvent(job, {
       type: "done",
@@ -835,6 +1035,7 @@ async function runYikaoApiCreationJob({ job, login }) {
       summary: {
         created,
         captures: [creationCapture],
+        pendingInternalConfigs,
       },
     });
   } catch (error) {
@@ -1063,9 +1264,11 @@ async function parseWorkbook(uploadPath) {
 
 function pinTaskApiKeyProfile(config = {}, login = {}) {
   const tenantApiKey = String(login?.tenantApiKey || "").trim();
-  if (!tenantApiKey) return config;
+  const tenantId = String(login?.tenantId || "").trim();
+  const nextConfig = tenantId ? { ...config, tenantId } : config;
+  if (!tenantApiKey) return nextConfig;
   return {
-    ...config,
+    ...nextConfig,
     apiKeyProfileId: apiKeyProfileId({
       apiBase: process.env.YIKAO_API_BASE || login.apiBase,
       tenantApiKey,
@@ -1110,11 +1313,8 @@ async function createImportFromWorkbook({
     const detail = await runTaskState("get", { taskId: summary.taskId });
     if (detail) existingTasks.push(detail);
   }
-  parsed.config = assignCourseCodesForExamConfig(parsed?.config || {}, existingTasks);
   const projectName = String(parsed?.config?.examName || filename.replace(/\.[^.]+$/, "") || "未命名项目").trim();
   const authUser = getAuthUserFromRequest(auth, req);
-  const login = getYikaoLoginForRequest(req);
-  parsed.config = pinTaskApiKeyProfile(parsed.config, login);
   const taskOwnerEmail = ownerEmail || authUser?.email || "";
   const uploadId = importId || randomUUID();
   const extraConfig = typeof buildTaskConfig === "function"
@@ -1127,9 +1327,9 @@ async function createImportFromWorkbook({
   } else {
     task = await runTaskState("create", {
       projectName,
-      sourceAccount: login.username || "",
+      sourceAccount: "",
       ownerEmail: auth.enabled ? taskOwnerEmail : "",
-      config: taskConfig,
+      config: initializeOperationBatchDefaults(taskConfig, auth.enabled ? taskOwnerEmail : ""),
     });
   }
   await updateTaskStep(task.taskId, "requirement_parse", "success", {
@@ -1211,22 +1411,14 @@ async function handleImport(req, res) {
   const uploadPath = path.join(uploadsDir, `${importId}-${filename}`);
   await fs.writeFile(uploadPath, body);
   const parsed = await parseWorkbook(uploadPath);
-  const taskSummaries = await runTaskState("list_all");
-  const existingTasks = [];
-  for (const summary of taskSummaries || []) {
-    const detail = await runTaskState("get", { taskId: summary.taskId });
-    if (detail) existingTasks.push(detail);
-  }
-  parsed.config = assignCourseCodesForExamConfig(parsed?.config || {}, existingTasks);
   const projectName = String(parsed?.config?.examName || filename.replace(/\.[^.]+$/, "") || "未命名项目").trim();
   const authUser = getAuthUserFromRequest(auth, req);
-  const login = getYikaoLoginForRequest(req);
-  parsed.config = pinTaskApiKeyProfile(parsed.config, login);
+  const taskOwnerEmail = auth.enabled ? authUser?.email || "" : "";
   const task = await runTaskState("create", {
     projectName,
-    sourceAccount: login.username || "",
-    ownerEmail: auth.enabled ? authUser?.email || "" : "",
-    config: parsed?.config || {},
+    sourceAccount: "",
+    ownerEmail: taskOwnerEmail,
+    config: initializeOperationBatchDefaults(parsed?.config || {}, taskOwnerEmail),
   });
   await updateTaskStep(task.taskId, "requirement_parse", "success", {
     message: `需求单解析完成：${filename}`,
@@ -1339,11 +1531,12 @@ function loadFanweiRequirementDefaults() {
 
 async function buildFanweiRequirementPreviewFromPayload(payload) {
   const fanwei = validateFanweiReadPayloadForRequest(payload);
-  const model = buildFanweiRequirementModel(fanwei);
+  let model = buildFanweiRequirementModel(fanwei);
   model.requirementFields = {
     ...(await loadFanweiRequirementDefaults()),
     ...model.requirementFields,
   };
+  model = applyVirtualFanweiRequirementDefaults(model, model.fields["运控流水号"] || payload.serialNo);
   return { fanwei: model };
 }
 
@@ -1368,18 +1561,27 @@ async function handleFanweiRequirementPreview(req, res) {
 
 async function createFanweiRequirementImportFromPayload(payload, req, options = {}) {
   const fanwei = validateFanweiReadPayloadForRequest(payload);
-  const model = buildFanweiRequirementModel(fanwei);
+  let model = buildFanweiRequirementModel(fanwei);
   model.requirementFields = {
     ...(await loadFanweiRequirementDefaults()),
     ...model.requirementFields,
   };
+  model = applyVirtualFanweiRequirementDefaults(model, model.fields["运控流水号"] || payload.serialNo);
   const submittedRequirementFields = Array.isArray(payload.requirementFieldsList)
     ? payload.requirementFieldsList
     : [payload.requirementFields];
-  const requirementFieldsList = submittedRequirementFields
-    .filter((fields) => fields && typeof fields === "object" && !Array.isArray(fields))
-    .map((fields) => ({ ...model.requirementFields, ...editableRequirementFieldsRecord(fields) }));
+  const submittedConfigSelections = Array.isArray(payload.requirementConfigSelectionsList)
+    ? payload.requirementConfigSelectionsList
+    : [];
+  const submittedRequirementEntries = submittedRequirementFields
+    .map((fields, index) => ({ fields, configSelection: submittedConfigSelections[index] }))
+    .filter((entry) => entry.fields && typeof entry.fields === "object" && !Array.isArray(entry.fields));
+  const requirementFieldsList = submittedRequirementEntries
+    .map((entry) => ({ ...model.requirementFields, ...editableRequirementFieldsRecord(entry.fields) }));
+  const requirementConfigSelectionsList = submittedRequirementEntries
+    .map((entry) => editableRequirementConfigSelection(entry.configSelection));
   if (!requirementFieldsList.length) requirementFieldsList.push({ ...model.requirementFields });
+  if (!requirementConfigSelectionsList.length) requirementConfigSelectionsList.push(editableRequirementConfigSelection());
   model.requirementFields = { ...requirementFieldsList[0] };
   const importId = randomUUID();
   const baseName = safeFileName(`泛微_${model.fields["运控流水号"] || payload.serialNo || importId}_易考新建考试需求单.xlsx`);
@@ -1401,27 +1603,28 @@ async function createFanweiRequirementImportFromPayload(payload, req, options = 
     messagePrefix: "泛微需求单生成并解析完成",
     ownerEmail,
     existingTaskId: existingTask?.taskId || "",
-    buildTaskConfig: ({ parsed, uploadId, existingTasks }) => {
-      const otherProjectTasks = (existingTasks || []).filter((task) => task?.taskId !== existingTask?.taskId);
-      const projectRequirementConfigs = [];
+    buildTaskConfig: ({ parsed, uploadId }) => {
       appendedExamRequirements = requirementFieldsList.map((fields, index) => {
         const generated = buildAutoConfigFromRequirement(
           autoConfigRequirementFromFields(fields, parsed.config || {}),
-          { customerName: parsed.config?.customerName || "" },
+          {
+            customerName: parsed.config?.customerName || "",
+            configSelection: requirementConfigSelectionsList[index],
+          },
         );
-        let config = {
+        const config = {
           ...(index === 0 ? parsed.config : {}),
           ...generated.config,
           apiKeyProfileId: existingTask?.config?.apiKeyProfileId || parsed.config?.apiKeyProfileId || generated.config?.apiKeyProfileId || "",
         };
-        config = assignCourseCodesForExamConfig(config, otherProjectTasks, projectRequirementConfigs);
-        projectRequirementConfigs.push(config);
-        const previewRows = index === 0 && Array.isArray(parsed.previewRows)
-          ? parsed.previewRows
-          : Object.entries(fields).map(([label, value]) => ["易考需求单", label, String(value ?? ""), "项目卡"]);
-        const warnings = index === 0 && Array.isArray(parsed.warnings) ? parsed.warnings : generated.warnings;
+        const previewRows = buildAutoConfigPreviewRows(config);
+        const warnings = Array.from(new Set([
+          ...(index === 0 && Array.isArray(parsed.warnings) ? parsed.warnings : []),
+          ...generated.warnings,
+        ]));
         return {
           fields,
+          configSelection: requirementConfigSelectionsList[index],
           config,
           previewRows,
           warnings,
@@ -1467,12 +1670,50 @@ async function handleProjectWorkflow(taskId, req, res) {
   const task = await runTaskState("get", { taskId });
   if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
   const batchDraft = buildOperationBatchDraft(task, operationBatchDraftOverridesFromTask(task));
-  return json(res, 200, { ok: true, task, batchDraft, workflow: buildProjectWorkflow(task, batchDraft) });
+  const workflow = buildProjectWorkflow(task, batchDraft);
+  workflow.operationContentDraft = buildOperationContentDraft(task);
+  workflow.operationContentDispatchPreview = operationContentDispatchPreview(task);
+  workflow.contentEmailDefaults = contentEmailDefaultsForTask(task, getAuthUserFromRequest(auth, req)?.email || "");
+  let contentRequirement = null;
+  const contentRequestId = taskRequirementIds(task)[0] || "";
+  if (contentRequestId) {
+    try {
+      contentRequirement = await runRequirementState("get", { requestId: contentRequestId });
+    } catch {}
+  }
+  workflow.contentEmailPreview = contentRequirementEmailPreview({ task, requirement: contentRequirement });
+  return json(res, 200, { ok: true, task, batchDraft, workflow });
 }
 
 function editableStringRecord(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [String(key), String(item ?? "").trim()]));
+}
+
+function sessionSyncCacheInvalidation() {
+  return {
+    examListSyncPreviewCache: null,
+    sessionSyncPreviewCache: null,
+  };
+}
+
+function editableRequirementConfigSelection(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.explicit !== true) {
+    return { explicit: false, selectedIds: [], values: {} };
+  }
+  const selectedIds = Array.from(new Set(
+    (Array.isArray(value.selectedIds) ? value.selectedIds : [])
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+      .slice(0, 100),
+  ));
+  const values = value.values && typeof value.values === "object" && !Array.isArray(value.values)
+    ? Object.fromEntries(Object.entries(value.values).slice(0, 100).map(([key, item]) => [
+      String(key).slice(0, 100),
+      typeof item === "number" || typeof item === "boolean" ? item : String(item ?? "").slice(0, 2000),
+    ]))
+    : {};
+  return { explicit: true, selectedIds, values };
 }
 
 const richRequirementFields = new Set(["考前等待提示", "考试承诺书内容"]);
@@ -1497,6 +1738,7 @@ function normalizeRequirementRichField(value) {
 
 function editableRequirementFieldsRecord(value) {
   const fields = editableStringRecord(value);
+  if (fields["人工判分"] === "新版") fields["人工判分"] = "新版阅卷";
   for (const field of richRequirementFields) {
     if (Object.hasOwn(fields, field)) fields[field] = normalizeRequirementRichField(fields[field]);
   }
@@ -1504,8 +1746,8 @@ function editableRequirementFieldsRecord(value) {
 }
 
 function projectRequirementFieldChanges(beforeFields = {}, afterFields = {}) {
-  const before = editableStringRecord(beforeFields);
-  const after = editableStringRecord(afterFields);
+  const before = editableRequirementFieldsRecord(beforeFields);
+  const after = editableRequirementFieldsRecord(afterFields);
   return Array.from(new Set([...Object.keys(before), ...Object.keys(after)]))
     .sort((left, right) => left.localeCompare(right, "zh-CN"))
     .filter((field) => before[field] !== after[field])
@@ -1514,6 +1756,25 @@ function projectRequirementFieldChanges(beforeFields = {}, afterFields = {}) {
       before: before[field] || "",
       after: after[field] || "",
     }));
+}
+
+function projectRequirementConfigSelectionChanges(beforeValue = {}, afterValue = {}) {
+  const before = editableRequirementConfigSelection(beforeValue);
+  const after = editableRequirementConfigSelection(afterValue);
+  const comparable = (selection) => JSON.stringify({
+    explicit: selection.explicit,
+    selectedIds: [...selection.selectedIds].sort(),
+    values: Object.fromEntries(Object.entries(selection.values).sort(([left], [right]) => left.localeCompare(right))),
+  });
+  if (comparable(before) === comparable(after)) return [];
+  const summary = (selection) => selection.explicit ? `已配置 ${selection.selectedIds.length} 项` : "未单独配置";
+  const beforeSummary = summary(before);
+  const afterSummary = summary(after);
+  return [{
+    field: "增加配置",
+    before: beforeSummary,
+    after: beforeSummary === afterSummary ? `${afterSummary}（参数已调整）` : afterSummary,
+  }];
 }
 
 function fanweiHistoryFields(raw = {}) {
@@ -1570,7 +1831,9 @@ function autoConfigRequirementFromFields(fields = {}, current = {}) {
     subjects_text: fields["科目信息"],
     watermark_enabled: current.watermark,
     copy_forbidden: current.disableCopy,
-    leave_limit_count: current.leaveLimit,
+    leave_limit_count: Object.hasOwn(fields, "允许离开次数（网页考试时填写）")
+      ? fields["允许离开次数（网页考试时填写）"]
+      : current.leaveLimit,
     u8_code: current.u8Code,
     project_manager: current.projectManager,
     customer_name: current.customerName,
@@ -1593,6 +1856,28 @@ function taskExamRequirements(task = {}) {
   const requirements = task.config?.examRequirements;
   if (Array.isArray(requirements) && requirements.length) return requirements;
   return task.config?.examRequirement?.fields ? [task.config.examRequirement] : [];
+}
+
+function taskWithCurrentAutoConfigPreviews(task = {}) {
+  const requirements = taskExamRequirements(task);
+  if (!requirements.length) return task;
+  const refreshedRequirements = requirements.map((requirement) => {
+    const config = requirement?.config;
+    if (!config || typeof config !== "object" || !Object.keys(config).length) return requirement;
+    return {
+      ...requirement,
+      previewRows: buildAutoConfigPreviewRows(config),
+    };
+  });
+  const hasRequirementList = Array.isArray(task.config?.examRequirements) && task.config.examRequirements.length;
+  return {
+    ...task,
+    config: {
+      ...(task.config || {}),
+      ...(hasRequirementList ? { examRequirements: refreshedRequirements } : {}),
+      examRequirement: refreshedRequirements[0],
+    },
+  };
 }
 
 async function persistTaskRequirementCourses(taskId, requirementIndex, courses) {
@@ -1629,11 +1914,38 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
   let configPatch = {};
 
   if (source === "fanwei") {
+    const submittedProjectDepartment = String(payload.fields?.["项目部归属"] || "").trim();
+    const projectDepartment = normalizeOperationProjectDepartment(submittedProjectDepartment);
+    if (submittedProjectDepartment && !projectDepartment) {
+      return badRequest(res, "项目部归属不在允许选项中，请重新选择。");
+    }
     const currentSource = task.config?.fanweiSource || {};
     const currentRaw = currentSource.raw || {};
+    const currentBusiness = task.config?.businessRequirement || {};
+    const submittedBatchName = String(payload.fields?.["批次名称"] || "").trim();
+    const currentBatchName = String(
+      currentRaw.fields?.["批次名称"]
+      || currentBusiness.batch_name
+      || "",
+    ).trim();
+    const requirementFields = task.config?.examRequirement?.fields || {};
+    const generatedBatchName = defaultOperationBatchName({
+      examName: requirementFields["考试名称"] || task.config?.examName || currentBusiness.exam_name || currentBusiness.project_name,
+      examStart: requirementFields["考试日期时间"] || currentBusiness.formal_exam_time_range || currentRaw.examSceneRows?.[0]?.["考试日期"],
+    });
+    const batchName = resolveOperationBatchName({
+      previousValue: currentBatchName,
+      previousMode: currentSource.batchNameMode || currentBusiness.batch_name_mode,
+      generatedValue: generatedBatchName,
+      submittedValue: submittedBatchName,
+    });
     const raw = {
       ...currentRaw,
-      fields: editableStringRecord(payload.fields),
+      fields: {
+        ...editableStringRecord(currentRaw.fields),
+        ...editableStringRecord(payload.fields),
+        "批次名称": batchName.value,
+      },
       serviceConfirmation: {
         ...(currentRaw.serviceConfirmation || {}),
         fields: editableStringRecord(payload.serviceConfirmationFields),
@@ -1641,13 +1953,19 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
       examSceneRows: editableExamSceneRows(payload.examSceneRows),
     };
     const changes = projectRequirementFieldChanges(fanweiHistoryFields(currentRaw), fanweiHistoryFields(raw));
-    const requirementFields = task.config?.examRequirement?.fields || {};
-    const businessRequirement = normalizeFanweiBusinessRequirement(raw, { requirementFields });
+    const businessRequirement = {
+      ...normalizeFanweiBusinessRequirement(raw, { requirementFields }),
+      batch_name: batchName.value,
+      batch_name_mode: batchName.mode,
+      batch_name_auto_value: batchName.autoValue,
+    };
     const fanweiSource = {
       ...currentSource,
       version: Number(currentSource.version || 0) + 1,
       modifiedAt: now,
       serialNo: businessRequirement.operation_serial_number || currentSource.serialNo || "",
+      batchNameMode: batchName.mode,
+      batchNameAutoValue: batchName.autoValue,
       raw,
     };
     const projectCard = {
@@ -1659,6 +1977,26 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
       projectCard,
       fanweiSource,
       businessRequirement,
+      ...(projectDepartment ? {
+        operationBatch: {
+          ...(task.config?.operationBatch || {}),
+          projectDepartmentDefault: projectDepartment,
+          ...(task.config?.operationBatch?.draft?.fields ? {
+            draft: {
+              ...task.config.operationBatch.draft,
+              fields: {
+                ...task.config.operationBatch.draft.fields,
+                projectDepartment: {
+                  ...(task.config.operationBatch.draft.fields.projectDepartment || {}),
+                  value: projectDepartment,
+                  source: "manual",
+                  label: "项目部归属",
+                },
+              },
+            },
+          } : {}),
+        },
+      } : {}),
       customerName: businessRequirement.customer_name || task.config?.customerName || "",
       projectCode: businessRequirement.project_code || task.config?.projectCode || "",
       projectSourceChangeHistory: appendProjectSourceChangeHistory(task, {
@@ -1678,19 +2016,39 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
     const current = currentRequirements[requirementIndex] || task.config?.examRequirement || {};
     const currentConfig = current.config || {};
     const fields = editableRequirementFieldsRecord(payload.fields);
-    const changes = projectRequirementFieldChanges(current.fields, fields);
+    const configSelection = editableRequirementConfigSelection(payload.configSelection ?? current.configSelection);
+    const changes = [
+      ...projectRequirementFieldChanges(current.fields, fields),
+      ...projectRequirementConfigSelectionChanges(current.configSelection, configSelection),
+    ];
     const generated = buildAutoConfigFromRequirement(
       autoConfigRequirementFromFields(fields, currentConfig),
-      { customerName: task.config?.customerName || currentConfig.customerName || "" },
+      {
+        customerName: task.config?.customerName || currentConfig.customerName || "",
+        configSelection,
+      },
     );
     const generatedConfig = generated.config || {};
-    const courseBasisUnchanged = JSON.stringify(currentConfig.subjects || []) === JSON.stringify(generatedConfig.subjects || [])
+    const requirementFieldSessionOptions = requirementSessionOptionsFromFields(fields);
+    generatedConfig.sessionOptions = {
+      ...(generatedConfig.sessionOptions || {}),
+      public: {
+        ...(generatedConfig.sessionOptions?.public || {}),
+        ...requirementFieldSessionOptions,
+      },
+    };
+    const subjectsUnchanged = JSON.stringify(currentConfig.subjects || []) === JSON.stringify(generatedConfig.subjects || []);
+    const courseBasisUnchanged = subjectsUnchanged
       && String(currentConfig.startTimeDisplay || "") === String(generatedConfig.startTimeDisplay || "");
+    const preserveCreatedCourses = Boolean(taskFormalSession(task, requirementIndex)?.session_id) && subjectsUnchanged;
+    const persistedCourses = preserveCreatedCourses
+      ? taskCoursesForChange(task, requirementIndex)
+      : currentConfig.courses;
     const config = {
       ...currentConfig,
       ...generatedConfig,
-      ...(courseBasisUnchanged ? {
-        courses: mergeRequirementCoursePaperNames(currentConfig.courses, generatedConfig.courses),
+      ...(courseBasisUnchanged || preserveCreatedCourses ? {
+        courses: mergeRequirementCoursePaperNames(persistedCourses, generatedConfig.courses),
         subjectImportPath: currentConfig.subjectImportPath || generatedConfig.subjectImportPath || "",
       } : {}),
       apiKeyProfileId: currentConfig.apiKeyProfileId || "",
@@ -1701,13 +2059,17 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
       modifiedAt: now,
       confirmedAt: now,
       fields,
+      configSelection,
       config,
+      previewRows: buildAutoConfigPreviewRows(config),
     };
     const examRequirements = currentRequirements.length ? [...currentRequirements] : [examRequirement];
     examRequirements[requirementIndex] = examRequirement;
     configPatch = {
       examRequirements,
       examRequirement: examRequirements[0],
+      examName: String(fields["考试名称"] || config.examName || task.config?.examName || "").trim(),
+      ...sessionSyncCacheInvalidation(),
       projectSourceChangeHistory: appendProjectSourceChangeHistory(task, {
         source: "examRequirement",
         requirementIndex,
@@ -1724,10 +2086,162 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
   const updated = await runTaskState("update_config", {
     taskId,
     config: configPatch,
-    projectName: source === "fanwei" ? (configPatch.businessRequirement?.project_name || task.projectName || "") : undefined,
+    projectName: source === "fanwei"
+      ? (configPatch.businessRequirement?.project_name || task.projectName || "")
+      : source === "examRequirement"
+        ? (configPatch.examName || task.projectName || "")
+        : undefined,
   });
   const batchDraft = buildOperationBatchDraft(updated, operationBatchDraftOverridesFromTask(updated));
   return json(res, 200, { ok: true, task: updated, batchDraft, workflow: buildProjectWorkflow(updated, batchDraft) });
+}
+
+async function handleProjectSourceSnapshotCreate(taskId, req, res) {
+  const task = await runTaskState("get", { taskId });
+  if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  const payload = parseJsonSafe(await readBody(req)) || {};
+  if (String(payload.source || "").trim() !== "examRequirement" || String(payload.action || "").trim() !== "duplicate") {
+    return badRequest(res, "仅支持复制易考需求单。");
+  }
+  const requirements = taskExamRequirements(task);
+  const sourceRequirementIndex = Number(payload.sourceRequirementIndex);
+  if (!Number.isInteger(sourceRequirementIndex) || sourceRequirementIndex < 0 || sourceRequirementIndex >= requirements.length) {
+    return badRequest(res, "原需求单序号不存在，请刷新项目后重试。");
+  }
+
+  const sourceRequirement = requirements[sourceRequirementIndex];
+  const sourceConfig = sourceRequirement.config || {};
+  const fields = editableRequirementFieldsRecord(payload.fields ?? sourceRequirement.fields);
+  const configSelection = editableRequirementConfigSelection(
+    Object.hasOwn(payload, "configSelection") ? payload.configSelection : sourceRequirement.configSelection,
+  );
+  const generated = buildAutoConfigFromRequirement(
+    autoConfigRequirementFromFields(fields, sourceConfig),
+    {
+      customerName: task.config?.customerName || sourceConfig.customerName || "",
+      configSelection,
+    },
+  );
+  const generatedConfig = generated.config || {};
+  const requirementFieldSessionOptions = requirementSessionOptionsFromFields(fields);
+  generatedConfig.sessionOptions = {
+    ...(generatedConfig.sessionOptions || {}),
+    public: {
+      ...(generatedConfig.sessionOptions?.public || {}),
+      ...requirementFieldSessionOptions,
+    },
+  };
+  const config = {
+    ...generatedConfig,
+    apiKeyProfileId: sourceConfig.apiKeyProfileId || task.config?.apiKeyProfileId || "",
+  };
+  const previewRows = buildAutoConfigPreviewRows(config);
+  const warnings = Array.from(new Set(generated.warnings || []));
+  const now = new Date().toISOString();
+  const appended = appendProjectExamRequirement(task.config || {}, {
+    id: randomUUID(),
+    fields,
+    configSelection,
+    config,
+    previewRows,
+    warnings,
+    metrics: {
+      recognizedFields: Object.values(fields).filter((value) => String(value ?? "").trim()).length,
+      needsReview: warnings.length,
+      etaMinutes: 4,
+    },
+    filename: sourceRequirement.filename,
+  }, now);
+  const configPatch = {
+    examRequirements: appended.examRequirements,
+    examRequirement: appended.examRequirement,
+    ...sessionSyncCacheInvalidation(),
+    projectCard: {
+      ...(task.config?.projectCard || {}),
+      updatedAt: now,
+    },
+    projectSourceChangeHistory: appendProjectSourceChangeHistory(task, {
+      source: "examRequirement",
+      requirementIndex: appended.requirementIndex,
+      changedAt: now,
+      versionBefore: 0,
+      versionAfter: 1,
+      changes: [{
+        field: "需求单",
+        before: `复制自需求单 ${sourceRequirementIndex + 1}`,
+        after: `新增需求单 ${appended.requirementIndex + 1}`,
+      }],
+    }),
+  };
+  const updated = await runTaskState("update_config", { taskId, config: configPatch });
+  const batchDraft = buildOperationBatchDraft(updated, operationBatchDraftOverridesFromTask(updated));
+  return json(res, 200, {
+    ok: true,
+    task: updated,
+    requirementIndex: appended.requirementIndex,
+    batchDraft,
+    workflow: buildProjectWorkflow(updated, batchDraft),
+  });
+}
+
+function taskRequirementExecutionStartedAtOrAfter(task = {}, requirementIndex = 0) {
+  const normalizedIndex = Number(requirementIndex);
+  const hasSession = (task.sessions || []).some((session) => Number(session.requirementIndex || 0) >= normalizedIndex);
+  if (hasSession) return true;
+  return (task.steps || []).some((step) => Object.keys(step.requirementProgress || {}).some((key) => {
+    const progressIndex = Number(key);
+    return Number.isInteger(progressIndex) && progressIndex >= normalizedIndex;
+  }));
+}
+
+async function handleProjectSourceSnapshotDelete(taskId, req, res) {
+  const task = await runTaskState("get", { taskId });
+  if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  const payload = parseJsonSafe(await readBody(req)) || {};
+  if (String(payload.source || "").trim() !== "examRequirement") {
+    return badRequest(res, "仅支持删除易考需求单。");
+  }
+  const requirements = taskExamRequirements(task);
+  const requirementIndex = Number(payload.requirementIndex);
+  if (!Number.isInteger(requirementIndex) || requirementIndex < 0 || requirementIndex >= requirements.length) {
+    return badRequest(res, "需求单序号不存在，请刷新项目后重试。");
+  }
+  if (taskRequirementExecutionStartedAtOrAfter(task, requirementIndex)) {
+    return json(res, 409, { error: "该需求单或后续需求单已进入自动配置，不能删除。" });
+  }
+  const configPatch = {
+    ...removeProjectExamRequirement(task.config || {}, requirementIndex),
+    ...sessionSyncCacheInvalidation(),
+  };
+  const updated = await runTaskState("update_config", { taskId, config: configPatch });
+  const batchDraft = buildOperationBatchDraft(updated, operationBatchDraftOverridesFromTask(updated));
+  return json(res, 200, { ok: true, task: updated, batchDraft, workflow: buildProjectWorkflow(updated, batchDraft) });
+}
+
+async function handleProjectRequirementChangeAccept(taskId, requestId, changeId, req, res) {
+  const task = await runTaskState("get", { taskId });
+  if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  if (!taskRequirementIds(task).includes(requestId)) return notFound(res);
+  const payload = parseJsonSafe(await readBody(req)) || {};
+  const requirement = await runRequirementState("accept_change", {
+    requestId,
+    changeId,
+    reviewer: payload.reviewer || "",
+    message: payload.message || "",
+    overrideManualEdit: Boolean(payload.overrideManualEdit || payload.override_manual_edit),
+  });
+  const synced = syncAcceptedRequirementToTask({ task, requirement, changeId });
+  const updatedTask = await runTaskState("update_config", {
+    taskId,
+    config: synced.configPatch,
+    projectName: synced.configPatch.examName || task.projectName || "",
+  });
+  return json(res, 200, {
+    ok: true,
+    requirement,
+    task: updatedTask,
+    sessionImpact: synced.sessionImpact,
+  });
 }
 
 async function handleFanweiBridgeToken(req, res) {
@@ -1955,12 +2469,16 @@ async function handleFanweiLocalRead(req, res) {
   const serialNo = String(payload.serialNo || "").trim();
   if (!serialNo) return badRequest(res, "请填写泛微流水号。");
   let fanwei = null;
-  try {
-    fanwei = await readFanweiFromLocalChrome(serialNo);
-  } catch (error) {
-    const reason = error.reason || fanweiAutoReadErrorReason(error);
-    if (reason) return json(res, 503, { error: fanweiAutoReadUnavailableMessage(reason, process.platform), reason });
-    throw error;
+  if (isVirtualFanweiSerial(serialNo)) {
+    fanwei = buildVirtualFanweiReadPayload(serialNo);
+  } else {
+    try {
+      fanwei = await readFanweiFromLocalChrome(serialNo);
+    } catch (error) {
+      const reason = error.reason || fanweiAutoReadErrorReason(error);
+      if (reason) return json(res, 503, { error: fanweiAutoReadUnavailableMessage(reason, process.platform), reason });
+      throw error;
+    }
   }
   if (!fanwei) {
     return json(res, 404, {
@@ -2407,9 +2925,28 @@ async function handleExamRequestTemplate(req, res) {
 const fanweiHelperServerFileNames = [
   "fanwei_local_helper_cli.mjs",
   "fanwei_local_helper.mjs",
+  "fanwei_local_helper_update.mjs",
+  "fanwei_local_helper_version.mjs",
   "fanwei_auto_read.mjs",
   "score_stamp_application.mjs",
+  "operation_batch_runner.mjs",
+  "operation_batch_update_runner.mjs",
+  "operation_personnel_console_runner.mjs",
+  "operation_archive_runner.mjs",
+  "content_email_directory.mjs",
+  "operation_batch.mjs",
+  "operation_content.mjs",
+  "operation_task_send_record.mjs",
+  "operation_content_runner.mjs",
 ];
+
+const fanweiHelperNodeModuleNames = ["playwright", "playwright-core"];
+const FANWEI_HELPER_UPDATE_DOWNLOAD_TTL_MS = 5 * 60 * 1000;
+const fanweiHelperUpdateDownloads = new Map();
+
+function fanweiHelperPackagePlatform(packageName) {
+  return String(packageName || "").replace(/^yikao-fanwei-helper-/, "");
+}
 
 function normalizeHttpOrigin(value = "") {
   try {
@@ -2497,6 +3034,13 @@ async function overlayLatestFanweiHelperFiles(stagedPackageDir, packageName) {
   for (const fileName of fanweiHelperServerFileNames) {
     await fs.copyFile(path.join(rootDir, "server", fileName), path.join(serverDir, fileName));
   }
+  for (const moduleName of fanweiHelperNodeModuleNames) {
+    await fs.cp(
+      path.join(rootDir, "node_modules", moduleName),
+      path.join(stagedPackageDir, "node_modules", moduleName),
+      { recursive: true },
+    );
+  }
 
   const deployDir = path.join(rootDir, "deploy", "fanwei-helper");
   for (const fileName of fanweiHelperDeployFileNames(packageName)) {
@@ -2504,6 +3048,11 @@ async function overlayLatestFanweiHelperFiles(stagedPackageDir, packageName) {
     await fs.copyFile(path.join(deployDir, fileName), destination);
     if (fileName === "install-macos.command") await fs.chmod(destination, 0o755);
   }
+  await fs.writeFile(
+    path.join(stagedPackageDir, "helper-package.json"),
+    `${JSON.stringify(buildFanweiHelperPackageManifest(fanweiHelperPackagePlatform(packageName)), null, 2)}\n`,
+    { mode: 0o600 },
+  );
 }
 
 async function dynamicFanweiHelperPackagePath(packagePath, origin) {
@@ -2537,26 +3086,149 @@ async function dynamicFanweiHelperPackagePath(packagePath, origin) {
   }
 }
 
-async function handleFanweiHelperInstaller(req, url, res) {
-  const platform = String(url.searchParams.get("platform") || "").toLowerCase();
-  const packageNames = {
-    windows: "yikao-fanwei-helper-win-x64.zip",
-    macos: "yikao-fanwei-helper-darwin-arm64.zip",
-  };
-  const fileName = packageNames[platform];
-  if (!fileName) {
-    return badRequest(res, "不支持的本机助手平台，请选择 windows 或 macos。");
+function fanweiHelperDownloadPlatform(value = "") {
+  const platform = String(value || "").trim().toLowerCase();
+  if (platform === "windows" || platform === "win32") {
+    return { platform: "windows", fileName: "yikao-fanwei-helper-win-x64.zip" };
   }
+  if (platform === "macos" || platform === "darwin") {
+    return { platform: "macos", fileName: "yikao-fanwei-helper-darwin-arm64.zip" };
+  }
+  return null;
+}
 
-  let packagePath = "";
+async function resolveFanweiHelperPackagePath(fileName) {
   for (const directory of [fanweiHelperRuntimePackagesDir, fanweiHelperProjectPackagesDir]) {
     const candidate = path.join(directory, fileName);
     try {
       await fs.access(candidate);
-      packagePath = candidate;
-      break;
+      return candidate;
     } catch {}
   }
+  return "";
+}
+
+async function sha256File(filePath) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+function cleanupFanweiHelperUpdateDownload(token, entry) {
+  if (!entry) return;
+  fanweiHelperUpdateDownloads.delete(token);
+  clearTimeout(entry.timer);
+  entry.cleanup?.();
+}
+
+async function handleFanweiHelperUpdateManifest(req, url, res) {
+  const resolvedPlatform = fanweiHelperDownloadPlatform(url.searchParams.get("platform"));
+  if (!resolvedPlatform) {
+    return badRequest(res, "不支持的本机助手平台，请选择 windows 或 macos。");
+  }
+  const currentVersion = Number(url.searchParams.get("currentVersion"));
+  if (!Number.isSafeInteger(currentVersion) || currentVersion < 1) {
+    return badRequest(res, "当前本机助手版本无效。");
+  }
+  if (currentVersion >= FANWEI_LOCAL_HELPER_VERSION) {
+    return json(res, 200, {
+      updateAvailable: false,
+      currentVersion,
+      latestVersion: FANWEI_LOCAL_HELPER_VERSION,
+    });
+  }
+
+  const packagePath = await resolveFanweiHelperPackagePath(resolvedPlatform.fileName);
+  if (!packagePath) {
+    return json(res, 503, { error: `泛微本机助手安装包（${resolvedPlatform.platform}）尚未生成，请联系管理员。` });
+  }
+  const origin = requestOrigin(req);
+  if (!origin) return badRequest(res, "无法确认当前平台地址。");
+
+  let downloadPackage;
+  try {
+    downloadPackage = await dynamicFanweiHelperPackagePath(packagePath, origin);
+  } catch (error) {
+    console.error(`泛微本机助手自动更新包生成失败：${error?.message || error}`);
+    return json(res, 503, { error: "泛微本机助手自动更新包生成失败，请联系管理员。" });
+  }
+
+  const token = randomBytes(32).toString("hex");
+  const expiresAt = Date.now() + FANWEI_HELPER_UPDATE_DOWNLOAD_TTL_MS;
+  let digest;
+  try {
+    digest = await sha256File(downloadPackage.packagePath);
+  } catch (error) {
+    downloadPackage.cleanup?.();
+    throw error;
+  }
+  const entry = {
+    packagePath: downloadPackage.packagePath,
+    cleanup: downloadPackage.cleanup,
+    expiresAt,
+    fileName: resolvedPlatform.fileName,
+    sha256: digest,
+    timer: null,
+  };
+  entry.timer = setTimeout(
+    () => cleanupFanweiHelperUpdateDownload(token, entry),
+    FANWEI_HELPER_UPDATE_DOWNLOAD_TTL_MS,
+  );
+  entry.timer.unref?.();
+  fanweiHelperUpdateDownloads.set(token, entry);
+
+  const packageUrl = new URL("/api/fanwei/helper-update-package", origin);
+  packageUrl.searchParams.set("token", token);
+  return json(res, 200, {
+    updateAvailable: true,
+    currentVersion,
+    latestVersion: FANWEI_LOCAL_HELPER_VERSION,
+    version: FANWEI_LOCAL_HELPER_VERSION,
+    platform: resolvedPlatform.platform,
+    packageUrl: packageUrl.toString(),
+    sha256: entry.sha256,
+    expiresAt: new Date(expiresAt).toISOString(),
+    requiresRestart: true,
+  });
+}
+
+async function handleFanweiHelperUpdatePackage(url, res) {
+  const token = String(url.searchParams.get("token") || "");
+  const entry = fanweiHelperUpdateDownloads.get(token);
+  if (!entry) return notFound(res);
+  fanweiHelperUpdateDownloads.delete(token);
+  clearTimeout(entry.timer);
+  if (Date.now() >= entry.expiresAt) {
+    entry.cleanup?.();
+    return json(res, 410, { error: "助手更新下载令牌已过期。" });
+  }
+  const packageStat = await fs.stat(entry.packagePath);
+  res.writeHead(200, {
+    "Content-Type": "application/zip",
+    "Content-Disposition": `attachment; filename="${entry.fileName}"`,
+    "Content-Length": packageStat.size,
+    "Cache-Control": "private, no-store",
+    "X-Content-Type-Options": "nosniff",
+    "X-Yikao-Helper-Sha256": entry.sha256,
+  });
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    entry.cleanup?.();
+  };
+  res.once("finish", cleanup);
+  res.once("close", cleanup);
+  createReadStream(entry.packagePath).pipe(res);
+}
+
+async function handleFanweiHelperInstaller(req, url, res) {
+  const resolvedPlatform = fanweiHelperDownloadPlatform(url.searchParams.get("platform"));
+  if (!resolvedPlatform) {
+    return badRequest(res, "不支持的本机助手平台，请选择 windows 或 macos。");
+  }
+  const { fileName, platform } = resolvedPlatform;
+  const packagePath = await resolveFanweiHelperPackagePath(fileName);
   if (!packagePath) {
     return json(res, 503, { error: `泛微本机助手安装包（${platform}）尚未生成，请联系管理员。` });
   }
@@ -2632,6 +3304,113 @@ async function handleMonitorAccountsExcel(req, res) {
     "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
   });
   createReadStream(outputPath).pipe(res);
+}
+
+async function handleNotStartedCandidateDownload(sessionId, req, res) {
+  const task = await findVisibleTaskBySessionId(req, sessionId).catch(() => null);
+  if (!task) return notFound(res);
+  const session = taskSessionForId(task, sessionId);
+  if (!session || session.sessionType !== "trial") return notFound(res);
+
+  const login = getYikaoLoginForTask(task);
+  const requirementIndex = Number(session.requirementIndex || 0);
+  const sessionConfig = taskRequirementConfig(task, requirementIndex);
+  const courses = Array.isArray(sessionConfig.courses) && sessionConfig.courses.length
+    ? sessionConfig.courses
+    : task?.config?.courses || [];
+  const examName = scoreCourseFallback(courses, session.name || "试考");
+  const tenantEntries = await fetchAllSessionEntries(login, sessionId, []);
+  const storedCandidates = await runTaskState("list_candidates", {
+    taskId: task.taskId,
+    sessionId,
+  }).catch(() => []);
+  const localCandidates = attachCourseNamesToCandidates(storedCandidates, courses);
+  const rows = mergeScoreRows({
+    tenantEntries,
+    localCandidates,
+    examName,
+  }).filter((row) => String(row.exam_status || "").trim() === "未开考");
+  if (!rows.length) return badRequest(res, "当前试考场次没有未开考考生");
+
+  const exportId = randomUUID();
+  const payloadPath = path.join(generatedDir, `${exportId}-not-started-candidates.json`);
+  const outputPath = path.join(generatedDir, `${exportId}-not-started-candidates.xlsx`);
+  const fileName = safeExcelFileName(`${session.name || "试考"}-未开考考生名单`);
+  await fs.writeFile(
+    payloadPath,
+    JSON.stringify({ session, rows }, null, 2),
+    "utf8",
+  );
+  const result = await runPythonJson([notStartedCandidateExporterScript, payloadPath, outputPath]);
+  if (!result.ok) {
+    return json(res, 400, { error: "未开考考生名单生成失败", errors: result.errors || [] });
+  }
+  res.writeHead(200, {
+    "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+  });
+  createReadStream(outputPath).pipe(res);
+}
+
+async function fetchPublicAssistantSessionRows({ task, session }) {
+  const sessionId = String(session?.session_id || "").trim();
+  const login = getYikaoLoginForTask(task);
+  const requirementIndex = Number(session?.requirementIndex || 0);
+  const sessionConfig = taskRequirementConfig(task, requirementIndex);
+  const courses = Array.isArray(sessionConfig.courses) && sessionConfig.courses.length
+    ? sessionConfig.courses
+    : task?.config?.courses || [];
+  const subjectNames = courses
+    .map((course) => String(course?.name || course?.course_name || "").trim())
+    .filter(Boolean);
+  try {
+    const [tenantEntries, storedCandidates] = await Promise.all([
+      fetchAllSessionEntries(login, sessionId, []),
+      runTaskState("list_candidates", { taskId: task.taskId, sessionId }).catch(() => []),
+    ]);
+    const localCandidates = attachCourseNamesToCandidates(storedCandidates, courses);
+    return {
+      rows: mergeScoreRows({ tenantEntries, localCandidates, examName: "" }),
+      subjectNames,
+    };
+  } catch (error) {
+    console.warn(`[考试数据助手] 场次 ${sessionId} 实时查询失败：${error instanceof Error ? error.message : String(error)}`);
+    throw error;
+  }
+}
+
+async function handlePublicExamAssistantChat(req, res) {
+  const payload = parseJsonSafe(await readBody(req));
+  if (!payload || typeof payload !== "object") return badRequest(res, "请求内容不是合法 JSON。");
+  const queryTime = new Date().toISOString();
+  let result = null;
+  let queryError = null;
+  try {
+    result = await createPublicExamAssistantResponse({
+      message: payload.message,
+      context: payload.context,
+      listTasks: () => runTaskState("list_all"),
+      listSessions: () => runTaskState("list_sessions"),
+      getTask: (taskId) => runTaskState("get", { taskId }),
+      fetchSessionRows: fetchPublicAssistantSessionRows,
+    });
+    if (!result.ok) return json(res, result.status || 400, { error: result.error || "查询失败" });
+    return json(res, 200, result);
+  } catch (error) {
+    queryError = error;
+    throw error;
+  } finally {
+    const entry = buildAssistantQueryLogEntry({
+      queryTime,
+      completedAt: new Date().toISOString(),
+      question: payload.message,
+      result,
+      error: queryError instanceof Error ? queryError.message : String(queryError || ""),
+    });
+    await appendAssistantQueryLog(assistantQueryLogPath, entry).catch((error) => {
+      console.warn(`[考试数据助手] 查询汇总日志写入失败：${error?.message || error}`);
+    });
+  }
 }
 
 async function findCachedMonitorAccounts(sessionId) {
@@ -3224,6 +4003,7 @@ async function attachAssessmentReportsToRows({ login, sessionId, rows = [], logs
   const concurrency = 4;
   let candidateWithReports = 0;
   let reportLinkCount = 0;
+  const candidatesWithoutRegularReports = [];
   for (let index = 0; index < candidates.length; index += concurrency) {
     const batch = candidates.slice(index, index + concurrency);
     const details = await Promise.all(
@@ -3231,12 +4011,35 @@ async function attachAssessmentReportsToRows({ login, sessionId, rows = [], logs
     );
     details.forEach((detail, detailIndex) => {
       const reports = normalizeAssessmentReports(detail);
-      if (!reports.length) return;
+      if (!reports.length) {
+        candidatesWithoutRegularReports.push(batch[detailIndex]);
+        return;
+      }
       const target = outputRows[batch[detailIndex].index];
       target.reports = reports;
       candidateWithReports += 1;
       reportLinkCount += reports.length;
     });
+  }
+
+  if (candidatesWithoutRegularReports.length) {
+    try {
+      const specialResults = await fetchSimplePrftAssessmentReports({
+        login,
+        sessionId,
+        candidates: candidatesWithoutRegularReports,
+        requestTenantJson: readTenantJsonWithLogin,
+        logs,
+      });
+      for (const { candidate, reports } of specialResults) {
+        const target = outputRows[candidate.index];
+        target.reports = reports;
+        candidateWithReports += 1;
+        reportLinkCount += reports.length;
+      }
+    } catch (error) {
+      logs.push(`[成绩处理] simple_PRFT 特殊测评报告查询失败：${error?.message || error}`);
+    }
   }
   logs.push(`[成绩处理] 测评报告链接查询完成：${candidateWithReports} 名考生有报告，共 ${reportLinkCount} 个链接`);
   return outputRows;
@@ -3377,9 +4180,13 @@ async function downloadAssessmentReportFiles({ login, reportItems = [], outputDi
   let downloaded = 0;
   for (const item of reportItems) {
     const reportUrl = scoreReportUrl(item.report.url, login);
-    const response = await fetch(reportUrl, {
-      headers: scoreReportFetchHeaders(login, reportUrl),
-    });
+    const { response, responseData: reportBuffer } = await fetchTenantResponseWithAudit(
+      login,
+      reportUrl,
+      { headers: scoreReportFetchHeaders(login, reportUrl) },
+      "下载测评文档",
+      async (reportResponse) => Buffer.from(await reportResponse.arrayBuffer()),
+    );
     if (!response.ok) {
       throw new Error(`测评文档下载失败：${item.folderName}/${item.report?.name || `测评文档_${item.reportIndex + 1}`}，HTTP ${response.status}`);
     }
@@ -3393,7 +4200,7 @@ async function downloadAssessmentReportFiles({ login, reportItems = [], outputDi
       usedFileNames,
       scoreReportFileName(item.report, response, reportUrl, item.reportIndex),
     );
-    await fs.writeFile(path.join(folderPath, fileName), Buffer.from(await response.arrayBuffer()));
+    await fs.writeFile(path.join(folderPath, fileName), reportBuffer);
     downloaded += 1;
   }
   return downloaded;
@@ -3487,18 +4294,16 @@ async function mergeEntryAndScoreRows({ login, sessionId, entries = [], scores =
 async function postCandidatesToTenant(login, sessionId, candidates, customFieldMappings = []) {
   const base = normalizeApiBase(process.env.YIKAO_API_BASE);
   const tenantUrl = new URL(`/tenant/api/session/${encodeURIComponent(sessionId)}/entry/`, base);
-  const response = await fetch(tenantUrl, {
-    method: "POST",
-    headers: tenantHeadersForLogin(login, { "Content-Type": "application/json" }),
-    body: JSON.stringify(buildTenantCandidateEntries(candidates, customFieldMappings)),
-  });
-  const text = await response.text();
-  let payloadResponse = null;
-  try {
-    payloadResponse = text ? JSON.parse(text) : null;
-  } catch {
-    payloadResponse = text;
-  }
+  const { response, responseData: payloadResponse } = await fetchTenantResponseWithAudit(
+    login,
+    tenantUrl,
+    {
+      method: "POST",
+      headers: tenantHeadersForLogin(login, { "Content-Type": "application/json" }),
+      body: JSON.stringify(buildTenantCandidateEntries(candidates, customFieldMappings)),
+    },
+    "导入考生",
+  );
   return { response, payloadResponse };
 }
 
@@ -3508,17 +4313,15 @@ async function deleteCandidatePermit(login, sessionId, permit) {
     `/tenant/api/session/${encodeURIComponent(sessionId)}/entry/${encodeURIComponent(permit)}/`,
     base,
   );
-  const response = await fetch(tenantUrl, {
-    method: "DELETE",
-    headers: tenantHeadersForLogin(login),
-  });
-  const text = await response.text();
-  let detail = null;
-  try {
-    detail = text ? JSON.parse(text) : null;
-  } catch {
-    detail = text;
-  }
+  const { response, responseData: detail } = await fetchTenantResponseWithAudit(
+    login,
+    tenantUrl,
+    {
+      method: "DELETE",
+      headers: tenantHeadersForLogin(login),
+    },
+    "清理重复考生",
+  );
   return {
     permit,
     ok: response.ok,
@@ -3584,16 +4387,12 @@ async function handleSessions(req, res) {
 
   const activeKey = login.tenantApiKey || (login.allowEnvFallback ? process.env.YIKAO_API_KEY || "" : "");
   const keyHint = activeKey ? `末尾 ${activeKey.slice(-4)}` : "未配置";
-  const response = await fetch(tenantUrl, {
-    headers: tenantHeadersForLogin(login),
-  });
-  const text = await response.text();
-  let payload = null;
-  try {
-    payload = text ? JSON.parse(text) : null;
-  } catch {
-    payload = text;
-  }
+  const { response, responseData: payload } = await fetchTenantResponseWithAudit(
+    login,
+    tenantUrl,
+    { headers: tenantHeadersForLogin(login) },
+    "获取场次列表",
+  );
   if (!response.ok) {
     const message =
       response.status === 401
@@ -4074,7 +4873,8 @@ async function handleCreateJob(req, res) {
     return badRequest(res, "需求单缺少考试名称或考试时间，请重新导入并检查表格。");
   }
 
-  const storedLogin = taskForJob ? getYikaoLoginForTask(taskForJob) : getYikaoLoginForRequest(req);
+  const reuseBoundTaskLogin = taskForJob && taskHasCreatedSessions(taskForJob);
+  const storedLogin = reuseBoundTaskLogin ? getYikaoLoginForTask(taskForJob) : getYikaoLoginForRequest(req);
   const login = taskForJob || auth.enabled ? storedLogin : { ...storedLogin, ...(payload.login || {}) };
   if (!login.url || !login.username || !login.password) {
     return badRequest(res, "请先填写并保存后台登录配置。");
@@ -4118,6 +4918,7 @@ function getYikaoLoginForRequest(req) {
   });
   return {
     ...login,
+    operatorAccount: normalizeEmail(user?.email || "") || login.username || "本机模式",
     allowEnvFallback: !auth.enabled,
   };
 }
@@ -4134,7 +4935,13 @@ function getYikaoLoginForTask(task = {}) {
       profileId,
       profileLabel,
     });
-    if (login?.tenantApiKey) return { ...login, allowEnvFallback: !auth.enabled };
+    if (login?.tenantApiKey) {
+      return {
+        ...login,
+        operatorAccount: ownerEmail || login.username || "系统自动任务",
+        allowEnvFallback: !auth.enabled,
+      };
+    }
   }
   const login = loginForApiKeyProfile({
     user: ownerEmail ? { email: ownerEmail } : null,
@@ -4143,13 +4950,45 @@ function getYikaoLoginForTask(task = {}) {
     profileId,
     profileLabel,
   });
-  return { ...login, allowEnvFallback: !auth.enabled };
+  return {
+    ...login,
+    operatorAccount: ownerEmail || login.username || "系统自动任务",
+    allowEnvFallback: !auth.enabled,
+  };
+}
+
+function taskHasCreatedSessions(task = {}) {
+  return (task.sessions || []).some((session) => String(session?.session_id || "").trim());
+}
+
+function tenantIdForTask(task = {}) {
+  const ownerEmail = normalizeEmail(task.ownerEmail || "");
+  const profileId = String(task.config?.apiKeyProfileId || "").trim();
+  const profileLabel = normalizeEmail(task.sourceAccount || "");
+  const profiles = apiKeyProfilesForUser({
+    user: ownerEmail ? { email: ownerEmail } : null,
+    userSettings: state.userSettings,
+    legacySettings: state.settings,
+  });
+  const profile = profiles.find((item) => profileId && item.id === profileId)
+    || profiles.find((item) => profileLabel && normalizeEmail(item.login?.username || item.label || "") === profileLabel);
+  return String(profile?.tenantId || task.config?.tenantId || "").trim();
+}
+
+async function syncTaskTenantId(task = {}) {
+  const tenantId = tenantIdForTask(task);
+  if (!tenantId || tenantId === String(task.config?.tenantId || "").trim()) return task;
+  return await runTaskState("update_config", {
+    taskId: task.taskId,
+    config: { tenantId },
+  });
 }
 
 function publicYikaoLogin(login) {
   return {
     url: login?.url || "",
     username: login?.username || "",
+    tenantId: login?.tenantId || "",
     password: login?.password || "",
     tenantApiKey: login?.tenantApiKey || "",
   };
@@ -4173,6 +5012,7 @@ async function handleSaveSettings(req, res) {
     if (nextLogin.tenantApiKey) {
       upsertApiKeyProfileInRecord(nextSettings, {
         apiBase: nextLogin.apiBase || "https://eztest.cn",
+        tenantId: nextLogin.tenantId || "",
         tenantApiKey: nextLogin.tenantApiKey,
         label: nextLogin.username || nextLogin.tenantApiKey,
         login: nextLogin,
@@ -4322,6 +5162,9 @@ function updateLocalApiKeyProfile(profileId, updates = {}) {
     ...profiles[index],
     label: updates.label === undefined ? profiles[index].label : String(updates.label || "").trim(),
     remark: updates.remark === undefined ? String(profiles[index].remark || "") : String(updates.remark || "").trim(),
+    tenantId: updates.tenantId === undefined
+      ? String(profiles[index].tenantId || "")
+      : String(updates.tenantId || "").trim(),
     tenantApiKey: String(updates.tenantApiKey || profiles[index].tenantApiKey || "").trim(),
     keyHint: apiKeyHint(updates.tenantApiKey || profiles[index].tenantApiKey),
     login: updates.login && typeof updates.login === "object"
@@ -4356,6 +5199,7 @@ function updateLocalApiKeyProfile(profileId, updates = {}) {
       ...(state.settings.login || {}),
       ...(profiles[index].login || {}),
       username: profiles[index].login?.username || profiles[index].label || state.settings.login?.username || "",
+      tenantId: profiles[index].tenantId || "",
       tenantApiKey: profiles[index].tenantApiKey,
     };
   }
@@ -4377,6 +5221,7 @@ function deleteLocalApiKeyProfile(profileId) {
       ...(state.settings.login || {}),
       ...(current?.login || {}),
       username: current?.login?.username || current?.label || state.settings.login?.username || "",
+      tenantId: current?.tenantId || "",
       tenantApiKey: current?.tenantApiKey || "",
     },
   };
@@ -4425,6 +5270,26 @@ async function handleAuthLogin(auth, req, res) {
     "Set-Cookie": buildLoginCookie(auth, session.token),
   });
   res.end(JSON.stringify({ ok: true, enabled: true, authenticated: true, user: session.user }));
+}
+
+async function handleWebLogin(auth, req, res, url) {
+  if (!auth.enabled) return redirect(res, "/");
+
+  const body = await readBody(req);
+  const payload = new URLSearchParams(body.toString("utf8"));
+  const user = await verifyLogin(auth, payload.get("email") || "", payload.get("password") || "");
+  if (!user) return redirect(res, "/login?error=invalid");
+
+  const session = createSession(auth, user);
+  await saveAuthSessions(auth);
+  const next = url.searchParams.get("next") || "/";
+  const location = next.startsWith("/") && !next.startsWith("//") ? next : "/";
+  res.writeHead(302, {
+    Location: location,
+    "Cache-Control": "no-store",
+    "Set-Cookie": buildLoginCookie(auth, session.token),
+  });
+  res.end();
 }
 
 function handleAuthMe(auth, req, res) {
@@ -4518,11 +5383,54 @@ function visibleByOwner(auth, req, item) {
   return canViewOwner(getAuthUserFromRequest(auth, req), item?.ownerEmail || "");
 }
 
+const PROJECT_WORKFLOW_SUMMARY_KEYS = ["batch", "content", "personnel", "archive"];
+
+function projectWorkflowSummary(task = {}) {
+  const batchDraft = buildOperationBatchDraft(task, operationBatchDraftOverridesFromTask(task));
+  const workflow = buildProjectWorkflow(task, batchDraft);
+  return {
+    steps: Object.fromEntries(PROJECT_WORKFLOW_SUMMARY_KEYS.map((key) => [key, {
+      status: String(workflow.steps?.[key]?.status || "waiting_batch"),
+      changeNotice: String(workflow.steps?.[key]?.changeNotice || ""),
+    }])),
+  };
+}
+
 async function handleTaskList(req, res) {
   const requestUrl = new URL(req.url, "http://127.0.0.1");
   const includeArchived = requestUrl.searchParams.get("includeArchived") === "1";
   const tasks = await runTaskState(includeArchived ? "list_all" : "list");
-  json(res, 200, { tasks: tasks.filter((task) => visibleByOwner(auth, req, task)) });
+  const visibleTasks = tasks.filter((task) => visibleByOwner(auth, req, task));
+  if (requestUrl.searchParams.get("includeWorkflow") !== "1") {
+    return json(res, 200, { tasks: visibleTasks });
+  }
+  const detailedTasks = await Promise.all(visibleTasks.map((task) => (
+    runTaskState("get", { taskId: task.taskId })
+  )));
+  return json(res, 200, {
+    tasks: visibleTasks.map((task, index) => ({
+      ...task,
+      operationWorkflowSummary: projectWorkflowSummary(detailedTasks[index] || task),
+    })),
+  });
+}
+
+async function handlePlatformApiLogs(req, res) {
+  const requestUrl = new URL(req.url, "http://127.0.0.1");
+  const user = getAuthUserFromRequest(auth, req);
+  const operatorAccount = auth.enabled && !isAdminUser(user) ? normalizeEmail(user?.email || "") : "";
+  const [logs, assistantQueries] = await Promise.all([
+    readPlatformApiLogs(platformApiLogPath, {
+      limit: requestUrl.searchParams.get("limit") || 200,
+      operatorAccount,
+    }),
+    !auth.enabled || isAdminUser(user)
+      ? readAssistantQueryLogs(assistantQueryLogPath, {
+        limit: requestUrl.searchParams.get("assistantLimit") || 50,
+      })
+      : [],
+  ]);
+  return json(res, 200, { logs, assistantQueries });
 }
 
 async function handleExamList(req, res) {
@@ -4530,28 +5438,107 @@ async function handleExamList(req, res) {
   json(res, 200, { sessions: sessions.filter((session) => visibleByOwner(auth, req, session)) });
 }
 
+async function enrichTaskRequirementChangesForDetail(task) {
+  const preliminary = enrichTaskCourseRequirementChanges(enrichTaskSessionRequirementChanges(task));
+  const pendingSessionIds = new Set(preliminary.sessions
+    .filter((session) => session.requirementChange?.pending)
+    .map((session) => String(session.session_id || "").trim())
+    .filter(Boolean));
+  const pendingCourseIndexes = new Set(preliminary.sessions
+    .filter((session) => session.sessionType === "formal" && session.courseRequirementChange?.pending)
+    .map((session) => String(Math.max(Number(session.requirementIndex || 0), 0))));
+  if (!pendingSessionIds.size && !pendingCourseIndexes.size) return preliminary;
+
+  const currentBySessionId = {};
+  const knownFieldsBySessionId = {};
+  const currentByRequirementIndex = {};
+  let login = null;
+  try {
+    login = getYikaoLoginForTask(task);
+  } catch {}
+  if (login) {
+    const apiBase = sessionChangeApiBase(login);
+    await Promise.all((task.sessions || []).map(async (session) => {
+      const sessionId = String(session.session_id || "").trim();
+      if (!pendingSessionIds.has(sessionId)) return;
+      try {
+        const detail = await fetchTenantSessionDetailWithListFallback({
+          apiBase,
+          sessionId,
+          login,
+          requestJson: readTenantJsonWithLogin,
+        });
+        currentBySessionId[sessionId] = editableSessionFieldsFromDetail(detail);
+        knownFieldsBySessionId[sessionId] = editableSessionFieldNamesFromDetail(detail);
+      } catch {}
+    }));
+    await Promise.all([...pendingCourseIndexes].map(async (requirementIndex) => {
+      const storedCourses = taskCoursesForChange(task, Number(requirementIndex));
+      if (!storedCourses.length) return;
+      try {
+        currentByRequirementIndex[requirementIndex] = await fetchTenantCourseSnapshots({
+          apiBase,
+          courses: storedCourses,
+          login,
+          requestJson: readTenantJsonWithLogin,
+        });
+      } catch {}
+    }));
+  }
+
+  return enrichTaskCourseRequirementChanges(
+    enrichTaskSessionRequirementChanges(task, {
+      currentBySessionId,
+      knownFieldsBySessionId,
+      confirmedOnly: true,
+    }),
+    { currentByRequirementIndex, confirmedOnly: true },
+  );
+}
+
 async function handleTaskDetail(taskId, req, res) {
   const task = await runTaskState("get", { taskId });
   if (task && !visibleByOwner(auth, req, task)) return notFound(res);
   if (!task) return notFound(res);
+  const requestUrl = new URL(req.url, "http://127.0.0.1");
+  if (requestUrl.searchParams.get("local") === "1") {
+    let localTask = task;
+    try {
+      localTask.candidates = await runTaskState("list_candidates", { taskId });
+    } catch {
+      localTask.candidates = [];
+    }
+    return json(res, 200, {
+      ...taskWithCurrentAutoConfigPreviews(localTask),
+      sessionChangeFeatureEnabled,
+    });
+  }
   let syncedTask = task;
   try {
-    syncedTask = await syncTaskDetailSessionState(req, task);
+    syncedTask = await syncTaskTenantId(syncedTask);
+  } catch {}
+  try {
+    syncedTask = await syncTaskDetailSessionState(req, syncedTask);
   } catch {
-    syncedTask = task;
+    syncedTask = syncedTask || task;
   }
   try {
     syncedTask.candidates = await runTaskState("list_candidates", { taskId });
   } catch {
     syncedTask.candidates = [];
   }
-  const enrichedTask = await enrichTaskPaperUnitInfoForDetail(req, syncedTask);
-  return json(res, 200, { ...enrichedTask, sessionChangeFeatureEnabled });
+  const enrichedTask = await enrichTaskRequirementChangesForDetail(
+    await enrichTaskPaperUnitInfoForDetail(req, syncedTask),
+  );
+  return json(res, 200, {
+    ...taskWithCurrentAutoConfigPreviews(enrichedTask),
+    sessionChangeFeatureEnabled,
+  });
 }
 
 function sessionChangeDisabled(res) {
   return json(res, 403, {
-    error: "修改场次信息仅在测试控制台启用。请使用 PORT=8876 EASY_EXAM_RUNTIME_DIR=.easy_exam_runtime_test npm start 启动。",
+    error: "管理员已关闭场次修改功能。",
     featureEnabled: false,
   });
 }
@@ -4574,26 +5561,584 @@ async function visibleTaskSession(taskId, sessionId, req, res) {
   return { task, session };
 }
 
+function candidateChangeCourseContext(task, session) {
+  const requirementIndex = Number(session?.requirementIndex || 0);
+  const sessionConfig = taskRequirementConfig(task, requirementIndex);
+  return Array.isArray(sessionConfig?.courses) && sessionConfig.courses.length
+    ? sessionConfig.courses
+    : Array.isArray(task?.config?.courses) ? task.config.courses : [];
+}
+
+function candidateChangeRosterRows(tenantEntries = [], localCandidates = [], courses = []) {
+  const preferCompleteValue = (liveValue, localValue) => {
+    const liveText = String(liveValue || "").trim();
+    const localText = String(localValue || "").trim();
+    if (/[\u2022*]/.test(liveText) && localText && !/[\u2022*]/.test(localText)) return localText;
+    return liveText || localText;
+  };
+  const localByPermit = new Map(
+    attachCourseNamesToCandidates(localCandidates, courses)
+      .map((candidate) => normalizeCandidateChangeRow(candidate))
+      .filter((candidate) => candidate.permit)
+      .map((candidate) => [candidate.permit, candidate]),
+  );
+  return normalizeCandidateRoster(
+    tenantEntries.map((entry) => {
+      const scoreRow = normalizeScoreRow(entry);
+      const live = normalizeCandidateChangeRow({
+        ...entry,
+        permit: scoreRow.permit,
+        full_name: scoreRow.name,
+        identity_id: scoreRow.identity_id,
+        mobile: scoreRow.mobile,
+        email: scoreRow.email,
+        course_name: scoreRow.course,
+        exam_status: scoreRow.exam_status,
+      });
+      const local = localByPermit.get(live.permit) || {};
+      return {
+        ...local,
+        ...Object.fromEntries(Object.entries(live).filter(([, value]) => {
+          if (value && typeof value === "object") return Object.keys(value).length > 0;
+          return String(value || "").trim() !== "";
+        })),
+        custom_fields: Object.keys(live.custom_fields || {}).length ? live.custom_fields : local.custom_fields || {},
+        identity_id: preferCompleteValue(live.identity_id, local.identity_id),
+        mobile: preferCompleteValue(live.mobile, local.mobile),
+        email: preferCompleteValue(live.email, local.email),
+        course_code: live.course_code || local.course_code || "",
+        course_name: live.course_name || local.course_name || "",
+        exam_status: live.exam_status || local.exam_status || "",
+      };
+    }),
+  ).candidates;
+}
+
+async function readCandidateChangeRoster(task, session, localOverride = null) {
+  const sessionId = String(session.session_id || "").trim();
+  const login = getYikaoLoginForTask(task);
+  const [tenantEntries, localCandidates] = await Promise.all([
+    fetchAllSessionEntries(login, sessionId, []),
+    localOverride
+      ? Promise.resolve(localOverride)
+      : runTaskState("list_candidates", { taskId: task.taskId, sessionId }).catch(() => []),
+  ]);
+  if (!tenantEntries.length && Number(session.candidateCount || 0) > 0) {
+    const error = new Error("易考线上名单返回为空，已停止生成变更，避免使用过期本地名单。");
+    error.status = 409;
+    throw error;
+  }
+  return candidateChangeRosterRows(tenantEntries, localCandidates, candidateChangeCourseContext(task, session));
+}
+
+function candidateChangeResponseSession(session = {}) {
+  return {
+    session_id: String(session.session_id || ""),
+    sessionType: String(session.sessionType || ""),
+    requirementIndex: Number(session.requirementIndex || 0),
+    name: String(session.name || ""),
+    start: String(session.start || ""),
+    end: String(session.end || ""),
+    candidateCount: Number(session.candidateCount || 0),
+    roomCount: Number(session.roomCount || 0),
+  };
+}
+
+async function handleCandidateChangeRoster(taskId, sessionId, req, res) {
+  const { task, session } = await visibleTaskSession(taskId, sessionId, req, res);
+  if (!task || !session) return;
+  try {
+    const [candidates, changes] = await Promise.all([
+      readCandidateChangeRoster(task, session),
+      runTaskState("list_candidate_changes", { taskId, sessionId }),
+    ]);
+    const phase = candidateChangeSessionPhase(session);
+    return json(res, 200, {
+      task: { taskId: task.taskId, projectName: task.projectName, examName: task.examName || "" },
+      session: candidateChangeResponseSession(session),
+      candidates,
+      rosterHash: candidateRosterHash(candidates),
+      phase,
+      canChange: phase === "not_started",
+      checkedAt: new Date().toISOString(),
+      onlineVerified: true,
+      changes,
+    });
+  } catch (error) {
+    return json(res, Number(error?.status || 502), {
+      error: error?.message || "易考线上名单读取失败。",
+      onlineVerified: false,
+    });
+  }
+}
+
+async function handleCandidateChangePreview(taskId, sessionId, req, res) {
+  const { task, session } = await visibleTaskSession(taskId, sessionId, req, res);
+  if (!task || !session) return;
+  const payload = parseJsonSafe(await readBody(req));
+  if (!payload || typeof payload !== "object") return badRequest(res, "请求内容不是合法 JSON。");
+  const sourceType = ["full_list", "manual"].includes(String(payload.sourceType || ""))
+    ? String(payload.sourceType)
+    : "full_list";
+  const reason = String(payload.reason || "").trim();
+  if (!reason) return badRequest(res, "请填写变更原因。");
+  let proposedCandidates = normalizeCandidateRoster(payload.candidates || []).candidates;
+  let currentCandidates;
+  try {
+    currentCandidates = await readCandidateChangeRoster(task, session);
+  } catch (error) {
+    return json(res, Number(error?.status || 502), { error: error?.message || "易考线上名单读取失败。" });
+  }
+  const preliminaryPreview = buildCandidateChangePreview(currentCandidates, proposedCandidates);
+  if (preliminaryPreview.errors.length) {
+    return json(res, 400, { error: "名单差异校验失败", errors: preliminaryPreview.errors });
+  }
+  const validationCandidates = candidateRosterForValidation(proposedCandidates, currentCandidates);
+  const validationErrors = [
+    ...validateCandidatePayload(validationCandidates),
+    ...validateCandidateCustomFields(validationCandidates),
+  ];
+  if (validationErrors.length) return json(res, 400, { error: "最新版名单校验失败", errors: validationErrors });
+  const courseAssignment = prepareCandidatesForCourseImport(proposedCandidates, task, { sessionId });
+  if (courseAssignment.errors.length) {
+    return json(res, 400, { error: "考生科目分配失败", errors: courseAssignment.errors });
+  }
+  proposedCandidates = normalizeCandidateRoster(courseAssignment.candidates).candidates;
+  const preview = buildCandidateChangePreview(currentCandidates, proposedCandidates);
+  if (preview.errors.length) return json(res, 400, { error: "名单差异校验失败", errors: preview.errors });
+  if (!preview.items.length) return json(res, 400, { error: "最新版名单与易考线上名单没有差异。" });
+  const phase = candidateChangeSessionPhase(session);
+  const impact = candidateChangeImpact({ session, summary: preview.summary });
+  const user = getAuthUserFromRequest(auth, req);
+  const changeSet = await runTaskState("create_candidate_change", {
+    id: `CC-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${randomUUID().slice(0, 8).toUpperCase()}`,
+    taskId,
+    sessionId,
+    sourceType,
+    reason,
+    baselineHash: preview.baseline_hash,
+    proposedHash: preview.proposed_hash,
+    summary: preview.summary,
+    impact,
+    createdBy: user?.email || task.ownerEmail || "",
+    beforeRoster: preview.before,
+    items: preview.items,
+  });
+  return json(res, 200, {
+    changeSet,
+    session: candidateChangeResponseSession(session),
+    phase,
+    canApply: phase === "not_started" && preview.summary.blocked === 0,
+  });
+}
+
+async function handleCandidateChangeList(taskId, sessionId, req, res) {
+  const { task, session } = await visibleTaskSession(taskId, sessionId, req, res);
+  if (!task || !session) return;
+  const changes = await runTaskState("list_candidate_changes", { taskId, sessionId });
+  return json(res, 200, { changes });
+}
+
+function proposedRosterFromCandidateChange(changeSet = {}) {
+  const beforeSnapshot = (changeSet.snapshots || []).find((snapshot) => snapshot.phase === "before");
+  const byPermit = new Map(
+    normalizeCandidateRoster(beforeSnapshot?.roster || []).candidates.map((candidate) => [candidate.permit, candidate]),
+  );
+  for (const item of changeSet.items || []) {
+    if (item.operation === "delete") {
+      byPermit.delete(String(item.old_permit || item.permit || ""));
+      continue;
+    }
+    if (item.operation === "edit" && item.old_permit && item.old_permit !== item.permit) {
+      byPermit.delete(item.old_permit);
+    }
+    if (item.after?.permit) byPermit.set(item.after.permit, normalizeCandidateChangeRow(item.after));
+  }
+  return normalizeCandidateRoster([...byPermit.values()]).candidates;
+}
+
+async function postCandidateChangeEntry(login, sessionId, candidate, mappings) {
+  const { response, payloadResponse } = await postCandidatesToTenant(login, sessionId, [candidate], mappings);
+  const fail = Number(payloadResponse?.fail || 0);
+  if (!response.ok || fail > 0) {
+    const detail = normalizeImportErrors(payloadResponse?.errors || []);
+    const error = new Error(detail.map((item) => item.message || item.msg || item.error).filter(Boolean).join("；") || `新增考生失败：HTTP ${response.status}`);
+    error.status = response.status;
+    error.detail = payloadResponse;
+    throw error;
+  }
+}
+
+async function putCandidateChangeEntry(login, sessionId, permit, candidate, mappings) {
+  const base = normalizeApiBase(process.env.YIKAO_API_BASE);
+  const tenantUrl = new URL(
+    `/tenant/api/session/${encodeURIComponent(sessionId)}/entry/${encodeURIComponent(permit)}/`,
+    base,
+  );
+  const tenantEntry = buildTenantCandidateEntries([candidate], mappings)[0];
+  const { response, responseData } = await fetchTenantResponseWithAudit(
+    login,
+    tenantUrl,
+    {
+      method: "PUT",
+      headers: tenantHeadersForLogin(login, { "Content-Type": "application/json" }),
+      body: JSON.stringify(tenantEntry),
+    },
+    "修改考生",
+  );
+  if (!response.ok) {
+    const error = new Error(`修改考生失败：HTTP ${response.status}`);
+    error.status = response.status;
+    error.detail = responseData;
+    throw error;
+  }
+}
+
+async function deleteCandidateChangeEntry(login, sessionId, permit) {
+  const base = normalizeApiBase(process.env.YIKAO_API_BASE);
+  const tenantUrl = new URL(
+    `/tenant/api/session/${encodeURIComponent(sessionId)}/entry/${encodeURIComponent(permit)}/`,
+    base,
+  );
+  const { response, responseData } = await fetchTenantResponseWithAudit(
+    login,
+    tenantUrl,
+    { method: "DELETE", headers: tenantHeadersForLogin(login) },
+    "删除考生",
+  );
+  if (!response.ok) {
+    const error = new Error(`删除考生失败：HTTP ${response.status}`);
+    error.status = response.status;
+    error.detail = responseData;
+    throw error;
+  }
+}
+
+async function executeCandidateChangeItem(login, sessionId, item, mappings) {
+  if (item.operation === "add") return await postCandidateChangeEntry(login, sessionId, item.after, mappings);
+  if (item.operation === "edit") {
+    return await putCandidateChangeEntry(login, sessionId, item.old_permit || item.permit, item.after, mappings);
+  }
+  if (item.operation === "delete") {
+    return await deleteCandidateChangeEntry(login, sessionId, item.old_permit || item.permit);
+  }
+  throw new Error(`不支持的考生变更类型：${item.operation}`);
+}
+
+async function handleCandidateChangeApply(taskId, sessionId, changeSetId, req, res) {
+  const { task, session } = await visibleTaskSession(taskId, sessionId, req, res);
+  if (!task || !session) return;
+  const payload = parseJsonSafe(await readBody(req)) || {};
+  if (payload.confirm !== true) return badRequest(res, "请先完成人工确认。");
+  const changeSet = await runTaskState("get_candidate_change", { changeSetId });
+  if (!changeSet || changeSet.taskId !== taskId || changeSet.sessionId !== sessionId) return notFound(res);
+  if (!new Set(["waiting_review", "conflict"]).has(changeSet.status)) {
+    return json(res, 409, { error: `变更单当前状态为 ${changeSet.status}，不能重复执行。`, changeSet });
+  }
+  if ((changeSet.items || []).some((item) => item.blocked)) {
+    return json(res, 409, { error: "变更单包含已参考或已出成绩考生，不能执行。", changeSet });
+  }
+  if (candidateChangeSessionPhase(session) !== "not_started") {
+    return json(res, 409, { error: "考试已经开始，考生名单结构已冻结。", changeSet });
+  }
+  state.candidateChangeInFlight ||= new Set();
+  if (state.candidateChangeInFlight.has(changeSetId)) {
+    return json(res, 409, { error: "该变更单正在执行，请勿重复提交。" });
+  }
+  state.candidateChangeInFlight.add(changeSetId);
+  try {
+    const currentCandidates = await readCandidateChangeRoster(task, session);
+    const currentHash = candidateRosterHash(currentCandidates);
+    if (currentHash !== changeSet.baselineHash) {
+      const conflicted = await runTaskState("update_candidate_change", {
+        changeSetId,
+        status: "conflict",
+        error: "易考线上名单已变化，请重新生成差异。",
+      });
+      return json(res, 409, { error: "易考线上名单已变化，请重新生成差异。", changeSet: conflicted });
+    }
+    await runTaskState("update_candidate_change", { changeSetId, status: "applying", error: "" });
+    const login = getYikaoLoginForTask(task);
+    const mappings = await runTaskState("list_custom_fields", { taskId, sessionId }).catch(() => []);
+    const itemResults = [];
+    for (const operation of ["add", "edit", "delete"]) {
+      for (const item of (changeSet.items || []).filter((candidateItem) => candidateItem.operation === operation)) {
+        try {
+          await executeCandidateChangeItem(login, sessionId, item, mappings);
+          itemResults.push({ id: item.id, status: "success", error: "" });
+        } catch (error) {
+          itemResults.push({ id: item.id, status: "failed", error: error?.message || String(error) });
+        }
+      }
+    }
+    const proposedRoster = proposedRosterFromCandidateChange(changeSet);
+    const afterRoster = await readCandidateChangeRoster(task, session, proposedRoster);
+    const afterHash = candidateRosterHash(afterRoster);
+    const failedItems = itemResults.filter((item) => item.status === "failed");
+    const readbackMatches = afterHash === changeSet.proposedHash;
+    const finalStatus = !failedItems.length && readbackMatches ? "applied" : "partial_failed";
+    const errorText = [
+      failedItems.length ? `${failedItems.length} 项执行失败` : "",
+      !readbackMatches ? "线上回读结果与预览不一致" : "",
+    ].filter(Boolean).join("；");
+    await runTaskState("replace_candidates", { taskId, sessionId, candidates: afterRoster });
+    await updateTaskSessionProgress(task, sessionId, { candidateCount: afterRoster.length });
+    const pendingBySession = task.config?.candidateChangePending && typeof task.config.candidateChangePending === "object"
+      ? task.config.candidateChangePending
+      : {};
+    await runTaskState("update_config", {
+      taskId,
+      config: {
+        candidateChangePending: {
+          ...pendingBySession,
+          [sessionId]: {
+            changeSetId,
+            updatedAt: new Date().toISOString(),
+            impact: changeSet.impact || {},
+            status: finalStatus,
+          },
+        },
+      },
+    });
+    const updated = await runTaskState("update_candidate_change", {
+      changeSetId,
+      status: finalStatus,
+      itemResults,
+      error: errorText,
+      afterRoster,
+      afterHash,
+    });
+    return json(res, finalStatus === "applied" ? 200 : 409, {
+      changeSet: updated,
+      readback: { matched: readbackMatches, rosterHash: afterHash, candidateCount: afterRoster.length },
+    });
+  } catch (error) {
+    const failed = await runTaskState("update_candidate_change", {
+      changeSetId,
+      status: "partial_failed",
+      error: error?.message || String(error),
+    }).catch(() => changeSet);
+    return json(res, Number(error?.status || 502), { error: error?.message || "考生变更执行失败。", changeSet: failed });
+  } finally {
+    state.candidateChangeInFlight.delete(changeSetId);
+  }
+}
+
+async function buildTenantSessionSyncPreview(task, session, login, apiBase, checkedAt) {
+  const sessionId = String(session.session_id || "").trim();
+  const detail = await fetchTenantSessionDetailWithListFallback({
+    apiBase,
+    sessionId,
+    login,
+    requestJson: readTenantJsonWithLogin,
+  });
+  let inventory = {};
+  try {
+    inventory = await fetchSessionSubjectPaperSnapshot({
+      login,
+      apiBase,
+      sessionId,
+      sessionDetail: detail,
+      knownCourses: session.sessionType === "formal"
+        ? taskCoursesForChange(task, Number(session.requirementIndex || 0))
+        : [],
+      requestJson: readTenantJsonWithLogin,
+    });
+  } catch (error) {
+    inventory = { readbackWarning: `科目和试卷读取失败：${sessionSyncErrorMessage(error)}` };
+  }
+  const preview = buildSessionSyncPreview(task, session, detail, checkedAt, inventory);
+  if (inventory.readbackWarning) preview.readbackWarning = inventory.readbackWarning;
+  return preview;
+}
+
+async function handleSessionSyncPreview(taskId, req, res, { persist = false, persistDetail = false } = {}) {
+  const task = await runTaskState("get", { taskId });
+  if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  const login = getYikaoLoginForTask(task);
+  const apiBase = sessionChangeApiBase(login);
+  const checkedAt = new Date().toISOString();
+  const sessions = [];
+  for (const session of task.sessions || []) {
+    const sessionId = String(session.session_id || "").trim();
+    if (!sessionId) continue;
+    try {
+      sessions.push(await buildTenantSessionSyncPreview(task, session, login, apiBase, checkedAt));
+    } catch (error) {
+      sessions.push({
+        sessionId,
+        sessionType: session.sessionType,
+        requirementIndex: Number(session.requirementIndex || 0),
+        checkedAt,
+        changed: false,
+        diff: [],
+        error: sessionSyncErrorMessage(error),
+      });
+    }
+  }
+  const preview = {
+    taskId,
+    checkedAt,
+    sessions,
+    changedCount: sessions.filter((item) => item.changed).length,
+    failedCount: sessions.filter((item) => item.error).length,
+  };
+  let persistedDetailCache = null;
+  if (persist) {
+    const config = { examListSyncPreviewCache: sessionSyncListCacheFromPreview(preview) };
+    if (persistDetail) {
+      persistedDetailCache = sessionSyncDetailCacheFromPreview(preview);
+      config.sessionSyncPreviewCache = persistedDetailCache;
+    }
+    await runTaskState("update_config", {
+      taskId,
+      config,
+    });
+  }
+  return json(res, 200, {
+    ...preview,
+    ...(persistedDetailCache ? { persistedDetailCache } : {}),
+  });
+}
+
+async function handleSessionSyncApply(taskId, sessionId, req, res) {
+  const payload = parseJsonSafe(await readBody(req));
+  if (!payload?.confirm) return badRequest(res, "请确认后再同步易考场次信息。");
+  const { task, session } = await visibleTaskSession(taskId, sessionId, req, res);
+  if (!task || !session) return;
+  const login = getYikaoLoginForTask(task);
+  const apiBase = sessionChangeApiBase(login);
+  let preview;
+  try {
+    preview = await buildTenantSessionSyncPreview(task, session, login, apiBase, new Date().toISOString());
+  } catch (error) {
+    const status = Number(error?.status || 0);
+    return json(res, status >= 400 && status < 600 ? status : 502, {
+      error: sessionSyncErrorMessage(error),
+      modified: false,
+      sessionId,
+    });
+  }
+
+  if (!preview.changed) {
+    const cacheInvalidatedTask = await runTaskState("update_config", {
+      taskId,
+      config: sessionSyncCacheInvalidation(),
+    }) || task;
+    const responseTask = enrichTaskCourseRequirementChanges(enrichTaskSessionRequirementChanges(cacheInvalidatedTask));
+    return json(res, 200, {
+      ok: true,
+      modified: false,
+      task: { ...responseTask, sessionChangeFeatureEnabled },
+      ...preview,
+    });
+  }
+
+  const syncedAt = new Date().toISOString();
+  const operator = getAuthUserFromRequest(auth, req)?.email || "";
+  const configPatch = {
+    ...buildSessionSyncConfigPatch(task, {
+      session,
+      current: preview.current,
+      availableFields: preview.availableFields,
+      options: preview.configuration?.options,
+      courses: preview.courses,
+      coursesForSync: preview.coursesForSync,
+      papers: preview.papers,
+      diff: preview.diff,
+      operator,
+      syncedAt,
+    }),
+    ...sessionSyncCacheInvalidation(),
+  };
+  let updatedTask = await runTaskState("sync_session", {
+    taskId,
+    requirementIndex: Number(session.requirementIndex || 0),
+    sessionType: session.sessionType,
+    session: {
+      session_id: session.session_id,
+      name: preview.current.name,
+      start: preview.current.start,
+      end: preview.current.end,
+    },
+    config: configPatch,
+  });
+  const previousChangeStep = (updatedTask?.steps || task.steps || [])
+    .find((item) => item.stepKey === "session_change");
+  const history = appendSessionChangeHistory(sessionChangeHistoryFromStep(previousChangeStep), {
+    changedAt: syncedAt,
+    operator,
+    sessionId,
+    sessionType: session.sessionType,
+    apiBase,
+    status: "success",
+    tenantStatus: 200,
+    verifyStatus: 200,
+    diff: preview.diff,
+    verifiedSession: { session_id: sessionId, ...preview.current },
+    action: SESSION_SYNC_ACTION,
+  });
+  const sessionLabel = session.sessionType === "formal" ? "正式考试" : "试考";
+  const message = `从易考同步${sessionLabel}场次 ${sessionId}：${preview.diff.map((item) => item.label).join("、")}`;
+  let loggedTask = updatedTask;
+  let logWarning = "";
+  try {
+    loggedTask = await updateTaskStep(taskId, "session_change", "success", {
+      message,
+      result: {
+        action: SESSION_SYNC_ACTION,
+        sessionId,
+        sessionType: session.sessionType,
+        apiBase,
+        changedFields: preview.diff.map((item) => item.field),
+        diff: preview.diff,
+        verifiedSession: { session_id: sessionId, ...preview.current },
+        history,
+      },
+    }) || updatedTask;
+  } catch {
+    logWarning = "场次信息已同步，但执行日志写入失败。";
+  }
+  const responseTask = enrichTaskCourseRequirementChanges(enrichTaskSessionRequirementChanges(loggedTask));
+  return json(res, 200, {
+    ok: true,
+    modified: true,
+    task: { ...responseTask, sessionChangeFeatureEnabled },
+    session: taskSessionForId(responseTask, sessionId),
+    sessionId,
+    syncedAt,
+    local: preview.local,
+    current: preview.current,
+    diff: preview.diff,
+    ...(logWarning ? { warning: logWarning } : {}),
+  });
+}
+
 async function handleSessionChangePreview(taskId, sessionId, req, res) {
   if (!sessionChangeFeatureEnabled) return sessionChangeDisabled(res);
   const { task, session } = await visibleTaskSession(taskId, sessionId, req, res);
   if (!task || !session) return;
   const login = getYikaoLoginForTask(task);
   const apiBase = sessionChangeApiBase(login);
+  const localRequirementChange = sessionRequirementChangeForTaskSession(task, session);
   try {
-    const detail = await fetchTenantSessionDetail({
+    const detail = await fetchTenantSessionDetailWithListFallback({
       apiBase,
       sessionId,
       login,
       requestJson: readTenantJsonWithLogin,
     });
+    const current = editableSessionFieldsFromDetail(detail);
+    const requirementChange = sessionRequirementChangeForTaskSession(task, { ...session, ...current });
     return json(res, 200, {
       taskId,
       sessionId,
       sessionType: session.sessionType,
+      requirementIndex: Number(session.requirementIndex || 0),
       apiBase,
-      editable: ["name", "start", "end", "early", "later", "message", "notice"],
-      current: editableSessionFieldsFromDetail(detail),
+      editable: allowedSessionChangeFields,
+      current,
+      requirementChange,
       featureEnabled: true,
     });
   } catch (error) {
@@ -4605,8 +6150,10 @@ async function handleSessionChangePreview(taskId, sessionId, req, res) {
       sessionId,
       taskId,
       sessionType: session.sessionType,
-      editable: ["name", "start", "end", "early", "later", "message", "notice"],
+      requirementIndex: Number(session.requirementIndex || 0),
+      editable: allowedSessionChangeFields,
       current: localSessionFieldsForChange(session),
+      requirementChange: localRequirementChange,
       fallback: true,
     });
   }
@@ -4621,6 +6168,8 @@ async function handleSessionChange(taskId, sessionId, req, res) {
 
   const { task, session } = await visibleTaskSession(taskId, sessionId, req, res);
   if (!task || !session) return;
+  let requirementChange = sessionRequirementChangeForTaskSession(task, session);
+  const requestedRequirementChangeId = String(payload?.requirementChangeId || "").trim();
   const login = getYikaoLoginForTask(task);
   const apiBase = sessionChangeApiBase(login);
   let detail = null;
@@ -4641,10 +6190,17 @@ async function handleSessionChange(taskId, sessionId, req, res) {
   }
 
   const before = editableSessionFieldsFromDetail(detail);
+  requirementChange = sessionRequirementChangeForTaskSession(task, { ...session, ...before });
   const putPayload = mergeSessionChangePayload(detail, validation.changes);
-  const after = editableSessionFieldsFromDetail(putPayload);
+  const after = { ...before, ...putPayload };
   const diff = buildSessionChangeDiff(before, after);
   if (!diff.length) return json(res, 400, { error: "没有检测到需要修改的场次字段。", diff });
+  let requirementChangeApplied = Boolean(
+    requirementChange.pending
+    && requestedRequirementChangeId
+    && requestedRequirementChangeId === requirementChange.changeId
+    && sessionChangeMatchesSuggested(after, requirementChange.suggestedChanges),
+  );
 
   let tenantBody = null;
   try {
@@ -4656,9 +6212,27 @@ async function handleSessionChange(taskId, sessionId, req, res) {
       requestJson: readTenantJsonWithLogin,
     });
   } catch (error) {
+    const errorMessage = tenantSessionChangeErrorMessage(error);
+    const sessionLabel = session.sessionType === "formal" ? "正式考试" : "试考";
+    let failedTask = null;
+    try {
+      const previousChangeStep = (task.steps || []).find((item) => item.stepKey === "session_change");
+      failedTask = await updateTaskStep(taskId, "session_change", "failed", {
+        message: `修改${sessionLabel}场次 ${sessionId} 失败：${errorMessage}`,
+        errorMessage,
+        result: {
+          sessionId,
+          sessionType: session.sessionType,
+          apiBase,
+          attemptedFields: diff.map((item) => item.field),
+          history: sessionChangeHistoryFromStep(previousChangeStep),
+        },
+      });
+    } catch {}
     return json(res, error?.status && Number(error.status) >= 400 ? Number(error.status) : 502, {
-      error: tenantSessionChangeErrorMessage(error),
-      detail: sessionChangeSummary(error?.detail || error?.message || ""),
+      error: errorMessage,
+      modified: false,
+      ...(failedTask ? { task: { ...enrichTaskSessionRequirementChanges(failedTask), sessionChangeFeatureEnabled } } : {}),
       apiBase,
       sessionId,
       diff,
@@ -4669,27 +6243,27 @@ async function handleSessionChange(taskId, sessionId, req, res) {
   let verifiedSession = null;
   let verifyWarning = null;
   try {
-    const verifyUrl = new URL("/tenant/api/session/", normalizeApiBase(apiBase));
-    verifyUrl.searchParams.set("session_ids", String(sessionId));
-    const verifyPayload = await readTenantJsonWithLogin(
+    const matched = await fetchTenantSessionDetailWithListFallback({
+      apiBase,
+      sessionId,
       login,
-      verifyUrl,
-      { method: "GET", includeResponseMeta: true },
-      `回查场次信息 ${sessionId}`,
-    );
-    verifyStatus = verifyPayload.httpStatus;
-    const matched = normalizeTenantList(verifyPayload.body)
-      .find((item) => String(item.id ?? item.session_id ?? "") === String(sessionId));
-    if (matched) {
-      verifiedSession = {
-        session_id: String(matched.id ?? matched.session_id ?? sessionId),
-        name: String(matched.name ?? ""),
-        start: matched.start ?? "",
-        end: matched.end ?? "",
-        url: matched.url ?? "",
+      requestJson: readTenantJsonWithLogin,
+    });
+    verifyStatus = 200;
+    verifiedSession = {
+      session_id: String(matched.id ?? matched.session_id ?? sessionId),
+      ...editableSessionFieldsFromDetail(matched),
+      url: matched.url ?? "",
+    };
+    if (!sessionChangeMatchesSuggested(verifiedSession, putPayload)) {
+      requirementChangeApplied = false;
+      verifyWarning = {
+        warning: "易考回读结果与本次提交配置不一致，变更仍保留为待同步。",
+        detail: { expected: putPayload, actual: verifiedSession },
       };
     }
   } catch (error) {
+    requirementChangeApplied = false;
     verifyWarning = {
       warning: tenantSessionChangeErrorMessage(error),
       detail: sessionChangeSummary(error?.detail || error?.message || ""),
@@ -4726,6 +6300,8 @@ async function handleSessionChange(taskId, sessionId, req, res) {
     tenantResponseSummary: sessionChangeSummary(tenantBody),
     verifiedSession,
     warning: detailWarning || verifyWarning || null,
+    requirementChangeId: requestedRequirementChangeId,
+    requirementChangeApplied,
   });
   const changeRecord = history[0];
   const loggedTask = await updateTaskStep(taskId, "session_change", "success", {
@@ -4741,13 +6317,22 @@ async function handleSessionChange(taskId, sessionId, req, res) {
       verifyStatus,
       verifiedSession,
       history,
+      requirementChangeId: requestedRequirementChangeId,
+      requirementChangeApplied,
     },
   }) || updatedTask;
 
+  const cacheInvalidatedTask = await runTaskState("update_config", {
+    taskId,
+    config: sessionSyncCacheInvalidation(),
+  }) || loggedTask;
+  const responseTask = enrichTaskSessionRequirementChanges(cacheInvalidatedTask);
+
   return json(res, 200, {
     ok: true,
-    task: loggedTask,
-    session: taskSessionForId(loggedTask, sessionId),
+    modified: true,
+    task: { ...responseTask, sessionChangeFeatureEnabled },
+    session: taskSessionForId(responseTask, sessionId),
     apiBase,
     diff,
     tenantStatus: 200,
@@ -4757,8 +6342,199 @@ async function handleSessionChange(taskId, sessionId, req, res) {
     detailWarning,
     verifyWarning,
     changeRecord,
+    requirementChangeApplied,
     logs: [message],
   });
+}
+
+function courseChangeRequirementIndex(value) {
+  const index = Number(value || 0);
+  return Number.isInteger(index) && index >= 0 ? index : 0;
+}
+
+function sameCourseNames(left = [], right = []) {
+  const a = normalizeCourseChangeNames(left);
+  const b = normalizeCourseChangeNames(right);
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+async function visibleTaskForCourseChange(taskId, req, res) {
+  const task = await runTaskState("get", { taskId });
+  if (!task || !visibleByOwner(auth, req, task)) {
+    notFound(res);
+    return null;
+  }
+  return task;
+}
+
+async function handleCourseChangePreview(taskId, req, res) {
+  const task = await visibleTaskForCourseChange(taskId, req, res);
+  if (!task) return;
+  const requestUrl = new URL(req.url, "http://127.0.0.1");
+  const requirementIndex = courseChangeRequirementIndex(requestUrl.searchParams.get("requirementIndex"));
+  const formalSession = taskFormalSession(task, requirementIndex);
+  if (!formalSession?.session_id) return badRequest(res, "正式考试场次尚未创建，不能修改科目信息。");
+  const storedCourses = taskCoursesForChange(task, requirementIndex);
+  if (!storedCourses.length) return badRequest(res, "未找到已创建的易考科目，不能修改科目信息。");
+
+  const login = getYikaoLoginForTask(task);
+  const apiBase = sessionChangeApiBase(login);
+  try {
+    const current = await fetchTenantCourseSnapshots({
+      apiBase,
+      courses: storedCourses,
+      login,
+      requestJson: readTenantJsonWithLogin,
+    });
+    const requirementChange = courseRequirementChangeForTaskSession(task, formalSession, current);
+    return json(res, 200, {
+      taskId,
+      requirementIndex,
+      sessionId: formalSession.session_id,
+      apiBase,
+      current,
+      requirementChange,
+    });
+  } catch (error) {
+    const status = Number(error?.status || 0);
+    return json(res, status >= 400 && status < 600 ? status : 502, {
+      error: tenantCourseChangeErrorMessage(error),
+      modified: false,
+    });
+  }
+}
+
+async function handleCourseChange(taskId, req, res) {
+  const payload = parseJsonSafe(await readBody(req)) || {};
+  if (!payload.confirm) return badRequest(res, "请确认后再提交科目信息修改。");
+  const requirementIndex = courseChangeRequirementIndex(payload.requirementIndex);
+  const requestedNames = normalizeCourseChangeNames(payload.names);
+  const task = await visibleTaskForCourseChange(taskId, req, res);
+  if (!task) return;
+  const formalSession = taskFormalSession(task, requirementIndex);
+  if (!formalSession?.session_id) return badRequest(res, "正式考试场次尚未创建，不能修改科目信息。");
+  const storedCourses = taskCoursesForChange(task, requirementIndex);
+  if (!storedCourses.length) return badRequest(res, "未找到已创建的易考科目，不能修改科目信息。");
+
+  const login = getYikaoLoginForTask(task);
+  const apiBase = sessionChangeApiBase(login);
+  const previousStep = (task.steps || []).find((step) => step.stepKey === "session_change") || {};
+  const previousHistory = sessionChangeHistoryFromStep(previousStep);
+  const requirementChange = courseRequirementChangeForTaskSession(task, formalSession);
+  const requestedRequirementChangeId = String(payload.requirementChangeId || "").trim();
+  const apiLogs = [];
+  let remoteModified = false;
+
+  try {
+    const snapshots = await fetchTenantCourseSnapshots({
+      apiBase,
+      courses: storedCourses,
+      login,
+      requestJson: readTenantJsonWithLogin,
+      emitLog: (message) => apiLogs.push(message),
+    });
+    const plan = buildCourseChangePlan(snapshots, requestedNames);
+    if (!plan.some((item) => item.changed)) {
+      return badRequest(res, "易考科目信息与提交内容一致，无需修改。");
+    }
+
+    await updateTaskStep(taskId, "session_change", "running", {
+      message: `开始修改正式考试场次 ${formalSession.session_id} 的科目信息`,
+      result: { history: previousHistory, requirementIndex },
+    });
+    const result = await applyTenantCourseChanges({
+      apiBase,
+      snapshots,
+      requestedNames,
+      login,
+      requestJson: readTenantJsonWithLogin,
+      emitLog: (message) => apiLogs.push(message),
+    });
+    remoteModified = result.changed;
+    const courses = result.courses.map((course, index) => ({
+      ...storedCourses[index],
+      name: course.name,
+      code: course.code,
+      form_codes: course.form_codes,
+      order: Number(storedCourses[index]?.order || index + 1),
+    }));
+    await persistTaskRequirementCourses(taskId, requirementIndex, courses);
+    apiLogs.push("已同步本地科目信息记录");
+
+    const courseRequirementChangeApplied = Boolean(
+      requirementChange.pending
+      && requestedRequirementChangeId
+      && requestedRequirementChangeId === requirementChange.changeId
+      && sameCourseNames(requestedNames, requirementChange.suggestedNames),
+    );
+    const history = appendSessionChangeHistory(previousHistory, {
+      changedAt: new Date().toISOString(),
+      operator: getAuthUserFromRequest(auth, req)?.email || "",
+      sessionId: formalSession.session_id,
+      sessionType: "formal",
+      apiBase,
+      status: "success",
+      tenantStatus: 200,
+      verifyStatus: 200,
+      diff: result.diff,
+      verifiedCourses: courses,
+      courseRequirementIndex: requirementIndex,
+      courseRequirementChangeId: requestedRequirementChangeId,
+      courseRequirementChangeApplied,
+    });
+    const message = [`修改正式考试场次 ${formalSession.session_id}：科目信息`, ...apiLogs].join("\n");
+    const loggedTask = await updateTaskStep(taskId, "session_change", "success", {
+      message,
+      result: {
+        requirementIndex,
+        sessionId: formalSession.session_id,
+        changedFields: ["course_name"],
+        diff: result.diff,
+        courses,
+        history,
+        courseRequirementChangeId: requestedRequirementChangeId,
+        courseRequirementChangeApplied,
+      },
+    });
+    const responseTask = enrichTaskCourseRequirementChanges(enrichTaskSessionRequirementChanges(loggedTask));
+    return json(res, 200, {
+      ok: true,
+      modified: true,
+      task: { ...responseTask, sessionChangeFeatureEnabled },
+      requirementIndex,
+      apiBase,
+      diff: result.diff,
+      courses,
+      requirementChangeApplied: courseRequirementChangeApplied,
+      courseRequirementChangeApplied,
+    });
+  } catch (error) {
+    const errorMessage = tenantCourseChangeErrorMessage(error);
+    let failedTask = null;
+    try {
+      failedTask = await updateTaskStep(taskId, "session_change", "failed", {
+        message: [`修改正式考试场次 ${formalSession.session_id} 的科目信息失败：${errorMessage}`, ...apiLogs].filter(Boolean).join("\n"),
+        errorMessage,
+        result: {
+          requirementIndex,
+          sessionId: formalSession.session_id,
+          history: previousHistory,
+        },
+      });
+    } catch {}
+    const status = Number(error?.status || 0);
+    return json(res, status >= 400 && status < 600 ? status : 502, {
+      error: errorMessage,
+      modified: remoteModified,
+      completed: false,
+      ...(failedTask ? {
+        task: {
+          ...enrichTaskCourseRequirementChanges(enrichTaskSessionRequirementChanges(failedTask)),
+          sessionChangeFeatureEnabled,
+        },
+      } : {}),
+    });
+  }
 }
 
 async function enrichTaskPaperUnitInfoForDetail(req, task) {
@@ -4828,7 +6604,11 @@ async function enrichTaskPaperUnitInfoForDetail(req, task) {
 function sharedSheetSessionFieldsFromDetail(detail = {}) {
   const clientLoginLimit = positiveNumber(detail?.login_times ?? detail?.loginTimes);
   const leaveLimit = positiveNumber(detail?.lock_screen_time ?? detail?.lockScreenTime);
+  const start = String(detail?.start ?? detail?.start_time ?? detail?.startTime ?? "").trim();
+  const end = String(detail?.end ?? detail?.end_time ?? detail?.endTime ?? "").trim();
   return {
+    ...(start ? { start } : {}),
+    ...(end ? { end } : {}),
     ...(clientLoginLimit !== undefined ? { clientLoginLimit, login_times: clientLoginLimit } : {}),
     ...(leaveLimit !== undefined ? { leaveLimit, lock_screen_time: leaveLimit } : {}),
     ...(detail?.client_required !== undefined ? { client_required: Boolean(detail.client_required) } : {}),
@@ -4861,6 +6641,8 @@ async function enrichSharedSheetSessions(login, sessions = [], logs = []) {
 async function handleProjectSharedSheetFill(taskId, req, res) {
   const task = await runTaskState("get", { taskId });
   if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  const requestUser = getAuthUserFromRequest(auth, req);
+  const platformAccountEmail = normalizeEmail(task.ownerEmail || requestUser?.email || "");
 
   await updateTaskStep(taskId, "project_shared_sheet", "running", {
     message: "开始填写项目共享大表",
@@ -4893,6 +6675,7 @@ async function handleProjectSharedSheetFill(taskId, req, res) {
       config: task.config || {},
       created: syncedSessions,
       settings,
+      platformAccountEmail,
     });
     logs.push(`[项目共享大表] 已填写 ${syncResult.updatedRows} 个考试场次`);
     logs.push("[项目共享大表] 填写完成");
@@ -4915,7 +6698,7 @@ async function handleProjectSharedSheetFill(taskId, req, res) {
 }
 
 function scoreFeedbackFileName(task, session) {
-  return safeExcelFileName(`${task?.projectName || session?.name || "成绩反馈单"}-成绩反馈单`);
+  return safeExcelFileName(`${session?.name || task?.projectName || "成绩反馈单"}-成绩反馈单`);
 }
 
 function scoreFeedbackDownloadFileName(task, session, format) {
@@ -5222,18 +7005,40 @@ function scoreFeedbackExamTime(sessions = []) {
   return ranges.join("；");
 }
 
-async function handleScoreProcess(taskId, req, res) {
-  const task = await runTaskState("get", { taskId });
-  if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+async function runScoreProcessForTask(task, options = {}) {
+  const taskId = String(task?.taskId || "").trim();
   const formalSessions = scoreFeedbackFormalSessions(task);
-  if (!formalSessions.length) return badRequest(res, "缺少正式考试 session_id，无法处理成绩");
+  if (!formalSessions.length) {
+    throw Object.assign(new Error("缺少正式考试 session_id，无法处理成绩"), {
+      code: "SCORE_PROCESS_FORMAL_SESSION_MISSING",
+      status: 400,
+    });
+  }
+  if (options.enforceDataWindow) {
+    const dataWindow = operationArchiveActualDataWindow(task);
+    if (!dataWindow.ready) {
+      throw Object.assign(new Error(`参考数据和正式考试截图将在 ${dataWindow.availableText || "考试结束次日 08:00"} 开放获取`), {
+        code: "SCORE_PROCESS_NOT_READY",
+        status: 409,
+      });
+    }
+  }
+  if (scoreProcessInFlight.has(taskId)) {
+    throw Object.assign(new Error("该项目正在处理成绩，请勿重复执行"), {
+      code: "SCORE_PROCESS_IN_FLIGHT",
+      status: 409,
+    });
+  }
+  scoreProcessInFlight.add(taskId);
+  try {
 
-  await updateTaskStep(taskId, "score_process", "running", {
-    message: "开始成绩处理：读取全部正式考试成绩并生成一张成绩反馈单",
-  });
+    await updateTaskStep(taskId, "score_process", "running", {
+      message: "开始成绩处理：读取正式考试参考数据并生成成绩单",
+      incrementRetry: Boolean(options.incrementRetry),
+    });
 
   const login = getYikaoLoginForTask(task);
-  const examName = task.projectName || formalSessions[0]?.name || "正式考试";
+  const examName = formalSessions[0]?.name || task.projectName || "正式考试";
   const examTime = scoreFeedbackExamTime(formalSessions);
   const processedDate = new Intl.DateTimeFormat("zh-CN", {
     timeZone: "Asia/Shanghai",
@@ -5357,15 +7162,118 @@ async function handleScoreProcess(taskId, req, res) {
       message: logs.join("\n"),
       result: scoreResult,
     });
-    return json(res, 200, updated);
+    return { ok: true, status: 200, task: updated };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const updated = await updateTaskStep(taskId, "score_process", "failed", {
       errorMessage: message,
       message: [...logs, message].filter(Boolean).join("\n"),
     });
-    return json(res, 500, updated);
+    return { ok: false, status: Number(error?.status || 500), task: updated };
   }
+  } finally {
+    scoreProcessInFlight.delete(taskId);
+  }
+}
+
+async function handleScoreProcess(taskId, req, res) {
+  try {
+    const task = await runTaskState("get", { taskId });
+    if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+    const result = await runScoreProcessForTask(task);
+    return json(res, result.status, result.task);
+  } catch (error) {
+    return json(res, Number(error?.status || 500), {
+      error: error instanceof Error ? error.message : String(error),
+      errorCode: String(error?.code || "SCORE_PROCESS_FAILED"),
+    });
+  }
+}
+
+function parseScoreProcessSessionEnd(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(raw)) {
+    const date = new Date(raw);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  const match = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return null;
+  return new Date(Date.UTC(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3]),
+    Number(match[4]) - 8,
+    Number(match[5]),
+    Number(match[6] || 0),
+  ));
+}
+
+function formalScoreProcessEndTime(task = {}) {
+  const endTimes = scoreFeedbackFormalSessions(task)
+    .map((session) => parseScoreProcessSessionEnd(session.end))
+    .filter(Boolean);
+  return endTimes.length
+    ? new Date(Math.max(...endTimes.map((date) => date.getTime())))
+    : null;
+}
+
+function shouldAttemptScheduledScoreProcess(task = {}, now = new Date()) {
+  const dataWindow = operationArchiveActualDataWindow(task, { now });
+  const availableAt = Date.parse(String(dataWindow.availableAt || ""));
+  if (!dataWindow.ready || !Number.isFinite(availableAt)) return false;
+  const elapsedMs = now.getTime() - availableAt;
+  if (elapsedMs < 0 || elapsedMs > SCORE_PROCESS_SCHEDULER_WINDOW_MS) return false;
+  const step = (task.steps || []).find((item) => item.stepKey === "score_process") || {};
+  if (step.status === "running" || scoreProcessInFlight.has(String(task.taskId || ""))) return false;
+  if (step.status === "success") return false;
+  if (step.status === "pending" || !step.status) return true;
+  if (step.status !== "failed" || Number(step.retryCount || 0) >= SCORE_PROCESS_SCHEDULER_MAX_RETRIES) return false;
+  const completedAt = Date.parse(String(step.completedAt || ""));
+  return !Number.isFinite(completedAt) || now.getTime() - completedAt >= SCORE_PROCESS_SCHEDULER_RETRY_MS;
+}
+
+async function runScheduledScoreProcessingOnce(now = new Date()) {
+  const summaries = await runTaskState("list_all");
+  const results = [];
+  for (const summary of summaries || []) {
+    const task = await runTaskState("get", { taskId: summary.taskId });
+    if (!task || !shouldAttemptScheduledScoreProcess(task, now)) continue;
+    try {
+      const result = await runScoreProcessForTask(task, {
+        incrementRetry: true,
+        enforceDataWindow: true,
+      });
+      results.push({ taskId: task.taskId, status: result.ok ? "success" : "failed" });
+    } catch (error) {
+      results.push({
+        taskId: task.taskId,
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  if (results.length) console.log(`[成绩处理定时] 本轮处理 ${results.length} 个任务：${JSON.stringify(results)}`);
+  return results;
+}
+
+let scheduledScoreProcessRunning = false;
+function scheduleScoreProcessingChecks() {
+  const tick = async () => {
+    if (scheduledScoreProcessRunning) return;
+    scheduledScoreProcessRunning = true;
+    try {
+      await runScheduledScoreProcessingOnce(new Date());
+    } catch (error) {
+      console.warn(`[成绩处理定时] 检查失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      scheduledScoreProcessRunning = false;
+    }
+  };
+  const firstTimer = setTimeout(tick, 10_000);
+  firstTimer.unref();
+  const intervalTimer = setInterval(tick, SCORE_PROCESS_SCHEDULER_INTERVAL_MS);
+  intervalTimer.unref();
 }
 
 async function handleScoreDownload(taskId, req, res) {
@@ -5641,7 +7549,1160 @@ function operationBatchDraftOverridesFromTask(task = {}) {
   };
 }
 
+const operationPersonnelTaskActiveAttempts = new Set();
+const operationPersonnelTaskIdsInFlight = new Set();
+const operationPersonnelProfileInFlight = { active: false };
+const operationPersonnelCoordinator = {
+  acquireTask(taskId) {
+    acquireOperationBatchCreation(operationPersonnelTaskIdsInFlight, taskId);
+    return () => releaseOperationBatchCreation(operationPersonnelTaskIdsInFlight, taskId);
+  },
+  acquireProfile() {
+    if (operationPersonnelProfileInFlight.active) {
+      const error = new Error("运营控制台浏览器自动化正在执行，请稍后重试");
+      error.status = 409;
+      throw error;
+    }
+    operationPersonnelProfileInFlight.active = true;
+    return () => { operationPersonnelProfileInFlight.active = false; };
+  },
+};
+
+let operationPersonnelTaskService;
+let operationPersonnelSharedBrowserPromise;
+
+async function operationPersonnelSharedContext() {
+  if (!operationPersonnelSharedBrowserPromise) {
+    operationPersonnelSharedBrowserPromise = (async () => {
+      const rawPort = Number(process.env.YIKAO_HELPER_CHROME_PORT || 19222);
+      const chromePort = Number.isInteger(rawPort) && rawPort > 0 && rawPort <= 65535
+        ? rawPort
+        : 19222;
+      let chromium;
+      try {
+        ({ chromium } = await import("playwright"));
+      } catch (cause) {
+        const error = new Error("本机服务缺少运控浏览器组件，请重新部署后重试。");
+        error.code = "PERSONNEL_SHARED_BROWSER_UNAVAILABLE";
+        error.status = 503;
+        error.cause = cause;
+        throw error;
+      }
+      try {
+        return await chromium.connectOverCDP(`http://127.0.0.1:${chromePort}`);
+      } catch (cause) {
+        const error = new Error("未连接到本机助手已开启的运控浏览器，请确认本机助手和运控页面已打开后重试。");
+        error.code = "PERSONNEL_SHARED_BROWSER_UNAVAILABLE";
+        error.status = 503;
+        error.cause = cause;
+        throw error;
+      }
+    })().then((browser) => {
+      browser.once?.("disconnected", () => { operationPersonnelSharedBrowserPromise = null; });
+      return browser;
+    }).catch((error) => {
+      operationPersonnelSharedBrowserPromise = null;
+      throw error;
+    });
+  }
+  const browser = await operationPersonnelSharedBrowserPromise;
+  const context = browser.contexts?.()[0];
+  if (context) return context;
+  operationPersonnelSharedBrowserPromise = null;
+  const error = new Error("本机助手运控浏览器没有可复用的页面上下文，请重新打开运控页面后重试。");
+  error.code = "PERSONNEL_SHARED_BROWSER_UNAVAILABLE";
+  error.status = 503;
+  throw error;
+}
+
+function getOperationPersonnelTaskService() {
+  if (operationPersonnelTaskService) return operationPersonnelTaskService;
+  const runnerOptions = () => ({
+    baseUrl: process.env.OPERATION_CONSOLE_BASE_URL,
+    userDataDir: process.env.OPERATION_CONSOLE_USER_DATA_DIR,
+  });
+  operationPersonnelTaskService = createOperationPersonnelTaskService({
+    readTask: (taskId) => runTaskState("get", { taskId }),
+    updateTaskConfig: (taskId, config) => runTaskState("update_config", { taskId, config }),
+    readRequirement: (requestId) => requestId ? runRequirementState("get", { requestId }) : null,
+    coordinator: operationPersonnelCoordinator,
+    activeAttemptIds: operationPersonnelTaskActiveAttempts,
+    runInspectionSession: async (instruction) => runOperationPersonnelInspectionSession(
+      instruction,
+      { ...runnerOptions(), context: await operationPersonnelSharedContext() },
+    ),
+    runInspectionInSession: (browserSession, instruction) => (
+      runOperationPersonnelInspectionInSession(browserSession, instruction, runnerOptions())
+    ),
+    validateBrowserSession: (browserSession, instruction) => (
+      validateOperationPersonnelBrowserSession(browserSession, instruction, runnerOptions())
+    ),
+    closeBrowserSession: closeOperationPersonnelBrowserSession,
+    runAttempt: (instruction, options) => runOperationPersonnelAttempt(
+      instruction,
+      { ...options, ...runnerOptions() },
+    ),
+    runRecheck: async (instruction) => runOperationPersonnelRecheck(
+      instruction,
+      { ...runnerOptions(), context: await operationPersonnelSharedContext() },
+    ),
+    environment: process.env.OPERATION_CONSOLE_ENVIRONMENT || "",
+  });
+  return operationPersonnelTaskService;
+}
+
+function operationPersonnelTaskActor(req) {
+  if (!auth.enabled) return { email: "", role: "admin" };
+  return getAuthUserFromRequest(auth, req);
+}
+
+function operationPersonnelTaskError(res, error) {
+  return json(res, Number(error?.status || 500), {
+    error: error instanceof Error ? error.message : String(error),
+    ...(error?.code ? { errorCode: error.code } : {}),
+  });
+}
+
+async function assertOperationPersonnelTaskVisible(taskId, req) {
+  const task = await runTaskState("get", { taskId });
+  if (task && visibleByOwner(auth, req, task)) return;
+  const error = new Error("人员任务不存在");
+  error.status = 404;
+  error.code = "PERSONNEL_TASK_NOT_FOUND";
+  throw error;
+}
+
+async function readOperationPersonnelPayload(req) {
+  const body = await readBody(req);
+  if (!body.toString("utf8").trim()) return {};
+  const payload = parseJsonSafe(body);
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) return payload;
+  const error = new Error("请求 JSON 格式无效");
+  error.status = 400;
+  error.code = "PERSONNEL_INVALID_JSON";
+  throw error;
+}
+
+function assertOperationPersonnelAutomationEnabled() {
+  if (process.env.OPERATION_CONSOLE_AUTOMATION_ENABLED === "1") return;
+  const error = new Error(
+    "运营控制台浏览器自动化未启用。请先确认测试环境已登录，并设置 OPERATION_CONSOLE_AUTOMATION_ENABLED=1 后重启服务。",
+  );
+  error.status = 409;
+  error.code = "PERSONNEL_AUTOMATION_DISABLED";
+  throw error;
+}
+
+async function handleOperationPersonnelTaskState(taskId, req, res) {
+  try {
+    const result = await getOperationPersonnelTaskService().get(taskId, operationPersonnelTaskActor(req));
+    return json(res, 200, result);
+  } catch (error) {
+    return operationPersonnelTaskError(res, error);
+  }
+}
+
+async function handleOperationPersonnelTaskEdit(taskId, req, res) {
+  try {
+    await assertOperationPersonnelTaskVisible(taskId, req);
+    const payload = await readOperationPersonnelPayload(req);
+    const result = await getOperationPersonnelTaskService().edit(
+      taskId,
+      operationPersonnelTaskActor(req),
+      payload,
+    );
+    return json(res, 200, result);
+  } catch (error) {
+    return operationPersonnelTaskError(res, error);
+  }
+}
+
+async function handleOperationPersonnelTaskPreview(taskId, req, res) {
+  try {
+    await assertOperationPersonnelTaskVisible(taskId, req);
+    const payload = await readOperationPersonnelPayload(req);
+    assertOperationPersonnelAutomationEnabled();
+    const result = await getOperationPersonnelTaskService().preview(
+      taskId,
+      operationPersonnelTaskActor(req),
+      payload,
+    );
+    return json(res, 200, result);
+  } catch (error) {
+    return operationPersonnelTaskError(res, error);
+  }
+}
+
+async function handleOperationPersonnelTaskSend(taskId, req, res) {
+  try {
+    await assertOperationPersonnelTaskVisible(taskId, req);
+    const payload = await readOperationPersonnelPayload(req);
+    assertOperationPersonnelAutomationEnabled();
+    const result = await getOperationPersonnelTaskService().send(
+      taskId,
+      operationPersonnelTaskActor(req),
+      payload,
+    );
+    return json(res, 202, { attemptId: result.attemptId });
+  } catch (error) {
+    return operationPersonnelTaskError(res, error);
+  }
+}
+
+const operationPersonnelCheckpointOrder = [
+  "inspect_batch",
+  "publish_batch",
+  "verify_exam_schedules",
+  "sync_personnel_config",
+  "sync_personnel_dates",
+  "sync_exam_service_requirements",
+  "verify_task_sheet",
+  "select_recipients",
+  "submit_send",
+  "verify_send_record",
+];
+
+function operationPersonnelAttemptResponse(result) {
+  const attempt = result.attempt || {};
+  const checkpoints = result.state?.checkpoints || {};
+  const checkpoint = operationPersonnelCheckpointOrder.filter((name) => checkpoints[name]).at(-1) || "";
+  const deadline = Date.parse(attempt.verification?.deadlineAt);
+  const remainingSeconds = Number.isFinite(deadline)
+    ? Math.max(0, Math.ceil((deadline - Date.now()) / 1000))
+    : 0;
+  return {
+    attemptId: attempt.attemptId,
+    status: attempt.status,
+    checkpoint,
+    verificationPhase: attempt.verification?.phase || "",
+    remainingSeconds,
+    completed: ["sent", "failed_resumable", "result_unknown"].includes(attempt.status),
+    error: attempt.error || null,
+  };
+}
+
+async function handleOperationPersonnelTaskAttempt(taskId, attemptId, req, res) {
+  try {
+    const result = await getOperationPersonnelTaskService().attempt(
+      taskId,
+      operationPersonnelTaskActor(req),
+      attemptId,
+    );
+    return json(res, 200, operationPersonnelAttemptResponse(result));
+  } catch (error) {
+    return operationPersonnelTaskError(res, error);
+  }
+}
+
+async function handleOperationPersonnelTaskRecheck(taskId, req, res) {
+  try {
+    await assertOperationPersonnelTaskVisible(taskId, req);
+    assertOperationPersonnelAutomationEnabled();
+    const result = await getOperationPersonnelTaskService().recheck(
+      taskId,
+      operationPersonnelTaskActor(req),
+    );
+    return json(res, 200, operationPersonnelAttemptResponse({
+      state: result.state,
+      attempt: result.state?.activeAttempt,
+    }));
+  } catch (error) {
+    return operationPersonnelTaskError(res, error);
+  }
+}
+
 const operationBatchCreationInFlight = new Set();
+const operationBatchLocalPreparations = new Map();
+const OPERATION_BATCH_LOCAL_PREPARATION_TTL_MS = 15 * 60 * 1000;
+const operationArchivePreparations = new Map();
+const operationArchiveEvidenceInFlight = new Set();
+const OPERATION_ARCHIVE_PREPARATION_TTL_MS = 15 * 60 * 1000;
+const OPERATION_BATCH_UNCONFIRMED_STATUSES = new Set([
+  "awaiting_local_helper",
+  "creating",
+  "reconciliation_required",
+]);
+
+function operationArchiveActor(req) {
+  return normalizeEmail(getAuthUserFromRequest(auth, req)?.email || "local-admin");
+}
+
+async function operationArchiveTask(taskId, req) {
+  const task = await runTaskState("get", { taskId });
+  if (!task || !visibleByOwner(auth, req, task)) return null;
+  return await enrichTaskPaperUnitInfoForDetail(req, task);
+}
+
+async function persistOperationArchive(task, patch = {}, configPatch = {}) {
+  const operationArchive = {
+    ...(task.config?.operationArchive || {}),
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  return await runTaskState("update_config", {
+    taskId: task.taskId,
+    config: { ...configPatch, operationArchive },
+  });
+}
+
+async function operationArchiveActuals(task = {}) {
+  const formalSessions = (task.sessions || []).filter((session) => (
+    session.sessionType === "formal" && String(session.session_id || "").trim()
+  ));
+  const assessment = operationArchiveAssessmentFromPapers(task);
+  if (!formalSessions.length) return { completedSubjects: "", assessment };
+  const scoreStep = (task.steps || []).find((step) => step.stepKey === "score_process");
+  const refreshedActuals = task.config?.operationArchive?.actuals;
+  const refreshedAt = Date.parse(String(refreshedActuals?.refreshedAt || ""));
+  const scoreCompletedAt = Date.parse(String(scoreStep?.completedAt || ""));
+  if (refreshedActuals && typeof refreshedActuals === "object"
+    && String(refreshedActuals.completedSubjects ?? "").trim()
+    && (!Number.isFinite(scoreCompletedAt) || (Number.isFinite(refreshedAt) && refreshedAt >= scoreCompletedAt))) {
+    return {
+      candidateSubjects: String(refreshedActuals.candidateSubjects ?? ""),
+      completedSubjects: String(refreshedActuals.completedSubjects ?? ""),
+      assessment,
+      source: "operation_archive_evidence_refresh",
+      refreshedAt: String(refreshedActuals.refreshedAt || ""),
+    };
+  }
+  if (scoreStep?.status === "success") {
+    const storedPayloadPath = String(scoreFeedbackPayloadPathFromResult(scoreStep.result || {}) || "").trim();
+    const payloadPath = storedPayloadPath ? path.resolve(storedPayloadPath) : "";
+    const generatedRoot = path.resolve(generatedDir);
+    if (payloadPath && payloadPath.startsWith(`${generatedRoot}${path.sep}`)) {
+      try {
+        const payload = JSON.parse(await fs.readFile(payloadPath, "utf8"));
+        if (Array.isArray(payload?.rows)) {
+          return {
+            ...operationArchiveActualsFromScoreRows(payload.rows),
+            assessment,
+            source: "score_process",
+          };
+        }
+      } catch {}
+    }
+  }
+  const dataWindow = operationArchiveActualDataWindow(task);
+  if (!dataWindow.ready) {
+    return {
+      completedSubjects: "",
+      assessment,
+      pending: true,
+      availableDate: dataWindow.availableDate,
+      availableText: dataWindow.availableText,
+    };
+  }
+  const login = getYikaoLoginForTask(task);
+  let completedSubjects = 0;
+  let candidateSubjects = 0;
+  try {
+    for (const session of formalSessions) {
+      const entries = await fetchAllSessionEntries(login, session.session_id, []);
+      candidateSubjects += entries.length;
+      completedSubjects += entries
+        .map((entry) => normalizeScoreRow(entry))
+        .filter((entry) => ["已完成", "参考"].includes(String(entry.exam_status || "").trim()))
+        .length;
+    }
+  } catch (error) {
+    return {
+      completedSubjects: "",
+      assessment,
+      errorMessage: tenantErrorDetail(error) || error?.message || String(error),
+    };
+  }
+  return {
+    candidateSubjects: String(candidateSubjects),
+    completedSubjects: String(completedSubjects),
+    assessment,
+  };
+}
+
+function operationArchiveScreenshotRecords(task = {}) {
+  // Keep old screenshots readable, but all new archive evidence is stored under operationArchive.
+  const scoreStep = (task.steps || []).find((step) => step.stepKey === "score_process") || {};
+  const legacyScoreScreenshots = Array.isArray(scoreStep.result?.archiveScreenshots)
+    ? scoreStep.result.archiveScreenshots
+    : [];
+  const archiveScreenshots = Array.isArray(task.config?.operationArchive?.archiveScreenshots)
+    ? task.config.operationArchive.archiveScreenshots
+    : [];
+  return { screenshots: archiveScreenshots.length ? archiveScreenshots : legacyScoreScreenshots };
+}
+
+function operationArchiveScreenshotState(task = {}) {
+  const { screenshots } = operationArchiveScreenshotRecords(task);
+  if (screenshots.length) {
+    return {
+      status: "success",
+      files: screenshots.map((item, index) => ({
+        sessionId: String(item.sessionId || ""),
+        sessionName: String(item.sessionName || "正式考试"),
+        fileName: String(item.fileName || `正式考试归档截图-${index + 1}.jpg`),
+        mimeType: String(item.mimeType || "image/jpeg"),
+        sizeBytes: Number(item.sizeBytes || 0),
+        capturedAt: String(item.capturedAt || ""),
+        url: `/api/tasks/${encodeURIComponent(task.taskId)}/operation-archive/screenshots/${index}?v=${encodeURIComponent(String(item.capturedAt || ""))}`,
+      })),
+    };
+  }
+  if (operationArchiveEvidenceInFlight.has(String(task.taskId || ""))) {
+    return { status: "capturing", files: [], message: "正在更新参考人数并截取正式考试页面" };
+  }
+  return { status: "pending", files: [], message: "请在运营归档中点击“更新易考数据”生成正式考试截图" };
+}
+
+function resolveOperationArchiveScreenshotPath(task, index) {
+  const { screenshots } = operationArchiveScreenshotRecords(task);
+  const record = screenshots[Number(index)];
+  const filePath = path.resolve(String(record?.filePath || ""));
+  const generatedRoot = path.resolve(generatedDir);
+  if (!record || !filePath.startsWith(`${generatedRoot}${path.sep}`)) {
+    throw Object.assign(new Error("归档截图不存在或路径无效"), {
+      code: "OPERATION_ARCHIVE_SCREENSHOT_NOT_FOUND",
+      status: 404,
+    });
+  }
+  return { record, filePath };
+}
+
+async function operationArchiveAttachmentPayloads(task, options = {}) {
+  const { screenshots } = operationArchiveScreenshotRecords(task);
+  if (!screenshots.length && options.required) {
+    throw Object.assign(new Error("正式考试截图尚未生成，请等待参考数据与截图同步完成后再归档"), {
+      code: "OPERATION_ARCHIVE_SCREENSHOT_REQUIRED",
+      status: 409,
+    });
+  }
+  const attachments = [];
+  for (let index = 0; index < screenshots.length; index += 1) {
+    const { record, filePath } = resolveOperationArchiveScreenshotPath(task, index);
+    const buffer = await fs.readFile(filePath);
+    if (!buffer.length || buffer.length > EASY_EXAM_ARCHIVE_SCREENSHOT_LIMIT_BYTES) {
+      throw Object.assign(new Error(`正式考试截图 ${index + 1} 超过 250KB 或文件为空，请重新获取参考数据`), {
+        code: "OPERATION_ARCHIVE_SCREENSHOT_INVALID",
+        status: 409,
+      });
+    }
+    attachments.push({
+      fileName: String(record.fileName || path.basename(filePath)),
+      mimeType: "image/jpeg",
+      base64: buffer.toString("base64"),
+    });
+  }
+  return attachments;
+}
+
+async function handleOperationArchiveScreenshot(taskId, index, req, res) {
+  try {
+    const task = await operationArchiveTask(taskId, req);
+    if (!task) return notFound(res);
+    const { record, filePath } = resolveOperationArchiveScreenshotPath(task, index);
+    const fileStat = await fs.stat(filePath);
+    if (!fileStat.isFile() || fileStat.size > EASY_EXAM_ARCHIVE_SCREENSHOT_LIMIT_BYTES) return notFound(res);
+    res.writeHead(200, {
+      "Content-Type": "image/jpeg",
+      "Content-Length": fileStat.size,
+      "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(String(record.fileName || path.basename(filePath)))}`,
+      "Cache-Control": "private, no-store",
+    });
+    createReadStream(filePath).pipe(res);
+  } catch (error) {
+    return json(res, Number(error?.status || 500), {
+      error: error instanceof Error ? error.message : String(error),
+      errorCode: String(error?.code || "OPERATION_ARCHIVE_SCREENSHOT_FAILED"),
+    });
+  }
+}
+
+async function refreshOperationArchiveActuals(task, login) {
+  const formalSessions = (task.sessions || []).filter((session) => (
+    session.sessionType === "formal" && String(session.session_id || "").trim()
+  ));
+  if (!formalSessions.length) {
+    throw Object.assign(new Error("缺少正式考试 session_id，无法更新参考人数"), {
+      code: "OPERATION_ARCHIVE_FORMAL_SESSION_MISSING",
+      status: 409,
+    });
+  }
+  const rows = [];
+  const logs = [];
+  for (const session of formalSessions) {
+    const [entries, scores] = await Promise.all([
+      fetchAllSessionEntries(login, session.session_id, logs),
+      fetchAllSessionScores(login, session.session_id, logs),
+    ]);
+    rows.push(...await mergeEntryAndScoreRows({
+      login,
+      sessionId: session.session_id,
+      entries,
+      scores,
+      examName: session.name || task.projectName || "正式考试",
+      logs,
+    }));
+  }
+  return operationArchiveActualsFromScoreRows(rows);
+}
+
+async function handleOperationArchiveEvidenceRefresh(taskId, req, res) {
+  try {
+    const task = await operationArchiveTask(taskId, req);
+    if (!task) return notFound(res);
+    if (operationArchiveEvidenceInFlight.has(taskId) || scoreProcessInFlight.has(taskId)) {
+      throw Object.assign(new Error("该项目正在更新参考人数或正式考试截图，请勿重复操作"), {
+        code: "OPERATION_ARCHIVE_EVIDENCE_IN_FLIGHT",
+        status: 409,
+      });
+    }
+    operationArchiveEvidenceInFlight.add(taskId);
+    try {
+      const login = getYikaoLoginForTask(task);
+      const [actuals, archiveScreenshots] = await Promise.all([
+        refreshOperationArchiveActuals(task, login),
+        captureEasyExamArchiveScreenshots({
+          task,
+          login,
+          outputDir: path.join(generatedDir, "operation-archive-screenshots"),
+          maxBytes: EASY_EXAM_ARCHIVE_SCREENSHOT_LIMIT_BYTES,
+        }),
+      ]);
+      const now = new Date().toISOString();
+      const current = task.config?.operationArchive || {};
+      const completed = ["submitted", "already_archived"].includes(String(current.status || ""));
+      const refreshed = refreshOperationArchiveEvidenceDraft(task, { actuals });
+      const updated = await persistOperationArchive(task, {
+        edits: refreshed.edits,
+        actuals: { ...actuals, refreshedAt: now },
+        archiveScreenshots,
+        evidenceUpdatedAt: now,
+        status: completed
+          ? current.status
+          : refreshed.draft.warnings.length ? "needs_review" : "ready_for_inspection",
+        previewToken: "",
+        inspectedAt: "",
+        errorCode: "",
+        errorMessage: "",
+        events: [...(Array.isArray(current.events) ? current.events : []), {
+          type: "operation_archive_evidence_refreshed",
+          actor: operationArchiveActor(req),
+          createdAt: now,
+          candidateSubjects: actuals.candidateSubjects,
+          completedSubjects: actuals.completedSubjects,
+          screenshotCount: archiveScreenshots.length,
+        }],
+      });
+      return json(res, 200, {
+        ok: true,
+        message: `参考人数已更新为 ${actuals.completedSubjects}，正式考试截图已重新生成`,
+        ...await operationArchiveResponse(updated, { actuals }),
+      });
+    } finally {
+      operationArchiveEvidenceInFlight.delete(taskId);
+    }
+  } catch (error) {
+    return json(res, Number(error?.status || 500), {
+      error: error?.message || String(error),
+      errorCode: String(error?.code || "OPERATION_ARCHIVE_EVIDENCE_REFRESH_FAILED"),
+    });
+  }
+}
+
+function cleanupOperationArchivePreparations(now = Date.now()) {
+  for (const [id, preparation] of operationArchivePreparations) {
+    if (preparation.expiresAt <= now) operationArchivePreparations.delete(id);
+  }
+}
+
+function operationArchivePreparation(id, taskId, actorEmail, kind) {
+  cleanupOperationArchivePreparations();
+  const preparation = operationArchivePreparations.get(String(id || "").trim());
+  if (!preparation
+    || preparation.taskId !== taskId
+    || preparation.actorEmail !== actorEmail
+    || preparation.kind !== kind) {
+    const error = new Error("归档检查已过期或不属于当前项目，请重新检查归档信息");
+    error.code = "OPERATION_ARCHIVE_PREPARATION_EXPIRED";
+    error.status = 409;
+    throw error;
+  }
+  return preparation;
+}
+
+function operationArchiveHelperResponse(preparationId, pathName, preparation) {
+  return {
+    preparationId,
+    localHelper: {
+      path: pathName,
+      payload: {
+        requestId: preparationId,
+        baseUrl: DEFAULT_OPERATION_CONSOLE_BASE_URL,
+        draft: preparation.draft,
+        ...(preparation.batchDetailUrl ? { batchDetailUrl: preparation.batchDetailUrl } : {}),
+        ...(preparation.attachments?.length ? { attachments: preparation.attachments } : {}),
+        ...(preparation.scheduleInstruction ? { scheduleInstruction: preparation.scheduleInstruction } : {}),
+        ...(preparation.reusePreparedArchiveForm ? { reusePreparedArchiveForm: true } : {}),
+      },
+    },
+  };
+}
+
+function operationArchiveScheduleInstruction(task) {
+  const desired = buildFormalOperationBatchSnapshot(task);
+  if (!desired.complete) {
+    throw Object.assign(new Error("正式考试日程不完整，不能自动填写归档"), {
+      code: "OPERATION_ARCHIVE_SCHEDULE_INCOMPLETE",
+      status: 409,
+    });
+  }
+  return {
+    batch: { code: String(task.config?.operationBatchCode || task.config?.operationBatch?.code || "") },
+    desiredSnapshot: desired.snapshot,
+  };
+}
+
+function operationArchiveResult(value, key) {
+  if (!value || typeof value !== "object") return {};
+  return value[key] && typeof value[key] === "object" ? value[key] : value;
+}
+
+function assertOperationArchiveHelperTarget(preparation, helperResult) {
+  return assertOperationArchiveBatchIdentity(preparation.draft, helperResult.identity);
+}
+
+function operationBatchPatchFromArchiveSchedule(task, scheduleSynchronization, now) {
+  if (scheduleSynchronization?.verified !== true || !scheduleSynchronization?.snapshot) return null;
+  return applyOperationBatchManagedResult(task, {
+    verified: true,
+    snapshot: scheduleSynchronization.snapshot,
+    action: `archive_${scheduleSynchronization.action || "sync"}`,
+    syncedAt: now,
+    detailUrl: scheduleSynchronization.detailUrl,
+    checkpoints: scheduleSynchronization.checkpoints,
+  }).operationBatch;
+}
+
+async function operationArchiveResponse(task, options = {}) {
+  const archiveState = operationArchiveState(task, options);
+  archiveState.screenshot = operationArchiveScreenshotState(task);
+  return {
+    task,
+    state: archiveState,
+  };
+}
+
+async function handleOperationArchiveState(taskId, req, res) {
+  try {
+    const task = await operationArchiveTask(taskId, req);
+    if (!task) return notFound(res);
+    const actuals = await operationArchiveActuals(task);
+    if (req.method === "GET") return json(res, 200, { ok: true, ...await operationArchiveResponse(task, { actuals }) });
+    if (req.method !== "PUT") return notFound(res);
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    const edited = editOperationArchiveDraft(task, payload, { now: new Date().toISOString(), actuals });
+    const current = task.config?.operationArchive || {};
+    const updated = await persistOperationArchive(task, {
+      edits: edited.edits,
+      draftVersion: Number(current.draftVersion || 0) + 1,
+      status: edited.draft.warnings.length ? "needs_review" : "ready_for_inspection",
+      previewToken: "",
+      inspectedAt: "",
+      errorCode: "",
+      errorMessage: "",
+      events: [...(Array.isArray(current.events) ? current.events : []), {
+        type: "operation_archive_edited",
+        actor: operationArchiveActor(req),
+        createdAt: new Date().toISOString(),
+      }],
+    });
+    return json(res, 200, { ok: true, ...await operationArchiveResponse(updated, { actuals }) });
+  } catch (error) {
+    return json(res, Number(error?.status || 500), {
+      error: error?.message || String(error),
+      errorCode: String(error?.code || "OPERATION_ARCHIVE_FAILED"),
+    });
+  }
+}
+
+async function handleOperationArchiveInspect(taskId, req, res) {
+  try {
+    let task = await operationArchiveTask(taskId, req);
+    if (!task) return notFound(res);
+    assertOperationBatchUpdateEnabled();
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    const actorEmail = operationArchiveActor(req);
+    const preparationId = String(payload.preparationId || "").trim();
+    if (!preparationId) {
+      const actuals = await operationArchiveActuals(task);
+      const state = operationArchiveState(task, { actuals });
+      if (state.draft.warnings.length) {
+        const error = new Error(state.draft.warnings.map((item) => item.message).join("；"));
+        error.code = "OPERATION_ARCHIVE_DRAFT_INCOMPLETE";
+        error.status = 409;
+        throw error;
+      }
+      const id = randomUUID();
+      const preparation = {
+        kind: "inspect",
+        taskId,
+        actorEmail,
+        draft: structuredClone(state.draft),
+        draftVersion: state.draftVersion,
+        draftFingerprint: state.draftFingerprint,
+        batchDetailUrl: String(task.config?.operationBatch?.detailUrl || ""),
+        scheduleInstruction: operationArchiveScheduleInstruction(task),
+        actuals,
+        expiresAt: Date.now() + OPERATION_ARCHIVE_PREPARATION_TTL_MS,
+      };
+      operationArchivePreparations.set(id, preparation);
+      task = await persistOperationArchive(task, {
+        status: "inspecting",
+        previewToken: "",
+        errorCode: "",
+        errorMessage: "",
+      });
+      return json(res, 200, {
+        ok: true,
+        status: "awaiting_local_helper",
+        ...operationArchiveHelperResponse(id, "/operation-archive/inspect", preparation),
+        ...await operationArchiveResponse(task, { actuals }),
+      });
+    }
+
+    const preparation = operationArchivePreparation(preparationId, taskId, actorEmail, "inspect");
+    const helperResult = operationArchiveResult(payload.helperResult, "operationArchiveInspection");
+    const freshState = operationArchiveState(task, { actuals: preparation.actuals });
+    if (freshState.draftVersion !== preparation.draftVersion
+      || freshState.draftFingerprint !== preparation.draftFingerprint) {
+      throw Object.assign(new Error("归档参数在检查期间已变化，请重新检查"), {
+        code: "OPERATION_ARCHIVE_DRAFT_CHANGED",
+        status: 409,
+      });
+    }
+    const now = new Date().toISOString();
+    if (helperResult.status === "failed") {
+      task = await persistOperationArchive(task, {
+        status: "inspection_failed",
+        previewToken: "",
+        errorCode: String(helperResult.errorCode || "OPERATION_ARCHIVE_INSPECTION_FAILED"),
+        errorMessage: String(helperResult.errorMessage || "归档检查失败"),
+      });
+      operationArchivePreparations.delete(preparationId);
+      return json(res, 200, { ok: false, ...await operationArchiveResponse(task, { actuals: preparation.actuals }) });
+    }
+    if (!["ready", "already_archived"].includes(helperResult.status)) {
+      throw Object.assign(new Error("本机助手未返回可确认的归档检查结果"), {
+        code: "OPERATION_ARCHIVE_INSPECTION_INVALID",
+        status: 409,
+      });
+    }
+    try {
+      assertOperationArchiveHelperTarget(preparation, helperResult);
+    } catch (error) {
+      task = await persistOperationArchive(task, {
+        status: "inspection_failed",
+        previewToken: "",
+        errorCode: String(error?.code || "OPERATION_ARCHIVE_BATCH_IDENTITY_MISMATCH"),
+        errorMessage: String(error?.message || "归档批次身份校验失败"),
+      });
+      operationArchivePreparations.delete(preparationId);
+      return json(res, 200, { ok: false, ...await operationArchiveResponse(task, { actuals: preparation.actuals }) });
+    }
+    const alreadyArchived = helperResult.status === "already_archived";
+    const operationBatchPatch = operationBatchPatchFromArchiveSchedule(
+      task,
+      helperResult.scheduleSynchronization,
+      now,
+    );
+    preparation.kind = "inspected";
+    preparation.expiresAt = Date.now() + OPERATION_ARCHIVE_PREPARATION_TTL_MS;
+    preparation.inspection = structuredClone(helperResult);
+    task = await persistOperationArchive(task, {
+      status: alreadyArchived ? "already_archived" : "ready",
+      previewToken: alreadyArchived ? "" : preparationId,
+      inspectedAt: now,
+      ...(alreadyArchived ? { lastSubmittedFingerprint: preparation.draftFingerprint } : {}),
+      externalStatus: String(helperResult.externalStatus || (alreadyArchived ? "已提交" : "待提交")),
+      detailUrl: String(helperResult.detailUrl || ""),
+      lastInspection: structuredClone(helperResult),
+      errorCode: "",
+      errorMessage: "",
+    }, operationBatchPatch ? { operationBatch: { ...operationBatchPatch, status: "success" } } : {});
+    if (alreadyArchived) operationArchivePreparations.delete(preparationId);
+    return json(res, 200, { ok: true, ...await operationArchiveResponse(task, { actuals: preparation.actuals }) });
+  } catch (error) {
+    return json(res, Number(error?.status || 500), {
+      error: error?.message || String(error),
+      errorCode: String(error?.code || "OPERATION_ARCHIVE_INSPECTION_FAILED"),
+    });
+  }
+}
+
+async function handleOperationArchiveSubmit(taskId, req, res) {
+  try {
+    let task = await operationArchiveTask(taskId, req);
+    if (!task) return notFound(res);
+    assertOperationBatchUpdateEnabled();
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    const actorEmail = operationArchiveActor(req);
+    const preparationId = String(payload.preparationId || "").trim();
+    if (!preparationId) {
+      const previewToken = String(payload.previewToken || "").trim();
+      const inspected = operationArchivePreparation(previewToken, taskId, actorEmail, "inspected");
+      const state = operationArchiveState(task, { actuals: inspected.actuals });
+      if (state.status !== "ready" || state.previewToken !== previewToken
+        || state.draftVersion !== inspected.draftVersion
+        || state.draftFingerprint !== inspected.draftFingerprint) {
+        throw Object.assign(new Error("归档检查结果已失效，请重新检查归档信息"), {
+          code: "OPERATION_ARCHIVE_PREVIEW_STALE",
+          status: 409,
+        });
+      }
+      const attachments = await operationArchiveAttachmentPayloads(task, { required: true });
+      const id = randomUUID();
+      const preparation = {
+        ...inspected,
+        kind: "submit",
+        previewToken,
+        attachments,
+        scheduleInstruction: operationArchiveScheduleInstruction(task),
+        reusePreparedArchiveForm: inspected.inspection?.formPrepared === true
+          && inspected.inspection?.scheduleSynchronization?.verified === true,
+        expiresAt: Date.now() + OPERATION_ARCHIVE_PREPARATION_TTL_MS,
+      };
+      operationArchivePreparations.set(id, preparation);
+      task = await persistOperationArchive(task, {
+        status: "submitting",
+        activePreparationId: id,
+        errorCode: "",
+        errorMessage: "",
+      });
+      return json(res, 200, {
+        ok: true,
+        status: "awaiting_local_helper",
+        ...operationArchiveHelperResponse(id, "/operation-archive/submit", preparation),
+        ...await operationArchiveResponse(task, { actuals: preparation.actuals }),
+      });
+    }
+
+    const preparation = operationArchivePreparation(preparationId, taskId, actorEmail, "submit");
+    const helperResult = operationArchiveResult(payload.helperResult, "operationArchiveSubmission");
+    const now = new Date().toISOString();
+    let status;
+    let targetVerificationError = null;
+    if (["submitted", "already_archived"].includes(helperResult.status)) {
+      try {
+        assertOperationArchiveHelperTarget(preparation, helperResult);
+      } catch (error) {
+        targetVerificationError = error;
+      }
+    }
+    if (targetVerificationError) {
+      status = "submit_failed";
+    } else if (["submitted", "already_archived"].includes(helperResult.status)) {
+      status = helperResult.status;
+    } else if (helperResult.status === "result_unknown") {
+      status = "result_unknown";
+    } else {
+      status = "submit_failed";
+    }
+    const scheduleSynchronization = helperResult.scheduleSynchronization;
+    const operationBatchPatch = operationBatchPatchFromArchiveSchedule(task, scheduleSynchronization, now);
+    task = await persistOperationArchive(task, {
+      status,
+      previewToken: "",
+      activePreparationId: "",
+      submittedAt: ["submitted", "already_archived"].includes(status) ? now : "",
+      ...(["submitted", "already_archived"].includes(status)
+        ? { lastSubmittedFingerprint: preparation.draftFingerprint }
+        : {}),
+      externalStatus: String(helperResult.externalStatus || ""),
+      detailUrl: String(helperResult.detailUrl || task.config?.operationArchive?.detailUrl || ""),
+      lastSubmission: structuredClone(helperResult),
+      errorCode: ["submit_failed", "result_unknown"].includes(status)
+        ? String(targetVerificationError?.code || helperResult.errorCode || "OPERATION_ARCHIVE_SUBMIT_FAILED")
+        : "",
+      errorMessage: ["submit_failed", "result_unknown"].includes(status)
+        ? String(targetVerificationError?.message || helperResult.errorMessage || "归档提交结果无法确认")
+        : "",
+      events: [...(Array.isArray(task.config?.operationArchive?.events) ? task.config.operationArchive.events : []), {
+        type: `operation_archive_${status}`,
+        actor: actorEmail,
+        createdAt: now,
+      }],
+    }, operationBatchPatch ? { operationBatch: { ...operationBatchPatch, status: "success" } } : {});
+    operationArchivePreparations.delete(preparationId);
+    operationArchivePreparations.delete(preparation.previewToken);
+    return json(res, 200, {
+      ok: ["submitted", "already_archived"].includes(status),
+      ...await operationArchiveResponse(task, { actuals: preparation.actuals }),
+    });
+  } catch (error) {
+    return json(res, Number(error?.status || 500), {
+      error: error?.message || String(error),
+      errorCode: String(error?.code || "OPERATION_ARCHIVE_SUBMIT_FAILED"),
+    });
+  }
+}
+
+let operationBatchLocalUpdateService;
+let operationContentSyncService;
+
+function assertOperationBatchUpdateEnabled() {
+  if (process.env.OPERATION_CONSOLE_AUTOMATION_ENABLED === "1") return;
+  const error = new Error(
+    "运营控制台浏览器自动化未启用。请先确认测试环境已登录，并设置 OPERATION_CONSOLE_AUTOMATION_ENABLED=1 后重启服务。",
+  );
+  error.status = 409;
+  error.code = "OPERATION_BATCH_AUTOMATION_DISABLED";
+  throw error;
+}
+
+function getOperationBatchLocalUpdateService() {
+  if (operationBatchLocalUpdateService) return operationBatchLocalUpdateService;
+  operationBatchLocalUpdateService = createOperationBatchLocalUpdateService({
+    readTask: (taskId) => runTaskState("get", { taskId }),
+    updateTaskConfig: (taskId, config) => runTaskState("update_config", { taskId, config }),
+    assertAutomationEnabled: assertOperationBatchUpdateEnabled,
+  });
+  return operationBatchLocalUpdateService;
+}
+
+function getOperationContentSyncService() {
+  if (operationContentSyncService) return operationContentSyncService;
+  operationContentSyncService = createOperationContentSyncService({
+    readTask: (taskId) => runTaskState("get", { taskId }),
+    updateTaskConfig: (taskId, config) => runTaskState("update_config", { taskId, config }),
+    assertAutomationEnabled: assertOperationBatchUpdateEnabled,
+  });
+  return operationContentSyncService;
+}
+
+function operationBatchUpdateActor(req) {
+  if (!auth.enabled) return { email: "", role: "admin" };
+  return getAuthUserFromRequest(auth, req);
+}
+
+async function operationBatchUpdateContext(task) {
+  if (!task) return {};
+  const batchDraft = buildOperationBatchDraft(task, operationBatchDraftOverridesFromTask(task));
+  const workflow = buildProjectWorkflow(task, batchDraft);
+  workflow.contentEmailDefaults = contentEmailDefaultsForTask(task);
+  return { task, batchDraft, workflow };
+}
+
+async function operationBatchUpdateError(taskId, req, res, error) {
+  const task = await runTaskState("get", { taskId }).catch(() => null);
+  return json(res, Number(error?.status || 500), {
+    error: error instanceof Error ? error.message : String(error),
+    errorCode: String(error?.code || "OPERATION_BATCH_UPDATE_FAILED"),
+    differingFields: structuredClone(error?.differingFields || []),
+    ...await operationBatchUpdateContext(
+      task && visibleByOwner(auth, req, task) ? task : null,
+    ),
+  });
+}
+
+async function handleOperationContentSync(taskId, req, res) {
+  const visibleTask = await runTaskState("get", { taskId });
+  if (!visibleTask || !visibleByOwner(auth, req, visibleTask)) return notFound(res);
+  try {
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    const actor = operationBatchUpdateActor(req);
+    const service = getOperationContentSyncService();
+    if (!payload.preparationId) {
+      const prepared = await service.prepare(taskId, actor, {
+        recipients: payload.recipients,
+        cc: payload.cc,
+        changeSummary: payload.changeSummary,
+        previewDraftFingerprint: payload.previewDraftFingerprint,
+        previewBaselineFingerprint: payload.previewBaselineFingerprint,
+      });
+      return json(res, 200, {
+        ok: true,
+        status: "awaiting_local_helper",
+        preparationId: prepared.preparationId,
+        task: prepared.task,
+        draft: prepared.preparation.draft,
+        localHelper: {
+          path: "/operation-content/sync",
+          payload: {
+            requestId: prepared.preparationId,
+            baseUrl: DEFAULT_OPERATION_CONSOLE_BASE_URL,
+            draft: prepared.preparation.draft,
+            dispatchTarget: prepared.preparation.dispatchTarget,
+            sendKind: prepared.preparation.sendKind,
+            changeSummary: prepared.preparation.changeSummary,
+          },
+        },
+      });
+    }
+    const result = await service.complete(taskId, payload, actor);
+    return json(res, 200, { ok: true, ...result });
+  } catch (error) {
+    const task = error?.task || await runTaskState("get", { taskId }).catch(() => null);
+    return json(res, Number(error?.status || 500), {
+      error: error?.message || String(error),
+      errorCode: String(error?.code || "OPERATION_CONTENT_SYNC_FAILED"),
+      ...(task && visibleByOwner(auth, req, task) ? { task } : {}),
+    });
+  }
+}
+
+async function handleOperationBatchUpdatePreview(taskId, req, res) {
+  try {
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    const actor = operationBatchUpdateActor(req);
+    const service = getOperationBatchLocalUpdateService();
+    if (!payload.preparationId) {
+      const prepared = await service.preparePreview(taskId, actor);
+      return json(res, 200, {
+        ok: true,
+        status: "awaiting_local_helper",
+        preparationId: prepared.preparationId,
+        localHelper: {
+          path: "/operation-batch/inspect",
+          payload: {
+            requestId: prepared.preparationId,
+            baseUrl: DEFAULT_OPERATION_CONSOLE_BASE_URL,
+            instruction: prepared.instruction,
+          },
+        },
+      });
+    }
+    const result = await service.completePreview(taskId, payload, actor);
+    return json(res, 200, {
+      ok: true,
+      ...result,
+      ...await operationBatchUpdateContext(result.task),
+    });
+  } catch (error) {
+    return operationBatchUpdateError(taskId, req, res, error);
+  }
+}
+
+async function handleOperationBatchUpdateApply(taskId, req, res) {
+  try {
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    const actor = operationBatchUpdateActor(req);
+    const service = getOperationBatchLocalUpdateService();
+    if (!payload.preparationId) {
+      const prepared = await service.prepareUpdate(taskId, payload, actor);
+      return json(res, 200, {
+        ok: true,
+        status: "awaiting_local_helper",
+        preparationId: prepared.preparationId,
+        attemptId: prepared.attemptId,
+        ...await operationBatchUpdateContext(prepared.task),
+        localHelper: {
+          path: "/operation-batch/update",
+          payload: {
+            requestId: prepared.preparationId,
+            baseUrl: DEFAULT_OPERATION_CONSOLE_BASE_URL,
+            instruction: prepared.instruction,
+          },
+        },
+      });
+    }
+    const result = await service.completeUpdate(taskId, payload, actor);
+    return json(res, 200, {
+      ok: true,
+      ...result,
+      ...await operationBatchUpdateContext(result.task),
+    });
+  } catch (error) {
+    return operationBatchUpdateError(taskId, req, res, error);
+  }
+}
+
+async function handleOperationBatchUpdateAttempt(taskId, attemptId, req, res) {
+  try {
+    const result = await getOperationBatchLocalUpdateService().attempt(
+      taskId,
+      attemptId,
+      operationBatchUpdateActor(req),
+    );
+    return json(res, 200, {
+      ok: true,
+      ...result,
+      ...await operationBatchUpdateContext(result.task),
+    });
+  } catch (error) {
+    return operationBatchUpdateError(taskId, req, res, error);
+  }
+}
+
+function activeOperationBatchLocalPreparation(taskId, now = Date.now()) {
+  let active = null;
+  for (const [id, preparation] of operationBatchLocalPreparations) {
+    if (preparation.expiresAt <= now) {
+      operationBatchLocalPreparations.delete(id);
+    } else if (!active && preparation.taskId === taskId) {
+      active = { id, ...preparation };
+    }
+  }
+  return active;
+}
+
+function operationBatchDesiredForLocalHelper(desired = {}) {
+  const missing = (Array.isArray(desired.missing) ? desired.missing : []).map((item) => {
+    if (typeof item === "string") return item;
+    const requirementIndex = Number(item?.requirementIndex);
+    const fields = Array.isArray(item?.fields)
+      ? item.fields.map((field) => String(field || "").trim()).filter(Boolean)
+      : [];
+    const scheduleName = Number.isInteger(requirementIndex) ? `日程${requirementIndex + 1}` : "日程";
+    return fields.length ? `${scheduleName}缺少${fields.join("、")}` : `${scheduleName}字段不完整`;
+  });
+  return { ...desired, missing };
+}
+
+function operationBatchLocalPreparationResponse(task, preparationId, preparation) {
+  return {
+    ok: true,
+    status: "awaiting_local_helper",
+    preparationId,
+    task,
+    localHelper: {
+      path: "/operation-batch/create",
+      payload: {
+        requestId: preparationId,
+        baseUrl: DEFAULT_OPERATION_CONSOLE_BASE_URL,
+        draft: preparation.draft,
+        desired: operationBatchDesiredForLocalHelper(preparation.desired),
+        publishAfterCreate: false,
+      },
+    },
+  };
+}
+
+function applyCompletedOperationBatchResult(task, helperResult = {}) {
+  const created = helperResult.created || helperResult;
+  const patch = applyOperationBatchResult(task, created);
+  patch.operationBatch = {
+    ...patch.operationBatch,
+    scheduleStatus: String(helperResult.scheduleStatus || "unknown"),
+    scheduleErrorCode: String(helperResult.scheduleErrorCode || ""),
+    scheduleErrorMessage: String(helperResult.scheduleErrorMessage || ""),
+  };
+  const managedResult = helperResult.managedResult;
+  if (managedResult?.verified !== true || !managedResult.snapshot) return patch;
+  const taskWithCreatedBatch = {
+    ...task,
+    config: { ...(task.config || {}), ...patch },
+  };
+  return {
+    ...patch,
+    operationBatch: applyOperationBatchManagedResult(taskWithCreatedBatch, {
+      verified: true,
+      snapshot: managedResult.snapshot,
+      action: `create_${managedResult.action || "sync"}`,
+      detailUrl: managedResult.detailUrl || created.detailUrl,
+      checkpoints: managedResult.checkpoints,
+      allowEmptySchedules: managedResult.allowEmptySchedules === true,
+    }).operationBatch,
+  };
+}
 
 async function handleOperationBatchDraft(taskId, req, res) {
   const task = await runTaskState("get", { taskId });
@@ -5665,6 +8726,9 @@ async function handleOperationBatchDraft(taskId, req, res) {
 async function handleOperationBatchCreate(taskId, req, res) {
   const task = await runTaskState("get", { taskId });
   if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  const payload = parseJsonSafe(await readBody(req)) || {};
+  const preparationId = String(payload.preparationId || "").trim();
+  const actorEmail = normalizeEmail(getAuthUserFromRequest(auth, req)?.email || "local-admin");
   const existingOperationBatchCode = task.config?.operationBatchCode || task.config?.operationBatch?.code || "";
   if (existingOperationBatchCode) {
     return json(res, 200, {
@@ -5680,13 +8744,72 @@ async function handleOperationBatchCreate(taskId, req, res) {
       error: "运营控制台浏览器自动化未启用。请先确认测试环境已登录，并设置 OPERATION_CONSOLE_AUTOMATION_ENABLED=1 后重启服务。",
     });
   }
-  const payload = parseJsonSafe(await readBody(req)) || operationBatchDraftOverridesFromTask(task);
-  const draft = buildOperationBatchDraft(task, payload);
-  const missing = (draft.warnings || []).map((item) => item.message).filter(Boolean);
-  if (missing.length) {
-    return badRequest(res, `批次草稿仍有缺失字段：${missing.join("；")}`);
+  if (!preparationId) {
+    const activePreparation = activeOperationBatchLocalPreparation(taskId);
+    if (activePreparation) {
+      if (activePreparation.actorEmail !== actorEmail) {
+        return json(res, 409, { error: "该项目正在另一台电脑上创建运营批次，请等待执行完成。", task });
+      }
+      return json(res, 200, operationBatchLocalPreparationResponse(task, activePreparation.id, activePreparation));
+    }
+    if (OPERATION_BATCH_UNCONFIRMED_STATUSES.has(task.config?.operationBatch?.status)) {
+      return json(res, 409, {
+        error: "上次本机建批次结果未确认，为避免重复创建，请先人工确认或补录已有批次。",
+        task,
+      });
+    }
+    const draft = buildOperationBatchDraft(
+      task,
+      Object.keys(payload).length ? payload : operationBatchDraftOverridesFromTask(task),
+    );
+    const missing = (draft.warnings || []).map((item) => item.message).filter(Boolean);
+    if (missing.length) {
+      return badRequest(res, `批次草稿仍有缺失字段：${missing.join("；")}`);
+    }
+    const nextPreparationId = randomUUID();
+    const desired = buildDesiredOperationBatchSnapshot(task);
+    const preparation = {
+      taskId,
+      actorEmail,
+      draft,
+      desired,
+      expiresAt: Date.now() + OPERATION_BATCH_LOCAL_PREPARATION_TTL_MS,
+    };
+    operationBatchLocalPreparations.set(nextPreparationId, preparation);
+    const current = task.config?.operationBatch || {};
+    let updated;
+    try {
+      updated = await runTaskState("update_config", {
+        taskId,
+        config: {
+          operationBatch: {
+            ...current,
+            status: "awaiting_local_helper",
+            draft,
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      });
+    } catch (error) {
+      operationBatchLocalPreparations.delete(nextPreparationId);
+      throw error;
+    }
+    return json(res, 200, operationBatchLocalPreparationResponse(updated, nextPreparationId, preparation));
+  }
+  const preparation = operationBatchLocalPreparations.get(preparationId);
+  if (!preparation
+    || preparation.taskId !== taskId
+    || preparation.actorEmail !== actorEmail
+    || preparation.expiresAt <= Date.now()) {
+    operationBatchLocalPreparations.delete(preparationId);
+    return json(res, 409, { error: "本机建批次准备信息已失效，请重新点击创建。", task });
+  }
+  const helperResult = payload.helperResult?.operationBatch || payload.helperResult;
+  if (!helperResult || typeof helperResult !== "object") {
+    return badRequest(res, "缺少本机助手建批次执行结果");
   }
   acquireOperationBatchCreation(operationBatchCreationInFlight, taskId);
+  let externalBatchConfirmed = false;
   try {
     const current = task.config?.operationBatch || {};
     await runTaskState("update_config", {
@@ -5695,19 +8818,30 @@ async function handleOperationBatchCreate(taskId, req, res) {
         operationBatch: {
           ...current,
           status: "creating",
-          draft,
+          draft: preparation.draft,
           updatedAt: new Date().toISOString(),
         },
       },
     });
-    const created = await runOperationBatchCreation(draft, {
-      baseUrl: process.env.OPERATION_CONSOLE_BASE_URL,
-      userDataDir: process.env.OPERATION_CONSOLE_USER_DATA_DIR,
-      allowTaskMismatch: process.env.OPERATION_CONSOLE_ALLOW_TEST_TASK_MISMATCH === "1",
-    });
+    const created = helperResult.created || helperResult;
+    externalBatchConfirmed = Boolean(
+      helperResult.externalBatchConfirmed
+      || helperResult.operationBatchCode
+      || created.operationBatchCode
+      || created.code,
+    );
+    if (helperResult.status !== "success"
+      || helperResult.publishStatus !== "published"
+      || created.status !== "published") {
+      const helperError = new Error(helperResult.errorMessage || "运营批次发布结果未确认，请点击“添加日程”回查批次状态");
+      helperError.code = String(helperResult.errorCode || "OPERATION_BATCH_PUBLISH_NOT_VERIFIED");
+      helperError.status = 409;
+      throw helperError;
+    }
     const freshTask = await runTaskState("get", { taskId });
-    const patch = applyOperationBatchResult(freshTask, created);
+    const patch = applyCompletedOperationBatchResult(freshTask, helperResult);
     const updated = await runTaskState("update_config", { taskId, config: patch });
+    operationBatchLocalPreparations.delete(preparationId);
     return json(res, 200, { ok: true, task: updated, operationBatch: updated.config?.operationBatch || {}, operationBatchCode: updated.config?.operationBatchCode || "" });
   } catch (error) {
     const failedTask = await runTaskState("get", { taskId });
@@ -5717,16 +8851,193 @@ async function handleOperationBatchCreate(taskId, req, res) {
       config: {
         operationBatch: {
           ...failedCurrent,
-          status: "failed",
+          status: externalBatchConfirmed ? "reconciliation_required" : "failed",
+          errorCode: String(error?.code || ""),
           errorMessage: error instanceof Error ? error.message : String(error),
           updatedAt: new Date().toISOString(),
         },
       },
     });
+    operationBatchLocalPreparations.delete(preparationId);
     return json(res, error?.status || 500, { error: error instanceof Error ? error.message : String(error), task: updated });
   } finally {
     releaseOperationBatchCreation(operationBatchCreationInFlight, taskId);
   }
+}
+
+async function handleOperationBatchReconciliation(taskId, req, res) {
+  const task = await runTaskState("get", { taskId });
+  if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  const payload = parseJsonSafe(await readBody(req)) || {};
+  const actorEmail = normalizeEmail(getAuthUserFromRequest(auth, req)?.email || "local-admin");
+  const existingOperationBatchCode = task.config?.operationBatchCode || task.config?.operationBatch?.code || "";
+  const currentOperationBatch = task.config?.operationBatch || {};
+  if (!operationBatchCodeIsValid(existingOperationBatchCode)) {
+    return json(res, 409, {
+      error: "添加日程必须先有有效的批次代码，请先补录批次代码和批次名称。",
+      task,
+    });
+  }
+  if (!String(currentOperationBatch.batchName || "").trim()) {
+    return json(res, 409, {
+      error: "未取得实际批次名，请先重新同步批次信息。",
+      code: "OPERATION_BATCH_ACTUAL_NAME_MISSING",
+      task,
+    });
+  }
+  const followUpNeeded = !existingOperationBatchCode
+    || currentOperationBatch.status !== "published"
+    || currentOperationBatch.scheduleStatus !== "synced";
+  if (!followUpNeeded) {
+    return json(res, 200, {
+      ok: true,
+      skipped: "operation_batch_already_synced",
+      task,
+      operationBatchCode: existingOperationBatchCode,
+      operationBatch: task.config?.operationBatch || {},
+    });
+  }
+
+  const preparationId = String(payload.preparationId || "").trim();
+  if (!preparationId) {
+    const draft = buildOperationBatchDraft(task, operationBatchDraftOverridesFromTask(task));
+    const missing = (draft.warnings || []).map((item) => item.message).filter(Boolean);
+    if (missing.length) return badRequest(res, `批次草稿仍有缺失字段：${missing.join("；")}`);
+    const nextPreparationId = randomUUID();
+    const preparation = {
+      taskId,
+      actorEmail,
+      draft,
+      desired: buildDesiredOperationBatchSnapshot(task),
+      mode: "reconciliation",
+      expiresAt: Date.now() + OPERATION_BATCH_LOCAL_PREPARATION_TTL_MS,
+    };
+    operationBatchLocalPreparations.set(nextPreparationId, preparation);
+    return json(res, 200, {
+      ok: true,
+      status: "awaiting_local_helper",
+      preparationId: nextPreparationId,
+      task,
+      localHelper: {
+        path: "/operation-batch/reconcile",
+        payload: {
+          requestId: nextPreparationId,
+          baseUrl: DEFAULT_OPERATION_CONSOLE_BASE_URL,
+          draft,
+          desired: operationBatchDesiredForLocalHelper(preparation.desired),
+          operationBatchCode: existingOperationBatchCode,
+          publishRequired: !existingOperationBatchCode || currentOperationBatch.status !== "published",
+          publishAfterCreate: false,
+        },
+      },
+    });
+  }
+
+  const preparation = operationBatchLocalPreparations.get(preparationId);
+  if (!preparation
+    || preparation.taskId !== taskId
+    || preparation.actorEmail !== actorEmail
+    || preparation.mode !== "reconciliation"
+    || preparation.expiresAt <= Date.now()) {
+    operationBatchLocalPreparations.delete(preparationId);
+    return json(res, 409, { error: "本机批次回查准备信息已失效，请刷新项目后重试。", task });
+  }
+  const helperResult = payload.helperResult?.operationBatch || payload.helperResult;
+  if (!helperResult || typeof helperResult !== "object") {
+    return badRequest(res, "缺少本机助手批次回查结果");
+  }
+  if (operationBatchCreationInFlight.has(taskId)) {
+    return json(res, 409, { error: "当前项目仍有批次操作进行中，请稍后再试。", task });
+  }
+  acquireOperationBatchCreation(operationBatchCreationInFlight, taskId);
+  try {
+    const created = helperResult.created || helperResult;
+    if (!created.operationBatchCode && !created.code) {
+      throw new Error("本机助手回查结果缺少运营批次代码");
+    }
+    if (helperResult.status !== "success"
+      || helperResult.publishStatus !== "published"
+      || created.status !== "published") {
+      const error = new Error(helperResult.errorMessage || "运营批次发布结果未确认");
+      error.code = String(helperResult.errorCode || "OPERATION_BATCH_PUBLISH_NOT_VERIFIED");
+      error.status = 409;
+      throw error;
+    }
+    const freshTask = await runTaskState("get", { taskId });
+    const patch = applyCompletedOperationBatchResult(freshTask, helperResult);
+    const updated = await runTaskState("update_config", { taskId, config: patch });
+    operationBatchLocalPreparations.delete(preparationId);
+    return json(res, 200, {
+      ok: true,
+      task: updated,
+      operationBatch: updated.config?.operationBatch || {},
+      operationBatchCode: updated.config?.operationBatchCode || "",
+    });
+  } catch (error) {
+    const failedTask = await runTaskState("get", { taskId });
+    const current = failedTask.config?.operationBatch || {};
+    const updated = await runTaskState("update_config", {
+      taskId,
+      config: {
+        operationBatch: {
+          ...current,
+          status: "reconciliation_required",
+          errorCode: String(error?.code || "OPERATION_BATCH_RECONCILIATION_REQUIRED"),
+          errorMessage: error instanceof Error ? error.message : String(error),
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    });
+    operationBatchLocalPreparations.delete(preparationId);
+    return json(res, error?.status || 409, { error: error instanceof Error ? error.message : String(error), task: updated });
+  } finally {
+    releaseOperationBatchCreation(operationBatchCreationInFlight, taskId);
+  }
+}
+
+async function handleOperationBatchRetry(taskId, req, res) {
+  const task = await runTaskState("get", { taskId });
+  if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  const payload = parseJsonSafe(await readBody(req)) || {};
+  if (payload.confirmNoExternalBatch !== true) {
+    return badRequest(res, "请先确认运控批次列表中没有已创建的批次。");
+  }
+  const existingOperationBatchCode = task.config?.operationBatchCode || task.config?.operationBatch?.code || "";
+  if (existingOperationBatchCode) {
+    return json(res, 409, {
+      error: "运营批次已存在，不能重复解锁创建。",
+      task,
+    });
+  }
+  if (operationBatchCreationInFlight.has(taskId)) {
+    return json(res, 409, {
+      error: "当前项目仍在创建运营批次，请等待本次操作结束后再试。",
+      task,
+    });
+  }
+  const current = task.config?.operationBatch || {};
+  if (!OPERATION_BATCH_UNCONFIRMED_STATUSES.has(current.status)) {
+    return json(res, 409, {
+      error: "当前没有待确认的运营批次创建结果，请直接创建或补录批次代码。",
+      task,
+    });
+  }
+  for (const [preparationId, preparation] of operationBatchLocalPreparations) {
+    if (preparation.taskId === taskId) operationBatchLocalPreparations.delete(preparationId);
+  }
+  const updated = await runTaskState("update_config", {
+    taskId,
+    config: {
+      operationBatch: {
+        ...current,
+        status: "failed",
+        errorCode: "OPERATION_BATCH_CONFIRMED_NOT_CREATED",
+        errorMessage: "已确认运控批次列表中没有该批次，现在可以重新创建。",
+        updatedAt: new Date().toISOString(),
+      },
+    },
+  });
+  return json(res, 200, { ok: true, task: updated });
 }
 
 async function handleOperationBatchResult(taskId, req, res) {
@@ -5794,23 +9105,41 @@ async function handleContentRequirementEmail(taskId, req, res) {
     } catch {}
   }
   try {
+    const preview = contentRequirementEmailPreview({ task, requirement });
+    const contentUpdate = preview.isResend
+      ? String(payload.contentUpdate || preview.suggestedUpdate || "").trim()
+      : "";
+    const delivery = contentEmailDeliveryForTask(
+      task,
+      getAuthUserFromRequest(auth, req)?.email || "",
+      { recipients: payload.recipients, cc: payload.cc },
+    );
     const result = await sendContentRequirementEmail({
       task,
       requirement,
-      recipients: payload.recipients || "",
+      recipients: delivery.recipients,
+      ccRecipients: delivery.cc,
+      contentUpdate,
       emailSettings: await readEmailSettings(),
     });
     const history = Array.isArray(task.config?.contentRequirementEmail?.history)
-      ? task.config.contentRequirementEmail.history.slice(-9)
+      ? task.config.contentRequirementEmail.history
       : [];
+    const existingContentEmail = task.config?.contentRequirementEmail || {};
     const updated = await runTaskState("update_config", {
       taskId,
       config: {
         contentRequirementEmail: {
+          ...existingContentEmail,
           lastSentAt: result.sentAt,
           lastRecipients: result.recipients,
+          lastCc: result.cc,
           lastSubject: result.subject,
           lastMessageId: result.messageId,
+          lastSourceFingerprint: result.sourceFingerprint,
+          ...(existingContentEmail.firstContentSnapshot
+            ? { firstContentSnapshot: existingContentEmail.firstContentSnapshot }
+            : !preview.isResend ? { firstContentSnapshot: result.contentSnapshot } : {}),
           history: [...history, result],
         },
       },
@@ -5896,6 +9225,16 @@ function taskRequirementIndexes(task = {}) {
   return Array.from({ length: Math.max(requirementCount, sessionCount, 1) }, (_, index) => index);
 }
 
+function taskFanweiSerial(task = {}) {
+  const config = task?.config || {};
+  const values = [
+    config.fanweiSource?.serialNo,
+    config.businessRequirement?.operation_serial_number,
+    config.projectCard?.sourceKey,
+  ];
+  return values.map((value) => String(value || "").trim()).find(Boolean) || "";
+}
+
 function taskFormalSession(task = {}, requirementIndex = 0) {
   const normalizedIndex = Number(requirementIndex || 0);
   return (task.sessions || []).find((session) => (
@@ -5968,10 +9307,9 @@ function parseTaskStartTime(task = {}, requirementIndex = 0) {
 function shouldAttemptScheduledPaperBind(task = {}, requirementIndex = 0, now = new Date()) {
   const current = paperFormBindState(task, requirementIndex);
   if (current.status === "success" || current.status === "running") return false;
-  if (shouldSkipFailedPaperBindCheckInCurrentHour(current, now)) return false;
   const formalSession = taskFormalSession(task, requirementIndex);
   if (!formalSession?.session_id) return false;
-  const courses = normalizeCourseRecords(taskRequirementConfig(task, requirementIndex));
+  const courses = normalizeCourseRecords({ courses: taskCoursesForChange(task, requirementIndex) });
   if (!courses.length) return false;
   const start = parseTaskStartTime(task, requirementIndex);
   if (!start) return false;
@@ -5981,7 +9319,8 @@ function shouldAttemptScheduledPaperBind(task = {}, requirementIndex = 0, now = 
 
 async function runPaperFormBindForTask(task, login, { scheduled = false, requirementIndex = 0 } = {}) {
   const formalSession = taskFormalSession(task, requirementIndex);
-  const courses = normalizeCourseRecords(taskRequirementConfig(task, requirementIndex));
+  const courses = normalizeCourseRecords({ courses: taskCoursesForChange(task, requirementIndex) });
+  const workflowSerial = taskFanweiSerial(task);
   const apiBase = normalizeApiBase(process.env.YIKAO_API_BASE || login.apiBase || "https://eztest.cn");
   const paperLogs = [];
   const emitLog = (message) => paperLogs.push(message);
@@ -5997,6 +9336,7 @@ async function runPaperFormBindForTask(task, login, { scheduled = false, require
         apiBase,
         sessionId: formalSession?.session_id,
         courses,
+        workflowSerial,
         requestJson: readTenantJsonWithLogin,
         emitLog,
       });
@@ -6032,6 +9372,8 @@ async function runPaperFormBindForTask(task, login, { scheduled = false, require
       apiBase,
       sessionId: formalSession?.session_id,
       courses,
+      workflowSerial,
+      examDate: formalSession?.start,
       requestJson: readTenantJsonWithLogin,
       emitLog,
     });
@@ -6041,6 +9383,7 @@ async function runPaperFormBindForTask(task, login, { scheduled = false, require
         apiBase,
         sessionId: formalSession?.session_id,
         courses,
+        workflowSerial,
         requestJson: readTenantJsonWithLogin,
         emitLog,
       });
@@ -6061,12 +9404,16 @@ async function runPaperFormBindForTask(task, login, { scheduled = false, require
       }
       const missingCourseCodes = bindResult.missingCourseCodes || [];
       const duplicatePaperMatches = bindResult.duplicatePaperMatches || [];
+      const missingCourseNames = missingCourseCodes.map((courseCode) => {
+        const matchedCourse = courses.find((course) => String(course.code || "").trim() === String(courseCode || "").trim());
+        return String(matchedCourse?.name || "").trim();
+      }).filter(Boolean);
       const duplicatePaperNames = duplicatePaperMatches
-        .map((match) => `${match.course_code || "未知科目"}/${match.paper_name || "同名试卷"}`)
+        .map((match) => match.course_name || match.paper_name || "同名试卷")
         .join("、");
       const errorMessage = duplicatePaperMatches.length
-        ? `发现重复试卷，请人工确认：${duplicatePaperNames}`
-        : `缺少试卷编号，无法绑定试卷：${missingCourseCodes.join("、") || "未获取到试卷 code"}`;
+        ? `活跃试卷中发现同名试卷，请人工确认：${duplicatePaperNames}`
+        : `活跃试卷中未找到对应试卷：${missingCourseNames.join("、") || `${missingCourseCodes.length} 个科目`}`;
       return {
         ok: false,
         status: 409,
@@ -6128,16 +9475,226 @@ async function runScheduledPaperBindingOnce(now = new Date()) {
   return results;
 }
 
-function scheduleNextPaperBindingCheck() {
-  const timer = setTimeout(async () => {
+async function updatePaperBindReminderState(taskId, requirementIndex, patch = {}) {
+  const currentTask = await runTaskState("get", { taskId });
+  const normalizedIndex = Math.max(Number(requirementIndex || 0), 0);
+  const current = currentTask?.config?.paperBindReminders?.[normalizedIndex]
+    || (normalizedIndex === 0 ? currentTask?.config?.paperBindReminder : null)
+    || {};
+  const next = {
+    ...current,
+    ...patch,
+    requirementIndex: normalizedIndex,
+    updatedAt: new Date().toISOString(),
+  };
+  const paperBindReminders = Array.isArray(currentTask?.config?.paperBindReminders)
+    ? [...currentTask.config.paperBindReminders]
+    : [];
+  paperBindReminders[normalizedIndex] = next;
+  await runTaskState("update_config", {
+    taskId,
+    config: {
+      paperBindReminders,
+      ...(normalizedIndex === 0 ? { paperBindReminder: next } : {}),
+    },
+  });
+  return await runTaskState("get", { taskId });
+}
+
+async function refreshPaperBindingForReminder(task, requirementIndex) {
+  const formalSession = taskFormalSession(task, requirementIndex);
+  const courses = normalizeCourseRecords({ courses: taskCoursesForChange(task, requirementIndex) });
+  const login = getYikaoLoginForTask(task);
+  const apiBase = normalizeApiBase(process.env.YIKAO_API_BASE || login.apiBase || "https://eztest.cn");
+  const logs = [];
+  const bindResult = await detectSessionPaperBindings({
+    login,
+    apiBase,
+    sessionId: formalSession?.session_id,
+    courses,
+    workflowSerial: taskFanweiSerial(task),
+    requestJson: readTenantJsonWithLogin,
+    emitLog: (message) => logs.push(message),
+  });
+  if (bindResult.status !== "success") return { task, bindResult, logs };
+  const updatedTask = await updatePaperFormBindState(task.taskId, requirementIndex, "success", {
+    message: logs.join("\n") || "提醒发送前回查确认正式场次已有试卷",
+    result: {
+      sessionId: formalSession?.session_id,
+      courseCount: bindResult.results?.length || courses.length,
+      bindResult,
+      detectedManualBinding: true,
+    },
+  });
+  return { task: updatedTask, bindResult, logs };
+}
+
+async function runScheduledPaperBindRemindersOnce(now = new Date()) {
+  const summaries = await runTaskState("list_all");
+  const results = [];
+  for (const summary of summaries || []) {
+    let task = await runTaskState("get", { taskId: summary.taskId });
+    if (!task) continue;
+    for (const requirementIndex of taskRequirementIndexes(task)) {
+      const decision = paperBindReminderDecision(task, requirementIndex, now);
+      if (!decision.due) continue;
+      let bindingCheckError = "";
+      try {
+        const refreshed = await refreshPaperBindingForReminder(task, requirementIndex);
+        task = refreshed.task;
+        if (refreshed.bindResult.status === "success") {
+          await updatePaperBindReminderState(task.taskId, requirementIndex, {
+            ...decision,
+            status: "not_needed",
+            reason: "paper_bound_on_final_check",
+            checkedAt: new Date().toISOString(),
+            errorMessage: "",
+          });
+          results.push({ taskId: task.taskId, requirementIndex, status: "already_bound" });
+          continue;
+        }
+      } catch (error) {
+        bindingCheckError = error instanceof Error ? error.message : String(error);
+      }
+
+      const attemptedAt = new Date().toISOString();
+      task = await updatePaperBindReminderState(task.taskId, requirementIndex, {
+        ...decision,
+        status: "sending",
+        attemptedAt,
+        bindingCheckError,
+        errorMessage: "",
+      });
+      try {
+        const sent = await sendPaperBindReminderEmail({
+          task,
+          requirementIndex,
+          context: decision,
+          emailSettings: await readEmailSettings(),
+          now,
+        });
+        task = await updatePaperBindReminderState(task.taskId, requirementIndex, {
+          ...decision,
+          status: "sent",
+          attemptedAt,
+          sentAt: sent.sentAt,
+          recipients: sent.recipients,
+          subject: sent.subject,
+          messageId: sent.messageId,
+          bindingCheckError,
+          errorMessage: "",
+        });
+        results.push({ taskId: task.taskId, requirementIndex, status: "sent" });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        task = await updatePaperBindReminderState(task.taskId, requirementIndex, {
+          ...decision,
+          status: "failed",
+          attemptedAt,
+          bindingCheckError,
+          errorMessage,
+        });
+        results.push({ taskId: task.taskId, requirementIndex, status: "failed", error: errorMessage });
+      }
+    }
+  }
+  if (results.length) console.log(`[试卷绑定提醒] 本轮处理 ${results.length} 个任务：${JSON.stringify(results)}`);
+  return results;
+}
+
+async function updateProjectSharedSheetReminderState(taskId, patch = {}) {
+  const currentTask = await runTaskState("get", { taskId });
+  const current = currentTask?.config?.projectSharedSheetReminder || {};
+  const next = {
+    ...current,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  await runTaskState("update_config", {
+    taskId,
+    config: { projectSharedSheetReminder: next },
+  });
+  return await runTaskState("get", { taskId });
+}
+
+async function runScheduledProjectSharedSheetRemindersOnce(now = new Date()) {
+  const summaries = await runTaskState("list_all");
+  const results = [];
+  for (const summary of summaries || []) {
+    let task = await runTaskState("get", { taskId: summary.taskId });
+    if (!task) continue;
+    const decision = projectSharedSheetReminderDecision(task, now);
+    if (!decision.due) continue;
+    const attemptedAt = new Date().toISOString();
+    task = await updateProjectSharedSheetReminderState(task.taskId, {
+      ...decision,
+      status: "sending",
+      attemptedAt,
+      errorMessage: "",
+    });
     try {
-      await runScheduledPaperBindingOnce(new Date());
+      const sent = await sendProjectSharedSheetReminderEmail({
+        task,
+        context: decision,
+        emailSettings: await readEmailSettings(),
+        now,
+      });
+      task = await updateProjectSharedSheetReminderState(task.taskId, {
+        ...decision,
+        status: "sent",
+        attemptedAt,
+        sentAt: sent.sentAt,
+        recipients: sent.recipients,
+        subject: sent.subject,
+        messageId: sent.messageId,
+        errorMessage: "",
+      });
+      results.push({ taskId: task.taskId, status: "sent" });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      task = await updateProjectSharedSheetReminderState(task.taskId, {
+        ...decision,
+        status: "failed",
+        attemptedAt,
+        errorMessage,
+      });
+      results.push({ taskId: task.taskId, status: "failed", error: errorMessage });
+    }
+  }
+  if (results.length) console.log(`[项目共享大表提醒] 本轮处理 ${results.length} 个任务：${JSON.stringify(results)}`);
+  return results;
+}
+
+function scheduleNextPaperBindingCheck() {
+  const scheduledAt = new Date();
+  const scheduledForMs = scheduledAt.getTime() + millisecondsUntilNextHour(scheduledAt);
+  const runAtWholeHour = async () => {
+    const remainingMs = scheduledForMs - Date.now();
+    if (remainingMs > 0) {
+      const boundaryTimer = setTimeout(runAtWholeHour, remainingMs);
+      boundaryTimer.unref();
+      return;
+    }
+    const checkTime = new Date();
+    try {
+      await runScheduledPaperBindingOnce(checkTime);
     } catch (error) {
       console.warn(`[试卷绑定定时] 整点检查失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+    try {
+      await runScheduledPaperBindRemindersOnce(checkTime);
+    } catch (error) {
+      console.warn(`[试卷绑定提醒] 整点检查失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+    try {
+      await runScheduledProjectSharedSheetRemindersOnce(checkTime);
+    } catch (error) {
+      console.warn(`[项目共享大表提醒] 整点检查失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       scheduleNextPaperBindingCheck();
     }
-  }, millisecondsUntilNextHour(new Date()));
+  };
+  const timer = setTimeout(runAtWholeHour, Math.max(1, scheduledForMs - Date.now()));
   timer.unref();
 }
 
@@ -6154,7 +9711,7 @@ async function handleTaskStepRetry(taskId, stepKey, req, res) {
     const task = visibleTask;
 
     const formalSession = taskFormalSession(task, requirementIndex);
-    const courses = normalizeCourseRecords(taskRequirementConfig(task, requirementIndex));
+    const courses = normalizeCourseRecords({ courses: taskCoursesForChange(task, requirementIndex) });
     const login = getYikaoLoginForTask(task);
     const apiBase = normalizeApiBase(process.env.YIKAO_API_BASE || login.apiBase || "https://eztest.cn");
     const retryLogs = [];
@@ -6287,6 +9844,10 @@ async function buildHtml() {
   );
 }
 
+async function buildPublicAssistantHtml() {
+  return await fs.readFile(publicAssistantFile, "utf8");
+}
+
 async function handleWebModule(urlPath, res) {
   const relativePath = decodeURIComponent(urlPath.slice("/web/".length));
   const filePath = path.resolve(webModulesDir, relativePath);
@@ -6309,6 +9870,9 @@ async function requestHandler(req, res) {
     if (req.method === "POST" && url.pathname === "/api/auth/login") {
       return await handleAuthLogin(auth, req, res);
     }
+    if (req.method === "POST" && url.pathname === "/login") {
+      return await handleWebLogin(auth, req, res, url);
+    }
     if (req.method === "GET" && url.pathname === "/api/auth/me") {
       return handleAuthMe(auth, req, res);
     }
@@ -6318,10 +9882,18 @@ async function requestHandler(req, res) {
     if ((req.method === "POST" || req.method === "OPTIONS") && url.pathname === "/api/fanwei/bridge/submit") {
       return await handleFanweiBridgeSubmit(req, res);
     }
+    if (req.method === "GET" && url.pathname === "/api/fanwei/helper-update-package") {
+      return await handleFanweiHelperUpdatePackage(url, res);
+    }
     if (url.pathname === "/api/auth/users" || url.pathname.startsWith("/api/auth/users/")) {
       return await handleAuthUsers(auth, req, res, url);
     }
-    if (auth.enabled && !shouldAllowWithoutAuth(req.method, url.pathname) && !getAuthUserFromRequest(auth, req)) {
+    const internalWechatCollectorRequest = shouldAllowInternalWechatCollectorRequest(
+      req.method,
+      url.pathname,
+      req.socket?.remoteAddress,
+    );
+    if (auth.enabled && !shouldAllowWithoutAuth(req.method, url.pathname) && !internalWechatCollectorRequest && !getAuthUserFromRequest(auth, req)) {
       if (req.method === "GET" && (isFrontendRoute(url.pathname) || url.pathname === "/easy_exam_automation.html")) {
         return redirectToLogin(req, res, url);
       }
@@ -6330,11 +9902,17 @@ async function requestHandler(req, res) {
     if (req.method === "GET" && url.pathname.startsWith("/web/")) {
       return await handleWebModule(url.pathname, res);
     }
+    if (req.method === "GET" && /^\/assistant\/?$/.test(url.pathname)) {
+      return sendHtml(res, await buildPublicAssistantHtml());
+    }
     if (req.method === "GET" && (isFrontendRoute(url.pathname) || url.pathname === "/easy_exam_automation.html")) {
       return sendHtml(res, await buildHtml());
     }
     if (req.method === "GET" && url.pathname === "/api/health") {
       return json(res, 200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/api/public/assistant/chat") {
+      return await handlePublicExamAssistantChat(req, res);
     }
     if (req.method === "GET" && url.pathname === "/api/settings") {
       return await handleGetSettings(req, res);
@@ -6384,11 +9962,24 @@ async function requestHandler(req, res) {
     if (req.method === "GET" && url.pathname === "/api/fanwei/helper-installer") {
       return await handleFanweiHelperInstaller(req, url, res);
     }
+    if (req.method === "GET" && url.pathname === "/api/fanwei/helper-update-manifest") {
+      return await handleFanweiHelperUpdateManifest(req, url, res);
+    }
     if (req.method === "GET" && url.pathname === "/api/templates/exam-request") {
       return await handleExamRequestTemplate(req, res);
     }
     if (req.method === "POST" && url.pathname === "/api/jobs") {
       return await handleCreateJob(req, res);
+    }
+    const projectRequirementAcceptMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/requirements\/([^/]+)\/change-requests\/([^/]+)\/accept$/);
+    if (req.method === "POST" && projectRequirementAcceptMatch) {
+      return await handleProjectRequirementChangeAccept(
+        decodeURIComponent(projectRequirementAcceptMatch[1]),
+        decodeURIComponent(projectRequirementAcceptMatch[2]),
+        decodeURIComponent(projectRequirementAcceptMatch[3]),
+        req,
+        res,
+      );
     }
     if (await handleRequirementRequest(req, res, url)) {
       return;
@@ -6410,6 +10001,9 @@ async function requestHandler(req, res) {
     if (req.method === "GET" && url.pathname === "/api/tasks") {
       return await handleTaskList(req, res);
     }
+    if (req.method === "GET" && url.pathname === "/api/platform-api-logs") {
+      return await handlePlatformApiLogs(req, res);
+    }
     if (req.method === "GET" && url.pathname === "/api/exams") {
       return await handleExamList(req, res);
     }
@@ -6425,17 +10019,109 @@ async function requestHandler(req, res) {
     if (req.method === "GET" && projectWorkflowMatch) {
       return await handleProjectWorkflow(decodeURIComponent(projectWorkflowMatch[1]), req, res);
     }
+    const operationArchiveStateMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-archive$/);
+    if ((req.method === "GET" || req.method === "PUT") && operationArchiveStateMatch) {
+      return await handleOperationArchiveState(decodeURIComponent(operationArchiveStateMatch[1]), req, res);
+    }
+    const operationArchiveEvidenceRefreshMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-archive\/evidence\/refresh$/);
+    if (req.method === "POST" && operationArchiveEvidenceRefreshMatch) {
+      return await handleOperationArchiveEvidenceRefresh(
+        decodeURIComponent(operationArchiveEvidenceRefreshMatch[1]),
+        req,
+        res,
+      );
+    }
+    const operationArchiveScreenshotMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-archive\/screenshots\/(\d+)$/);
+    if (req.method === "GET" && operationArchiveScreenshotMatch) {
+      return await handleOperationArchiveScreenshot(
+        decodeURIComponent(operationArchiveScreenshotMatch[1]),
+        Number(operationArchiveScreenshotMatch[2]),
+        req,
+        res,
+      );
+    }
+    const operationArchiveInspectMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-archive\/inspect$/);
+    if (req.method === "POST" && operationArchiveInspectMatch) {
+      return await handleOperationArchiveInspect(decodeURIComponent(operationArchiveInspectMatch[1]), req, res);
+    }
+    const operationArchiveSubmitMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-archive\/submit$/);
+    if (req.method === "POST" && operationArchiveSubmitMatch) {
+      return await handleOperationArchiveSubmit(decodeURIComponent(operationArchiveSubmitMatch[1]), req, res);
+    }
+    const operationContentSyncMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-content\/sync$/);
+    if (req.method === "POST" && operationContentSyncMatch) {
+      return await handleOperationContentSync(decodeURIComponent(operationContentSyncMatch[1]), req, res);
+    }
     const projectSourceSnapshotMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/source-snapshot$/);
     if (req.method === "PATCH" && projectSourceSnapshotMatch) {
       return await handleProjectSourceSnapshotUpdate(decodeURIComponent(projectSourceSnapshotMatch[1]), req, res);
+    }
+    if (req.method === "POST" && projectSourceSnapshotMatch) {
+      return await handleProjectSourceSnapshotCreate(decodeURIComponent(projectSourceSnapshotMatch[1]), req, res);
+    }
+    if (req.method === "DELETE" && projectSourceSnapshotMatch) {
+      return await handleProjectSourceSnapshotDelete(decodeURIComponent(projectSourceSnapshotMatch[1]), req, res);
     }
     const operationBatchCreateMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/create$/);
     if (req.method === "POST" && operationBatchCreateMatch) {
       return await handleOperationBatchCreate(decodeURIComponent(operationBatchCreateMatch[1]), req, res);
     }
+    const operationBatchUpdatePreviewMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/update\/preview$/);
+    if (req.method === "POST" && operationBatchUpdatePreviewMatch) {
+      return await handleOperationBatchUpdatePreview(decodeURIComponent(operationBatchUpdatePreviewMatch[1]), req, res);
+    }
+    const operationBatchUpdateApplyMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/update\/apply$/);
+    if (req.method === "POST" && operationBatchUpdateApplyMatch) {
+      return await handleOperationBatchUpdateApply(decodeURIComponent(operationBatchUpdateApplyMatch[1]), req, res);
+    }
+    const operationBatchUpdateAttemptMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/update\/attempts\/([^/]+)$/);
+    if (req.method === "GET" && operationBatchUpdateAttemptMatch) {
+      return await handleOperationBatchUpdateAttempt(
+        decodeURIComponent(operationBatchUpdateAttemptMatch[1]),
+        decodeURIComponent(operationBatchUpdateAttemptMatch[2]),
+        req,
+        res,
+      );
+    }
+    const operationBatchRetryMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/retry$/);
+    if (req.method === "POST" && operationBatchRetryMatch) {
+      return await handleOperationBatchRetry(decodeURIComponent(operationBatchRetryMatch[1]), req, res);
+    }
+    const operationBatchReconciliationMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/reconcile$/);
+    if (req.method === "POST" && operationBatchReconciliationMatch) {
+      return await handleOperationBatchReconciliation(decodeURIComponent(operationBatchReconciliationMatch[1]), req, res);
+    }
     const operationBatchResultMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/result$/);
     if (req.method === "POST" && operationBatchResultMatch) {
       return await handleOperationBatchResult(decodeURIComponent(operationBatchResultMatch[1]), req, res);
+    }
+    const personnelStateMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-personnel-task$/);
+    if (req.method === "GET" && personnelStateMatch) {
+      return await handleOperationPersonnelTaskState(decodeURIComponent(personnelStateMatch[1]), req, res);
+    }
+    if (req.method === "PATCH" && personnelStateMatch) {
+      return await handleOperationPersonnelTaskEdit(decodeURIComponent(personnelStateMatch[1]), req, res);
+    }
+    const personnelPreviewMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-personnel-task\/preview$/);
+    if (req.method === "POST" && personnelPreviewMatch) {
+      return await handleOperationPersonnelTaskPreview(decodeURIComponent(personnelPreviewMatch[1]), req, res);
+    }
+    const personnelSendMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-personnel-task\/send$/);
+    if (req.method === "POST" && personnelSendMatch) {
+      return await handleOperationPersonnelTaskSend(decodeURIComponent(personnelSendMatch[1]), req, res);
+    }
+    const personnelAttemptMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-personnel-task\/attempts\/([^/]+)$/);
+    if (req.method === "GET" && personnelAttemptMatch) {
+      return await handleOperationPersonnelTaskAttempt(
+        decodeURIComponent(personnelAttemptMatch[1]),
+        decodeURIComponent(personnelAttemptMatch[2]),
+        req,
+        res,
+      );
+    }
+    const personnelRecheckMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-personnel-task\/recheck$/);
+    if (req.method === "POST" && personnelRecheckMatch) {
+      return await handleOperationPersonnelTaskRecheck(decodeURIComponent(personnelRecheckMatch[1]), req, res);
     }
     const contentRequirementEmailMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/content-requirement-email$/);
     if (req.method === "POST" && contentRequirementEmailMatch) {
@@ -6490,11 +10176,75 @@ async function requestHandler(req, res) {
         res,
       );
     }
+    const sessionSyncPreviewMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/sessions\/sync-preview$/);
+    if (req.method === "GET" && sessionSyncPreviewMatch) {
+      return await handleSessionSyncPreview(decodeURIComponent(sessionSyncPreviewMatch[1]), req, res);
+    }
+    if (req.method === "POST" && sessionSyncPreviewMatch) {
+      return await handleSessionSyncPreview(decodeURIComponent(sessionSyncPreviewMatch[1]), req, res, {
+        persist: true,
+        persistDetail: url.searchParams.get("detail") === "1",
+      });
+    }
+    const sessionSyncApplyMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/sessions\/([^/]+)\/sync-from-yikao$/);
+    if (req.method === "POST" && sessionSyncApplyMatch) {
+      return await handleSessionSyncApply(
+        decodeURIComponent(sessionSyncApplyMatch[1]),
+        decodeURIComponent(sessionSyncApplyMatch[2]),
+        req,
+        res,
+      );
+    }
     const sessionChangeMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/sessions\/([^/]+)\/change$/);
     if (req.method === "POST" && sessionChangeMatch) {
       return await handleSessionChange(
         decodeURIComponent(sessionChangeMatch[1]),
         decodeURIComponent(sessionChangeMatch[2]),
+        req,
+        res,
+      );
+    }
+    const courseChangePreviewMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/courses\/change-preview$/);
+    if (req.method === "GET" && courseChangePreviewMatch) {
+      return await handleCourseChangePreview(decodeURIComponent(courseChangePreviewMatch[1]), req, res);
+    }
+    const courseChangeMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/courses\/change$/);
+    if (req.method === "POST" && courseChangeMatch) {
+      return await handleCourseChange(decodeURIComponent(courseChangeMatch[1]), req, res);
+    }
+    const candidateChangeApplyMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/sessions\/([^/]+)\/candidate-changes\/([^/]+)\/apply$/);
+    if (req.method === "POST" && candidateChangeApplyMatch) {
+      return await handleCandidateChangeApply(
+        decodeURIComponent(candidateChangeApplyMatch[1]),
+        decodeURIComponent(candidateChangeApplyMatch[2]),
+        decodeURIComponent(candidateChangeApplyMatch[3]),
+        req,
+        res,
+      );
+    }
+    const candidateChangePreviewMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/sessions\/([^/]+)\/candidate-changes\/preview$/);
+    if (req.method === "POST" && candidateChangePreviewMatch) {
+      return await handleCandidateChangePreview(
+        decodeURIComponent(candidateChangePreviewMatch[1]),
+        decodeURIComponent(candidateChangePreviewMatch[2]),
+        req,
+        res,
+      );
+    }
+    const candidateChangeListMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/sessions\/([^/]+)\/candidate-changes$/);
+    if (req.method === "GET" && candidateChangeListMatch) {
+      return await handleCandidateChangeList(
+        decodeURIComponent(candidateChangeListMatch[1]),
+        decodeURIComponent(candidateChangeListMatch[2]),
+        req,
+        res,
+      );
+    }
+    const candidateChangeRosterMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/sessions\/([^/]+)\/candidate-roster$/);
+    if (req.method === "GET" && candidateChangeRosterMatch) {
+      return await handleCandidateChangeRoster(
+        decodeURIComponent(candidateChangeRosterMatch[1]),
+        decodeURIComponent(candidateChangeRosterMatch[2]),
         req,
         res,
       );
@@ -6529,6 +10279,10 @@ async function requestHandler(req, res) {
     if (req.method === "GET" && monitorAccountsMatch) {
       return await handleSessionMonitorAccounts(decodeURIComponent(monitorAccountsMatch[1]), req, res);
     }
+    const notStartedCandidatesMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/not-started-candidates\/download$/);
+    if (req.method === "GET" && notStartedCandidatesMatch) {
+      return await handleNotStartedCandidateDownload(decodeURIComponent(notStartedCandidatesMatch[1]), req, res);
+    }
     const roomsAutoMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/rooms\/auto$/);
     if (req.method === "POST" && roomsAutoMatch) {
       return await handleRoomsAuto(decodeURIComponent(roomsAutoMatch[1]), req, res);
@@ -6559,6 +10313,17 @@ await loadEnvFile();
 await ensureRuntime();
 const auth = buildAuthContext({ localConfig: { ...state.auth, users: state.authUsers } });
 restoreSessions(auth, state.authSessions);
+const resolveProjectWechatBinding = createProjectWechatBindingResolver({
+  getTask: (taskId) => runTaskState("get", { taskId }),
+  canAccessTask: (task, req) => visibleByOwner(auth, req, task),
+  getRequirement: (requestId) => runRequirementState("get", { requestId }),
+  upsertRequirement: (payload) => runRequirementState("upsert", payload),
+  updateTask: (taskId, config) => runTaskState("update_config", { taskId, config }),
+});
+const handleWechatCollector = createWechatCollectorHandler({
+  runtimeDir,
+  resolveProjectBinding: resolveProjectWechatBinding,
+});
 
 const port = Number(process.env.PORT || 8765);
 const host = process.env.HOST || "127.0.0.1";
@@ -6571,8 +10336,17 @@ if (process.env.PAPER_BIND_SCHEDULER_DISABLED !== "1") {
   scheduleNextPaperBindingCheck();
 }
 
+if (process.env.SCORE_PROCESS_SCHEDULER_DISABLED !== "1") {
+  scheduleScoreProcessingChecks();
+}
+
 export {
+  formalScoreProcessEndTime,
   parseTaskStartTime,
+  runScheduledPaperBindRemindersOnce,
+  runScheduledProjectSharedSheetRemindersOnce,
+  runScheduledScoreProcessingOnce,
   runScheduledPaperBindingOnce,
+  shouldAttemptScheduledScoreProcess,
   shouldAttemptScheduledPaperBind,
 };

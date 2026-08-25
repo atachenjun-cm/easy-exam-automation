@@ -67,6 +67,7 @@ class TaskStoreTest(unittest.TestCase):
         task = self.store.create_task("项目卡测试", "account-a", {
             "customerName": "四川省公路设计院",
             "projectCode": "F-UI-8877",
+            "examRequirements": [{"fields": {"考试名称": "项目卡考试名"}}],
             "projectCard": {
                 "createdAt": "2026-07-18T02:00:00.000Z",
                 "updatedAt": "2026-07-18T02:00:00.000Z",
@@ -82,6 +83,7 @@ class TaskStoreTest(unittest.TestCase):
 
         self.assertEqual(summary["customerName"], "四川省公路设计院")
         self.assertEqual(summary["projectCode"], "F-UI-8877")
+        self.assertEqual(summary["examName"], "项目卡考试名")
         self.assertEqual(summary["projectCard"]["sourceKey"], "R-UI-8877")
         self.assertNotIn("config", summary)
         self.assertNotIn("仅详情可见", json.dumps(summary, ensure_ascii=False))
@@ -125,6 +127,68 @@ class TaskStoreTest(unittest.TestCase):
 
         self.assertEqual(updated["sourceAccount"], "account-new")
         self.assertEqual(updated["config"]["apiKeyProfileId"], "profile-new")
+
+    def test_sync_session_updates_only_current_session_fields_and_sync_config(self):
+        task = self.store.create_task("同步场次项目", "account-a", {
+            "examRequirements": [{"fields": {"考试名称": "原始需求名称"}}],
+        })
+        self.store.upsert_session(task["taskId"], "formal", {
+            "session_id": "434324",
+            "name": "平台旧名称",
+            "start": "2026-08-10 19:00",
+            "end": "2026-08-10 20:30",
+            "candidate_count": 136,
+            "room_count": 4,
+            "status": "success",
+            "url": "https://eztest.cn/session/434324",
+        })
+
+        updated = self.store.sync_session(
+            task["taskId"],
+            "formal",
+            {
+                "session_id": "434324",
+                "name": "易考当前名称",
+                "start": "2026-08-10 19:30",
+                "end": "2026-08-10 21:00",
+            },
+            {
+                "sessionSync": {
+                    "version": 1,
+                    "snapshots": {"434324": {"current": {"early": 15}}},
+                },
+            },
+        )
+
+        session = updated["sessions"][0]
+        self.assertEqual(session["name"], "易考当前名称")
+        self.assertEqual(session["start"], "2026-08-10 19:30")
+        self.assertEqual(session["end"], "2026-08-10 21:00")
+        self.assertEqual(session["candidateCount"], 136)
+        self.assertEqual(session["roomCount"], 4)
+        self.assertEqual(session["status"], "success")
+        self.assertEqual(session["url"], "https://eztest.cn/session/434324")
+        self.assertEqual(updated["config"]["examRequirements"][0]["fields"]["考试名称"], "原始需求名称")
+        self.assertEqual(updated["config"]["sessionSync"]["snapshots"]["434324"]["current"]["early"], 15)
+
+    def test_sync_session_rejects_a_mismatched_session_id_without_changes(self):
+        task = self.store.create_task("同步保护项目", "account-a", {"marker": "keep"})
+        self.store.upsert_session(task["taskId"], "formal", {
+            "session_id": "434324",
+            "name": "平台旧名称",
+        })
+
+        with self.assertRaisesRegex(ValueError, "Session not found"):
+            self.store.sync_session(
+                task["taskId"],
+                "formal",
+                {"session_id": "999999", "name": "不应写入"},
+                {"sessionSync": {"version": 1}},
+            )
+
+        unchanged = self.store.get_task(task["taskId"])
+        self.assertEqual(unchanged["sessions"][0]["name"], "平台旧名称")
+        self.assertEqual(unchanged["config"], {"marker": "keep"})
 
     def test_steps_are_independent_and_persist_timestamps(self):
         task = self.store.create_task("项目甲", "account-a", {})
@@ -202,6 +266,49 @@ class TaskStoreTest(unittest.TestCase):
         self.assertEqual(step["stepName"], "试考试卷绑定")
         self.assertLess(step_keys.index("trial_session_create"), step_keys.index("trial_paper_bind"))
         self.assertLess(step_keys.index("trial_paper_bind"), step_keys.index("course_create"))
+
+    def test_session_change_step_is_backfilled_and_does_not_affect_progress(self):
+        task = self.store.create_task("旧项目", "account-a", {})
+        task_id = task["taskId"]
+        initial_progress = task["progress"]
+        with self.store.connect() as db:
+            db.execute("DELETE FROM exam_task_steps WHERE task_id=? AND step_key=?", (task_id, "session_change"))
+
+        detail = self.store.get_task(task_id)
+        step_keys = [step["stepKey"] for step in detail["steps"]]
+        session_change = next(step for step in detail["steps"] if step["stepKey"] == "session_change")
+
+        self.assertEqual(session_change["stepName"], "场次信息修改")
+        self.assertLess(step_keys.index("trial_session_create"), step_keys.index("session_change"))
+        self.assertLess(step_keys.index("session_change"), step_keys.index("trial_paper_bind"))
+
+        updated = self.store.update_step(task_id, "session_change", "success", {
+            "message": "修改正式考试场次 432821：考试时间",
+            "result": {"sessionId": "432821", "changedFields": ["start", "end"]},
+        })
+        changed_step = next(step for step in updated["steps"] if step["stepKey"] == "session_change")
+
+        self.assertEqual(changed_step["status"], "success")
+        self.assertEqual(changed_step["logs"][-1]["message"], "修改正式考试场次 432821：考试时间")
+        self.assertEqual(updated["progress"], initial_progress)
+
+    def test_course_change_is_aggregated_into_session_change_step(self):
+        task = self.store.create_task("旧项目", "account-a", {})
+        task_id = task["taskId"]
+        initial_progress = task["progress"]
+        detail = self.store.get_task(task_id)
+        step_keys = [step["stepKey"] for step in detail["steps"]]
+        self.assertNotIn("course_change", step_keys)
+
+        updated = self.store.update_step(task_id, "session_change", "success", {
+            "message": "修改正式考试场次 432821：科目信息",
+            "result": {"courses": [{"code": "C001", "name": "新科目"}]},
+        })
+        changed_step = next(step for step in updated["steps"] if step["stepKey"] == "session_change")
+
+        self.assertEqual(changed_step["status"], "success")
+        self.assertEqual(changed_step["logs"][-1]["message"], "修改正式考试场次 432821：科目信息")
+        self.assertEqual(updated["progress"], initial_progress)
 
     def test_get_task_backfills_score_process_step_for_existing_tasks(self):
         task = self.store.create_task("旧项目", "account-a", {})

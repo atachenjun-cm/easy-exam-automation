@@ -69,25 +69,13 @@ def parse_subjects_text(value):
     return split_subject_names(value)
 
 
-def split_form_codes(value):
-    text = normalize_text(value)
-    if not text:
-        return []
-    parts = re.split(r"[\n,，;；\s]+", text)
-    return [part.strip() for part in parts if part and part.strip()]
-
-
 def normalize_course_record(name="", code="", form_codes="", paper_name=""):
-    course_name = normalize_text(name)
-    course_code = normalize_text(code)
-    forms = split_form_codes(form_codes)
+    course_name = normalize_text(name) or normalize_text(code)
     paper = normalize_text(paper_name)
-    if not course_name and not course_code:
+    if not course_name:
         return None
     record = {
         "name": course_name,
-        "code": course_code,
-        "form_codes": forms,
     }
     if paper:
         record["paper_name"] = paper
@@ -108,7 +96,7 @@ def parse_course_records_text(value):
                 parts[2] if len(parts) > 2 else "",
                 parts[3] if len(parts) > 3 else "",
             )
-            if record and record["name"] and record["code"]:
+            if record and record["name"]:
                 records.append(record)
     return records
 
@@ -301,26 +289,9 @@ def read_course_records(sheet):
                     records.append(record)
             continue
         record = normalize_course_record(name, code, form_codes, paper_name)
-        if record and (record["name"] or record["code"]):
+        if record and record["name"]:
             records.append(record)
     return records
-
-
-def build_generated_courses(subjects, start_dt):
-    if not subjects or not start_dt:
-        return []
-    prefix = start_dt.strftime("%Y%m%d")
-    courses = []
-    for index, subject in enumerate(subjects, start=1):
-        course_code = f"{prefix}-01-{index:02d}"
-        courses.append(
-            {
-                "name": subject,
-                "code": course_code,
-                "form_codes": [course_code],
-            }
-        )
-    return courses
 
 
 def build_preview(config):
@@ -416,18 +387,18 @@ def parse_workbook(path_str):
     start_dt, end_dt = parse_time_range(get_field("考试日期时间", "考试时间", "考试起止时间"))
     mock_start_dt, mock_end_dt = parse_time_range(get_field("试考日期时间", "试考时间", "试考起止时间"))
     courses = parse_course_records_text(get_field("科目信息", "科目"))
-    subjects = [course["name"] or course["code"] for course in courses]
+    subjects = [course["name"] for course in courses]
     if not subjects:
         subjects = parse_subjects_text(get_field("科目信息", "科目"))
     if subjects_sheet:
         sheet_courses = read_course_records(subjects_sheet)
         if sheet_courses:
             courses = sheet_courses
-            subjects = [course["name"] or course["code"] for course in courses]
+            subjects = [course["name"] for course in courses]
         elif not subjects:
             subjects = read_subjects(subjects_sheet)
-    if subjects and not [course for course in courses if course.get("code")]:
-        courses = build_generated_courses(subjects, start_dt)
+    if not courses:
+        courses = [{"name": subject} for subject in subjects]
     subject_import_dir = path.parent / "exam_request"
     subject_import_path = build_subject_workbook(subjects, subject_import_dir) if subjects else ""
 
@@ -491,9 +462,6 @@ def parse_workbook(path_str):
         warnings.append("试考日期时间无法解析，试考自动创建会跳过。")
     if not subjects:
         warnings.append("未读取到科目信息，批量导入科目步骤会跳过。")
-    if subjects and not courses:
-        warnings.append("科目信息缺少考试日期，无法按规则生成 code/form_codes。")
-
     return {
         "filename": path.name,
         "metrics": {

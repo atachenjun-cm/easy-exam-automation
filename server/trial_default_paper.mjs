@@ -3,11 +3,6 @@ const DEFAULT_TRIAL_COURSE_NAME = "试考";
 const DEFAULT_TRIAL_PAPER_NAME = "试考通用卷（客观+填空+简答）1个单元 - 20241106";
 const DEFAULT_TRIAL_BINDING_MESSAGE = "试考试卷绑定参数不合法，请检查 session_id / course_code / form_codes";
 
-function compactBody(value) {
-  if (value === undefined || value === null || value === "") return "";
-  return typeof value === "string" ? value.slice(0, 1000) : JSON.stringify(value).slice(0, 1000);
-}
-
 function normalizeFormCodes(value) {
   if (Array.isArray(value)) {
     return value
@@ -178,9 +173,7 @@ function extractDefaultTrialCourse(payload) {
 
 async function fetchDefaultTrialCourse({ login, apiBase, requestJson, emitLog }) {
   const path = `/tenant/api/courses/${encodeURIComponent(DEFAULT_TRIAL_COURSE_CODE)}/?apply=form`;
-  emitLog(`[试考默认卷] GET ${path}`);
   const detail = await requestJson(login, `${apiBase}${path}`, { method: "GET" }, `查询默认试考科目 ${DEFAULT_TRIAL_COURSE_CODE}`);
-  emitLog(`[试考默认卷] 科目详情 responseBody = ${compactBody(detail)}`);
   return extractDefaultTrialCourse(detail);
 }
 
@@ -191,8 +184,6 @@ async function createDefaultTrialCourse({ login, apiBase, requestJson, emitLog }
     code: DEFAULT_TRIAL_COURSE_CODE,
     form_codes: [],
   };
-  emitLog(`[试考默认卷] POST ${path}`);
-  emitLog(`[试考默认卷] payload = ${JSON.stringify(payload)}`);
   const result = await requestJson(
     login,
     `${apiBase}${path}`,
@@ -203,7 +194,7 @@ async function createDefaultTrialCourse({ login, apiBase, requestJson, emitLog }
     },
     `创建默认试考科目 ${DEFAULT_TRIAL_COURSE_CODE}`,
   );
-  emitLog(`[试考默认卷] 默认试考科目创建成功：${DEFAULT_TRIAL_COURSE_NAME}/${DEFAULT_TRIAL_COURSE_CODE}`);
+  emitLog(`[试考默认卷] 已创建默认试考科目“${DEFAULT_TRIAL_COURSE_NAME}”`);
   return {
     name: String(result?.name || DEFAULT_TRIAL_COURSE_NAME).trim(),
     code: String(result?.code || result?.course_code || DEFAULT_TRIAL_COURSE_CODE).trim(),
@@ -218,7 +209,7 @@ async function ensureDefaultTrialCourse({
 }) {
   try {
     const course = await fetchDefaultTrialCourse({ login, apiBase, requestJson, emitLog });
-    emitLog(`[试考默认卷] 已找到默认试考科目：${course.name}/${course.code}`);
+    emitLog(`[试考默认卷] 已确认默认试考科目“${course.name}”`);
     return course;
   } catch (error) {
     if (error?.status !== 404) throw error;
@@ -235,17 +226,15 @@ async function fetchDefaultTrialPaperByName({
 }) {
   const searchPath = `/tenant/api/form/list/?form_type=form&name=${encodeURIComponent(DEFAULT_TRIAL_PAPER_NAME)}&order_by=-id`;
   const fallbackPath = "/tenant/api/form/list/?form_type=form&order_by=-id";
-  emitLog(`[试考默认卷] 按名称查询固定试考试卷：${DEFAULT_TRIAL_PAPER_NAME}`);
+  emitLog(`[试考默认卷] 正在查找固定试考试卷“${DEFAULT_TRIAL_PAPER_NAME}”`);
   const expectedName = normalizePaperName(DEFAULT_TRIAL_PAPER_NAME);
 
   for (const path of [searchPath, fallbackPath]) {
-    emitLog(`[试考默认卷] GET ${path}`);
     const payload = await requestJson(login, `${apiBase}${path}`, { method: "GET" }, "查询固定试考试卷");
-    emitLog(`[试考默认卷] 试卷列表 responseBody = ${compactBody(payload)}`);
     const papers = normalizeFormList(payload);
     const paper = papers.find((candidate) => normalizePaperName(candidate.name) === expectedName);
     if (paper) {
-      emitLog(`[试考默认卷] 已找到固定试考试卷：${paper.name}/${paper.code}`);
+      emitLog(`[试考默认卷] 已找到固定试考试卷“${paper.name}”`);
       return paper;
     }
   }
@@ -288,8 +277,6 @@ async function postDefaultTrialCourseBinding({ login, apiBase, binding, requestJ
     payload.form_codes = binding.formCodes;
   }
 
-  emitLog(`[试考默认卷] POST ${path}`);
-  emitLog(`[试考默认卷] payload = ${JSON.stringify(payload)}`);
   try {
     const responseBody = await requestJson(
       login,
@@ -302,14 +289,11 @@ async function postDefaultTrialCourseBinding({ login, apiBase, binding, requestJ
       },
       `绑定默认试考科目到试考场次 ${binding.sessionId}`,
     );
-    const httpStatus = responseBody?.__tenantResponse ? responseBody.httpStatus : 200;
     const body = responseBody?.__tenantResponse ? responseBody.body : responseBody;
-    emitLog(`[试考默认卷] httpStatus = ${httpStatus}`);
-    emitLog(`[试考默认卷] responseBody = ${compactBody(body)}`);
+    emitLog("[试考默认卷] 已将试考科目绑定到试考场次", "success");
     return { ...payload, responseBody: body };
   } catch (error) {
-    emitLog(`[试考默认卷] httpStatus = ${error?.status || "未知"}`, "warning");
-    emitLog(`[试考默认卷] responseBody = ${compactBody(error?.detail)}`, "warning");
+    emitLog(`[试考默认卷] 试考科目绑定失败（HTTP ${error?.status || "未知"}）`, "warning");
     if (error?.status === 400) {
       const bindingError = new Error(DEFAULT_TRIAL_BINDING_MESSAGE);
       bindingError.status = error.status;
@@ -327,8 +311,6 @@ async function putDefaultTrialCoursePaper({ login, apiBase, course, binding, req
     name: course.name || DEFAULT_TRIAL_COURSE_NAME,
     form_codes: binding.formCodes,
   };
-  emitLog(`[试考默认卷] PUT ${path}`);
-  emitLog(`[试考默认卷] payload = ${JSON.stringify(payload)}`);
   const responseBody = await requestJson(
     login,
     `${apiBase}${path}`,
@@ -340,20 +322,16 @@ async function putDefaultTrialCoursePaper({ login, apiBase, course, binding, req
     },
     `更新默认试考科目试卷 ${binding.courseCode}`,
   );
-  const httpStatus = responseBody?.__tenantResponse ? responseBody.httpStatus : 200;
   const body = responseBody?.__tenantResponse ? responseBody.body : responseBody;
-  emitLog(`[试考默认卷] 科目绑定试卷 httpStatus = ${httpStatus}`);
-  emitLog(`[试考默认卷] 科目绑定试卷 responseBody = ${compactBody(body)}`);
+  emitLog("[试考默认卷] 已将固定试考试卷关联到试考科目");
   return { ...payload, responseBody: body };
 }
 
 async function verifyDefaultTrialPaperBinding({ login, apiBase, binding, paper, requestJson, emitLog }) {
   const expectedCodes = binding.formCodes || [];
   const formsPath = `/tenant/api/session/${encodeURIComponent(binding.sessionId)}/forms/`;
-  emitLog(`[试考默认卷] 回查 GET ${formsPath}`);
   try {
     const formsPayload = await requestJson(login, `${apiBase}${formsPath}`, { method: "GET" }, `回查试考场次试卷 ${binding.sessionId}`);
-    emitLog(`[试考默认卷] 回查 forms responseBody = ${compactBody(formsPayload)}`);
     const papers = normalizeFormList(formsPayload);
     const matchedPaper = papers.find((candidate) => {
       const courseCode = String(candidate.courseCode || "").trim();
@@ -374,13 +352,11 @@ async function verifyDefaultTrialPaperBinding({ login, apiBase, binding, paper, 
       };
     }
   } catch (error) {
-    emitLog(`[试考默认卷] forms 回查失败：${error instanceof Error ? error.message : String(error)}`, "warning");
+    emitLog("[试考默认卷] 场次试卷列表回查失败，继续检查场次详情", "warning");
   }
 
   const detailPath = `/tenant/api/session/${encodeURIComponent(binding.sessionId)}/`;
-  emitLog(`[试考默认卷] 回查 GET ${detailPath}`);
   const detailPayload = await requestJson(login, `${apiBase}${detailPath}`, { method: "GET" }, `回查试考场次详情 ${binding.sessionId}`);
-  emitLog(`[试考默认卷] 回查 session responseBody = ${compactBody(detailPayload)}`);
   const courses = extractSessionCourses(detailPayload, binding.sessionId);
   const matchedCourse = courses.find((candidate) => candidate.code === binding.courseCode || (!candidate.code && candidate.name === DEFAULT_TRIAL_COURSE_NAME));
   const matchedPaper = (matchedCourse?.papers || []).find((candidate) => trialPaperMatches(candidate, expectedCodes));
@@ -410,7 +386,7 @@ async function bindDefaultTrialPaperToSession({
   requestJson,
   emitLog = () => {},
 }) {
-  emitLog(`[试考默认卷] 开始绑定默认试考卷，session_id=${sessionId || ""}`);
+  emitLog("[试考默认卷] 开始绑定默认试考卷");
   const course = await ensureDefaultTrialCourse({ login, apiBase, requestJson, emitLog });
   const paper = await fetchDefaultTrialPaperByName({ login, apiBase, requestJson, emitLog });
   const binding = validateDefaultTrialBinding({

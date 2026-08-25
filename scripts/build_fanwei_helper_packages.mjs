@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { buildFanweiHelperPackageManifest } from "../server/fanwei_local_helper_version.mjs";
+
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const supportedPlatforms = new Set(["win-x64", "darwin-x64", "darwin-arm64"]);
 
@@ -71,10 +73,27 @@ function writePackage({ platform, runtimePath, origin, packageDir }) {
   for (const moduleName of [
     "fanwei_local_helper_cli.mjs",
     "fanwei_local_helper.mjs",
+    "fanwei_local_helper_update.mjs",
+    "fanwei_local_helper_version.mjs",
     "fanwei_auto_read.mjs",
     "score_stamp_application.mjs",
+    "operation_batch_runner.mjs",
+    "operation_batch_update_runner.mjs",
+    "operation_personnel_console_runner.mjs",
+    "operation_archive_runner.mjs",
+    "operation_content.mjs",
+    "operation_content_runner.mjs",
   ]) {
-    copyFile(path.join(rootDir, "server", moduleName), path.join(packageDir, "server", moduleName));
+    const source = path.join(rootDir, "server", moduleName);
+    if (fs.existsSync(source)) copyFile(source, path.join(packageDir, "server", moduleName));
+  }
+
+  for (const moduleName of ["playwright", "playwright-core"]) {
+    const source = path.join(rootDir, "node_modules", moduleName);
+    if (!fs.existsSync(source)) {
+      throw new Error(`缺少本机助手运控依赖：${moduleName}`);
+    }
+    fs.cpSync(source, path.join(packageDir, "node_modules", moduleName), { recursive: true });
   }
 
   if (platform === "win-x64") {
@@ -95,6 +114,11 @@ function writePackage({ platform, runtimePath, origin, packageDir }) {
     `YIKAO_CONSOLE_ORIGINS=${origin}`,
     "",
   ].join("\n"), { mode: 0o600 });
+  fs.writeFileSync(
+    path.join(packageDir, "helper-package.json"),
+    `${JSON.stringify(buildFanweiHelperPackageManifest(platform), null, 2)}\n`,
+    { mode: 0o600 },
+  );
 }
 
 function main() {

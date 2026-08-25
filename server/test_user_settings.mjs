@@ -18,6 +18,7 @@ const legacySettings = {
   login: {
     url: "https://eztest.org/manager/accounts/login",
     username: "legacy-admin",
+    tenantId: "legacy-tenant",
     password: "legacy-pass",
     tenantApiKey: "legacy-key",
   },
@@ -54,6 +55,7 @@ test("coworkers do not see legacy global EasyExam login settings", () => {
   assert.deepEqual(currentUserLogin({ user: coworker, userSettings, legacySettings }), {
     url: "https://eztest.org/manager/accounts/login",
     username: "",
+    tenantId: "",
     password: "",
     tenantApiKey: "",
   });
@@ -155,15 +157,16 @@ test("task login resolves a previously configured API key by profile id", () => 
 test("setting a profile current switches its complete login credentials", () => {
   const userSettings = defaultUserSettings();
   const alice = { email: "alice@example.com", role: "user" };
-  saveUserLogin(userSettings, alice, { username: "old-account", password: "old-pass", tenantApiKey: "old-key" });
+  saveUserLogin(userSettings, alice, { username: "old-account", tenantId: "tenant-old", password: "old-pass", tenantApiKey: "old-key" });
   const oldProfileId = userSettings.users[userSettingsKey(alice)].apiKeyProfiles[0].id;
-  saveUserLogin(userSettings, alice, { username: "new-account", password: "new-pass", tenantApiKey: "new-key" });
+  saveUserLogin(userSettings, alice, { username: "new-account", tenantId: "tenant-new", password: "new-pass", tenantApiKey: "new-key" });
 
   updateApiKeyProfileForUser(userSettings, alice, oldProfileId, { current: true });
 
   assert.deepEqual(currentUserLogin({ user: alice, userSettings }), {
     url: "https://eztest.org/manager/accounts/login",
     username: "old-account",
+    tenantId: "tenant-old",
     password: "old-pass",
     tenantApiKey: "old-key",
   });
@@ -248,6 +251,7 @@ test("account edit credentials return secrets only from the current user's profi
   const bob = { email: "bob@example.com", role: "user" };
   saveUserLogin(userSettings, alice, {
     username: "alice-yikao",
+    tenantId: "tenant-alice",
     password: "alice-pass",
     tenantApiKey: "alice-key",
   });
@@ -265,6 +269,7 @@ test("account edit credentials return secrets only from the current user's profi
     profileId: aliceProfileId,
   }), {
     username: "alice-yikao",
+    tenantId: "tenant-alice",
     password: "alice-pass",
     tenantApiKey: "alice-key",
   });

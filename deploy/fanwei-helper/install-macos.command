@@ -19,6 +19,10 @@ launchctl bootout "gui/$UID/$LABEL" >/dev/null 2>&1 || true
 cp -R "$SOURCE_DIR/server" "$INSTALL_DIR/"
 cp "$SOURCE_DIR/node" "$INSTALL_DIR/node"
 cp "$SOURCE_DIR/com.ata.yikao-fanwei-helper.plist.template" "$INSTALL_DIR/"
+mkdir -p "$INSTALL_DIR/node_modules"
+rm -rf "$INSTALL_DIR/node_modules/playwright" "$INSTALL_DIR/node_modules/playwright-core"
+cp -R "$SOURCE_DIR/node_modules/playwright" "$INSTALL_DIR/node_modules/"
+cp -R "$SOURCE_DIR/node_modules/playwright-core" "$INSTALL_DIR/node_modules/"
 chmod 700 "$INSTALL_DIR/node"
 
 if [ -f "$CONFIG_SOURCE" ]; then

@@ -109,7 +109,12 @@ test("binds the fixed default trial paper to SKTY and the trial session when the
   });
   assert.equal(calls[4].url, "https://eztest.cn/tenant/api/session/429044/forms/");
   assert.deepEqual(result.results[0].paper_names, [DEFAULT_TRIAL_PAPER_NAME]);
+  assert.ok(logs.includes("[试考默认卷] 已确认默认试考科目“试考”"));
+  assert.ok(logs.includes(`[试考默认卷] 已找到固定试考试卷“${DEFAULT_TRIAL_PAPER_NAME}”`));
+  assert.ok(logs.includes("[试考默认卷] 已将固定试考试卷关联到试考科目"));
+  assert.ok(logs.includes("[试考默认卷] 已将试考科目绑定到试考场次"));
   assert.ok(logs.includes("[试考默认卷] 试考试卷绑定完成"));
+  assert.equal(logs.some((message) => /responseBody|requestBody|payload|httpStatus|session_id|\b(GET|POST|PUT)\s+\//.test(message)), false);
 });
 
 test("does not mark trial paper binding successful when tenant readback has no paper", async () => {

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import copy
 import json
+import math
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -67,6 +68,31 @@ def score_value(value):
         return int(numeric) if numeric.is_integer() else numeric
     except ValueError:
         return raw
+
+
+def score_sort_key(row):
+    if normalized_status(row.get("exam_status")) == "缺考":
+        return (1, 0, 0)
+
+    score = score_value(row.get("score"))
+    if isinstance(score, (int, float)) and math.isfinite(score):
+        return (0, 0, -float(score))
+    return (0, 1, 0)
+
+
+def sorted_score_rows(rows, default_course):
+    course_indexes = {}
+    for row in rows:
+        course = text(row.get("course") or default_course).strip()
+        if course not in course_indexes:
+            course_indexes[course] = len(course_indexes)
+    return sorted(
+        rows,
+        key=lambda row: (
+            course_indexes[text(row.get("course") or default_course).strip()],
+            *score_sort_key(row),
+        ),
+    )
 
 
 def find_footer_row(sheet):
@@ -406,13 +432,14 @@ def export_score_feedback(template_path, payload_path, output_path):
         return {"ok": False, "errors": [f"成绩单模板不存在：{template_path}"]}
 
     payload = json.loads(payload_path.read_text("utf-8"))
+    exam_name = text(payload.get("examName") or "")
     rows = payload.get("rows") or []
     report_names = report_columns(rows)
+    rows = sorted_score_rows(rows, exam_name)
     content_column_count = BASE_COLUMN_COUNT + len(report_names)
     workbook = load_workbook(template_path)
     sheet = workbook.active
 
-    exam_name = text(payload.get("examName") or "")
     exam_time = text(payload.get("examTime") or "")
     today = date.today()
     processed_date = text(payload.get("processedDate") or f"{today.year}年{today.month}月{today.day}日")

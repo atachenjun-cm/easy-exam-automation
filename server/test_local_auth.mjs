@@ -15,6 +15,7 @@ import {
   restoreSessions,
   serializeSessions,
   SESSION_MAX_AGE_SECONDS,
+  shouldAllowInternalWechatCollectorRequest,
   shouldAllowWithoutAuth,
   sanitizeUsers,
   updateLocalUser,
@@ -146,6 +147,9 @@ test("admins can view all task owners while users only view their own tasks", ()
 
 test("allows login health and frontend module routes without auth", () => {
   assert.equal(shouldAllowWithoutAuth("GET", "/login"), true);
+  assert.equal(shouldAllowWithoutAuth("GET", "/assistant"), true);
+  assert.equal(shouldAllowWithoutAuth("GET", "/assistant/"), true);
+  assert.equal(shouldAllowWithoutAuth("POST", "/api/public/assistant/chat"), true);
   assert.equal(shouldAllowWithoutAuth("POST", "/api/auth/login"), true);
   assert.equal(shouldAllowWithoutAuth("GET", "/api/health"), true);
   assert.equal(shouldAllowWithoutAuth("GET", "/web/router.mjs"), true);
@@ -154,4 +158,15 @@ test("allows login health and frontend module routes without auth", () => {
 test("protects business API routes when auth is enabled", () => {
   assert.equal(shouldAllowWithoutAuth("GET", "/api/tasks"), false);
   assert.equal(shouldAllowWithoutAuth("POST", "/api/jobs"), false);
+  assert.equal(shouldAllowWithoutAuth("GET", "/api/public/assistant/chat"), false);
+});
+
+test("allows only the local WeChat collector requirement routes without a user session", () => {
+  for (const address of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) {
+    assert.equal(shouldAllowInternalWechatCollectorRequest("GET", "/api/requirements", address), true);
+    assert.equal(shouldAllowInternalWechatCollectorRequest("POST", "/api/ai/requirements/dispatch", address), true);
+  }
+  assert.equal(shouldAllowInternalWechatCollectorRequest("POST", "/api/requirements", "127.0.0.1"), false);
+  assert.equal(shouldAllowInternalWechatCollectorRequest("GET", "/api/tasks", "127.0.0.1"), false);
+  assert.equal(shouldAllowInternalWechatCollectorRequest("POST", "/api/ai/requirements/dispatch", "192.168.1.10"), false);
 });

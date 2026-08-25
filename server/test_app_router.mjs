@@ -9,6 +9,7 @@ const routeCases = [
   ["/projects/project-123", "project-detail", { projectId: "project-123" }],
   ["/fanwei-test", "fanwei-test", {}],
   ["/login", "login", {}],
+  ["/assistant", "assistant", {}],
   ["/auto-config", "auto-config", {}],
   ["/exams", "exams", {}],
   ["/exams/exam-456", "exam-detail", { examId: "exam-456" }],

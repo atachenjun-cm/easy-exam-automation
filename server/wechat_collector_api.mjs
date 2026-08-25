@@ -1060,19 +1060,20 @@ function buildGroupStatusSummary({ config, status, state, history = [] }) {
 }
 
 export function createWechatCollectorHandler(options = {}) {
-  const configPath = options.configPath || path.join(runtimeDir, "wechat-requirement-groups.json");
-  const configBackupDir = options.configBackupDir || path.join(runtimeDir, "wechat-config-backups");
-  const statusPath = options.statusPath || path.join(runtimeDir, "wechat-last-run.json");
-  const preflightStatusPath = options.preflightStatusPath || path.join(runtimeDir, "wechat-preflight-run.json");
-  const pipelineSmokeStatusPath = options.pipelineSmokeStatusPath || path.join(runtimeDir, "wechat-pipeline-smoke.json");
-  const attachmentScanStatusPath = options.attachmentScanStatusPath || path.join(runtimeDir, "wechat-attachment-scan.json");
+  const configuredRuntimeDir = options.runtimeDir || runtimeDir;
+  const configPath = options.configPath || path.join(configuredRuntimeDir, "wechat-requirement-groups.json");
+  const configBackupDir = options.configBackupDir || path.join(configuredRuntimeDir, "wechat-config-backups");
+  const statusPath = options.statusPath || path.join(configuredRuntimeDir, "wechat-last-run.json");
+  const preflightStatusPath = options.preflightStatusPath || path.join(configuredRuntimeDir, "wechat-preflight-run.json");
+  const pipelineSmokeStatusPath = options.pipelineSmokeStatusPath || path.join(configuredRuntimeDir, "wechat-pipeline-smoke.json");
+  const attachmentScanStatusPath = options.attachmentScanStatusPath || path.join(configuredRuntimeDir, "wechat-attachment-scan.json");
   const pendingConfirmationPath = options.pendingConfirmationPath || path.join(path.dirname(statusPath), "wechat-pending-confirmation.json");
   const historyPath = options.historyPath || path.join(path.dirname(statusPath), "wechat-run-history.jsonl");
   const historyLimit = Number(options.historyLimit || 20);
   const realPushHistoryLimit = Number(options.realPushHistoryLimit || 500);
-  const statePath = options.statePath || path.join(runtimeDir, "wechat-checkpoints.json");
+  const statePath = options.statePath || path.join(configuredRuntimeDir, "wechat-checkpoints.json");
   const apiBase = options.apiBase || "http://127.0.0.1:8765";
-  const lockPath = options.lockPath || path.join(runtimeDir, "wechat-visible-collect.lock");
+  const lockPath = options.lockPath || path.join(configuredRuntimeDir, "wechat-visible-collect.lock");
   const lockMaxAgeMs = Number(options.lockMaxAgeMs || 30 * 60 * 1000);
   const logPaths = options.logPaths || {};
   const logMaxChars = Number(options.logMaxChars || 4000);
@@ -1090,6 +1091,8 @@ export function createWechatCollectorHandler(options = {}) {
   const uninstallService = options.uninstallService || uninstallEasyExamServiceLaunchd;
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const groupActivityStatus = options.groupActivityStatus || defaultGroupActivityStatus;
+  const resolveProjectBinding = options.resolveProjectBinding;
+  let projectConfigMutationTail = Promise.resolve();
   const requirementCenterStatus = options.requirementCenterStatus || (() => defaultRequirementCenterStatus({
     apiBase,
     fetchImpl,
@@ -1242,23 +1245,43 @@ export function createWechatCollectorHandler(options = {}) {
 
     const projectWechatGroupsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/wechat-groups$/);
     if (req.method === "PUT" && projectWechatGroupsMatch) {
-      const payload = parseJsonSafe(await readBody(req)) || {};
-      const previousConfig = normalizeConfig(await readJsonFile(configPath, { groups: [] }));
-      const { config, impact } = mergeProjectScopedGroups(
-        previousConfig,
-        payload,
-        decodeURIComponent(projectWechatGroupsMatch[1]),
-      );
-      const validation = validateConfig(config);
-      if (!validation.ok) {
-        json(res, 400, { error: validation.error });
-        return true;
+      let payload = parseJsonSafe(await readBody(req)) || {};
+      let projectBindingCommit = null;
+      if (resolveProjectBinding) {
+        const resolved = await resolveProjectBinding({
+          taskId: decodeURIComponent(projectWechatGroupsMatch[1]),
+          payload,
+          req,
+        });
+        if (!resolved?.ok) {
+          json(res, Number(resolved?.status || 400), { error: resolved?.error || "无法保存本项目微信群绑定" });
+          return true;
+        }
+        payload = resolved.payload || payload;
+        projectBindingCommit = resolved.commit;
       }
-      await fs.mkdir(path.dirname(configPath), { recursive: true });
-      const backupPath = await backupExistingJsonFile(configPath, configBackupDir, now);
-      await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-      json(res, 200, { ok: true, config: redactConfig(config), path: configPath, backupPath, impact });
-      return true;
+      const mutateProjectConfig = async () => {
+        const previousConfig = normalizeConfig(await readJsonFile(configPath, { groups: [] }));
+        const { config, impact } = mergeProjectScopedGroups(
+          previousConfig,
+          payload,
+          decodeURIComponent(projectWechatGroupsMatch[1]),
+        );
+        const validation = validateConfig(config);
+        if (!validation.ok) {
+          json(res, 400, { error: validation.error });
+          return true;
+        }
+        const projectBinding = projectBindingCommit ? await projectBindingCommit() : {};
+        await fs.mkdir(path.dirname(configPath), { recursive: true });
+        const backupPath = await backupExistingJsonFile(configPath, configBackupDir, now);
+        await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+        json(res, 200, { ok: true, config: redactConfig(config), path: configPath, backupPath, impact, ...projectBinding });
+        return true;
+      };
+      const mutation = projectConfigMutationTail.then(mutateProjectConfig, mutateProjectConfig);
+      projectConfigMutationTail = mutation.catch(() => {});
+      return await mutation;
     }
 
     if (req.method === "POST" && url.pathname === "/api/wechat-collector/llm/models") {
@@ -1437,7 +1460,11 @@ export function createWechatCollectorHandler(options = {}) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/wechat-collector/service/install") {
-      json(res, 200, { ok: true, service: installService() });
+      const currentService = serviceStatus();
+      const service = currentService?.loaded
+        ? { ...currentService, reused: true }
+        : installService();
+      json(res, 200, { ok: true, service });
       return true;
     }
 
@@ -1463,16 +1490,24 @@ export function createWechatCollectorHandler(options = {}) {
         json(res, 400, { error: realPushValidation.error });
         return true;
       }
-      const service = installService();
+      const currentService = serviceStatus();
+      const installedForRequest = !currentService?.loaded;
+      const service = installedForRequest
+        ? installService()
+        : { ...currentService, reused: true };
       try {
         const scheduler = installScheduler();
         json(res, 200, { ok: true, service, scheduler });
       } catch (error) {
         let rollback = {};
-        try {
-          rollback = { service: uninstallService() };
-        } catch (rollbackError) {
-          rollback = { error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError) };
+        if (installedForRequest) {
+          try {
+            rollback = { service: uninstallService() };
+          } catch (rollbackError) {
+            rollback = { error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError) };
+          }
+        } else {
+          rollback = { skipped: true, reason: "existing local service was reused" };
         }
         json(res, 500, {
           ok: false,

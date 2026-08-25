@@ -1,11 +1,6 @@
 const INVALID_PAPER_BINDING_MESSAGE = "试卷绑定参数不合法，请检查 session_id / course_code / form_codes";
 const MISSING_FORM_CODES_MESSAGE = "科目已创建成功，但未获取到有效试卷 code，无法绑定到考试场次";
 
-function compactBody(value) {
-  if (value === undefined || value === null || value === "") return "";
-  return typeof value === "string" ? value.slice(0, 1000) : JSON.stringify(value).slice(0, 1000);
-}
-
 function normalizeFormCodes(value) {
   if (Array.isArray(value)) {
     return value
@@ -27,10 +22,6 @@ function normalizeCourseCode(course) {
 
 function normalizeCourseName(course) {
   return String(course?.name || course?.course_name || course?.title || "").trim();
-}
-
-function normalizeCoursePaperName(course) {
-  return String(course?.paper_name || course?.paperName || course?.form_name || course?.formName || "").trim();
 }
 
 function unwrapCourseDetail(payload) {
@@ -91,41 +82,82 @@ function normalizePaperName(value) {
   return String(value || "")
     .trim()
     .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[（]/g, "(")
-    .replace(/[）]/g, ")")
-    .replace(/[，、；;:：|｜-]/g, "");
+    .replace(/[\s\p{P}\p{S}]+/gu, "");
 }
 
-function stripLeadingPaperPrefix(value) {
+function normalizeSearchIdentifier(value) {
   return String(value || "")
     .trim()
-    .replace(/^\d{8}[-_]\d{1,2}[-_]\d{1,2}[_\- ]*/, "")
-    .replace(/^\d{8}[_\-]\d{1,2}[A-Za-z0-9]*[^一-龥A-Za-z0-9]*/, "")
-    .replace(/^\d{8}[_\-]\d{1,2}[A-Za-z0-9]*/, "")
-    .replace(/^\d{1,2}[A-Za-z0-9]*[^一-龥A-Za-z0-9]*/, "")
-    .trim();
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
 }
 
-function extractLeadingCourseCode(value) {
-  const match = String(value || "").trim().match(/^(\d{8}-\d{1,2}-\d{1,2})/);
-  return match ? match[1] : "";
+function paperNameContainsIdentifier(paperName, identifier) {
+  const expected = normalizeSearchIdentifier(identifier);
+  const actual = normalizeSearchIdentifier(paperName);
+  return Boolean(expected && actual && actual.includes(expected));
 }
 
-function paperNameMatches(expectedName, actualName) {
-  const expected = normalizePaperName(expectedName);
-  const actual = normalizePaperName(actualName);
-  if (!expected || !actual) return false;
-  if (expected === actual) return true;
+function normalizeExamDateIdentifier(value) {
+  const raw = value instanceof Date && !Number.isNaN(value.getTime())
+    ? new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Shanghai",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(value)
+    : String(value || "").trim();
+  const match = raw.match(/(?:^|\D)(20\d{2})\D?(\d{2})\D?(\d{2})(?:\D|$)/);
+  if (!match) return "";
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsed.getUTCFullYear() !== year
+    || parsed.getUTCMonth() !== month - 1
+    || parsed.getUTCDate() !== day
+  ) return "";
+  return `${match[1]}${match[2]}${match[3]}`;
+}
 
-  const expectedBody = normalizePaperName(stripLeadingPaperPrefix(expectedName));
-  const actualBody = normalizePaperName(stripLeadingPaperPrefix(actualName));
-  if (expectedBody && actualBody && expectedBody === actualBody) return true;
-  if (expectedBody && actual.includes(expectedBody)) return true;
-  if (actualBody && expected.includes(actualBody)) return true;
-  if (expected.length >= 6 && actual.includes(expected)) return true;
-  if (actual.length >= 6 && expected.includes(actual)) return true;
-  return false;
+function paperNameContainsCourseName(paperName, courseName) {
+  const expected = normalizePaperName(courseName);
+  const actual = normalizePaperName(paperName);
+  return Boolean(expected && actual && actual.includes(expected));
+}
+
+function paperMatchesCourseCode(paper, courseCode) {
+  if (!courseCode) return false;
+  return normalizeSearchIdentifier(paper?.courseCode) === normalizeSearchIdentifier(courseCode)
+    || paperNameContainsIdentifier(paper?.name, courseCode);
+}
+
+function longestCommonSubsequenceLength(left, right) {
+  if (!left || !right) return 0;
+  let previous = new Array(right.length + 1).fill(0);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = new Array(right.length + 1).fill(0);
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = left[leftIndex - 1] === right[rightIndex - 1]
+        ? previous[rightIndex - 1] + 1
+        : Math.max(previous[rightIndex], current[rightIndex - 1]);
+    }
+    previous = current;
+  }
+  return previous[right.length];
+}
+
+function fuzzyCourseNameScore(paperName, courseName) {
+  const expected = normalizePaperName(courseName);
+  const actual = normalizePaperName(paperName);
+  if (expected.length < 2 || !actual) return 0;
+  if (expected.length < 4 && !actual.includes(expected)) return 0;
+  const commonLength = longestCommonSubsequenceLength(expected, actual);
+  const coverage = commonLength / expected.length;
+  const precision = commonLength / actual.length;
+  if (commonLength < Math.min(4, expected.length) || coverage < 0.55) return 0;
+  return (5 * coverage * precision) / ((4 * precision) + coverage);
 }
 
 function normalizePaperCandidate(value) {
@@ -158,6 +190,7 @@ function normalizeSessionCourseCandidate(value) {
     value.res,
     value.results,
     value.forms,
+    value.form_list,
     value.form_codes,
     value.formCodes,
     value.papers,
@@ -204,12 +237,284 @@ function normalizeFormList(payload) {
     payload?.res,
     payload?.data?.form_list,
     payload?.data?.results,
+    payload?.data?.res,
     Array.isArray(payload) ? payload : null,
   ];
   for (const candidate of candidates) {
     if (Array.isArray(candidate)) return candidate.map(normalizePaperCandidate).filter((paper) => paper.code);
   }
   return [];
+}
+
+function normalizeCourseList(payload) {
+  const candidates = [
+    payload?.data,
+    payload?.courses,
+    payload?.course_list,
+    payload?.results,
+    Array.isArray(payload) ? payload : null,
+  ];
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue;
+    return candidate.map(normalizeSessionCourseCandidate).filter((course) => course?.code || course?.name);
+  }
+  return [];
+}
+
+function courseCodePaperPrefix(value = "") {
+  const match = String(value || "").trim().match(/^(\d{8})-\d{2}-(\d{2})$/);
+  return match ? `${match[1]}${match[2]}` : "";
+}
+
+function paperCourseMatchScore(paper, course) {
+  const paperName = String(paper?.name || "");
+  const courseCode = normalizeCourseCode(course);
+  const courseName = normalizeCourseName(course);
+  if (paper?.courseCode && normalizeSearchIdentifier(paper.courseCode) === normalizeSearchIdentifier(courseCode)) return 1000;
+  if (courseCode && paperNameContainsIdentifier(paperName, courseCode)) return 900;
+  const codePrefix = courseCodePaperPrefix(courseCode);
+  if (codePrefix && paperNameContainsIdentifier(paperName, codePrefix)) return 850;
+  if (courseName && paperNameContainsCourseName(paperName, courseName)) return 700 + Math.min(courseName.length, 100);
+  const fuzzyScore = fuzzyCourseNameScore(paperName, courseName);
+  return fuzzyScore > 0 ? 500 + fuzzyScore : 0;
+}
+
+function uniqueCourseCandidates(...courseLists) {
+  const result = [];
+  const seen = new Set();
+  for (const course of courseLists.flat()) {
+    const normalized = normalizeSessionCourseCandidate(course);
+    if (!normalized) continue;
+    const key = normalizeCourseCode(normalized) || `name:${normalizeCourseName(normalized)}`;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function buildSessionSubjectPaperSnapshot({ formsPayload, courseListPayload, knownCourses = [] } = {}) {
+  const papers = normalizeFormList(formsPayload);
+  const courseCandidates = uniqueCourseCandidates(
+    normalizeCourseList(courseListPayload),
+    Array.isArray(knownCourses) ? knownCourses : [],
+  );
+  const matchedCourses = new Map();
+  const unmatchedPapers = [];
+
+  for (const paper of papers) {
+    const scored = courseCandidates
+      .map((course) => ({ course, score: paperCourseMatchScore(paper, course) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score);
+    const best = scored[0];
+    const tied = best && scored.filter((item) => item.score === best.score);
+    if (!best || tied.length !== 1) {
+      unmatchedPapers.push({ code: paper.code, name: paper.name });
+      continue;
+    }
+    const course = best.course;
+    const key = normalizeCourseCode(course) || `name:${normalizeCourseName(course)}`;
+    const current = matchedCourses.get(key) || {
+      code: normalizeCourseCode(course),
+      name: normalizeCourseName(course),
+      form_codes: [],
+      paper_names: [],
+    };
+    if (paper.code && !current.form_codes.includes(paper.code)) current.form_codes.push(paper.code);
+    if (paper.name && !current.paper_names.includes(paper.name)) current.paper_names.push(paper.name);
+    matchedCourses.set(key, current);
+  }
+
+  const courses = [...matchedCourses.values()].map((course) => ({
+    ...course,
+    ...(course.paper_names[0] ? { paper_name: course.paper_names[0] } : {}),
+  }));
+  return {
+    courses,
+    papers: papers.map((paper) => ({ code: paper.code, name: paper.name })),
+    unmatchedPapers,
+    courseReadMode: courses.length ? "tenant_courses_matched_by_bound_papers" : "not_returned",
+  };
+}
+
+function uniquePaperRecords(papers = []) {
+  const result = [];
+  const seen = new Set();
+  for (const value of Array.isArray(papers) ? papers : []) {
+    const paper = normalizePaperCandidate(value);
+    if (!paper.code && !paper.name) continue;
+    const key = paper.code ? `code:${paper.code}` : `name:${normalizePaperName(paper.name)}`;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push({ code: paper.code, name: paper.name });
+  }
+  return result;
+}
+
+function sessionDetailSubjectPaperSnapshot(payload, sessionId) {
+  const detailCourses = extractSessionCourses(payload, sessionId);
+  const courses = detailCourses.map((course) => {
+    const papers = uniquePaperRecords(course.papers);
+    const formCodes = papers.map((paper) => paper.code).filter(Boolean);
+    const paperNames = papers.map((paper) => paper.name).filter(Boolean);
+    return {
+      code: course.code,
+      name: course.name,
+      form_codes: formCodes,
+      paper_names: paperNames,
+      ...(paperNames[0] ? { paper_name: paperNames[0] } : {}),
+    };
+  });
+  return {
+    courses,
+    papers: uniquePaperRecords(detailCourses.flatMap((course) => course.papers || [])),
+  };
+}
+
+function mergeSessionSubjectPaperSnapshots(detailSnapshot, matchedSnapshot) {
+  const courses = (Array.isArray(detailSnapshot?.courses) ? detailSnapshot.courses : []).map((course) => ({
+    ...course,
+    form_codes: [...(course.form_codes || [])],
+    paper_names: [...(course.paper_names || [])],
+  }));
+  for (const readback of Array.isArray(matchedSnapshot?.courses) ? matchedSnapshot.courses : []) {
+    const index = courses.findIndex((course) => (
+      (readback.code && course.code === readback.code)
+      || (!readback.code && readback.name && course.name === readback.name)
+      || (!course.code && course.name && course.name === readback.name)
+    ));
+    if (index < 0) {
+      courses.push({ ...readback });
+      continue;
+    }
+    const current = courses[index];
+    current.form_codes = [...new Set([...(current.form_codes || []), ...(readback.form_codes || [])])];
+    current.paper_names = [...new Set([...(current.paper_names || []), ...(readback.paper_names || [])])];
+    if (!current.paper_name && current.paper_names[0]) current.paper_name = current.paper_names[0];
+  }
+  return {
+    courses,
+    papers: uniquePaperRecords([...(detailSnapshot?.papers || []), ...(matchedSnapshot?.papers || [])]),
+    unmatchedPapers: Array.isArray(matchedSnapshot?.unmatchedPapers) ? matchedSnapshot.unmatchedPapers : [],
+    courseReadMode: detailSnapshot?.courses?.length
+      ? "session_detail"
+      : matchedSnapshot?.courseReadMode || "not_returned",
+  };
+}
+
+function courseSessionAssociations(payload = {}) {
+  const detail = unwrapCourseDetail(payload);
+  const candidates = [
+    detail.res,
+    detail.results,
+    detail.sessions,
+    detail.session_list,
+    detail.sessionList,
+    detail.data?.res,
+    detail.data?.results,
+    detail.data?.sessions,
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+  return [];
+}
+
+async function fetchKnownCoursesForSession({ login, apiBase, sessionId, knownCourses, requestJson, emitLog }) {
+  const courses = [];
+  for (const knownCourse of uniqueCourseCandidates(knownCourses)) {
+    const courseCode = normalizeCourseCode(knownCourse);
+    if (!courseCode) continue;
+    try {
+      const payload = await requestJson(
+        login,
+        `${apiBase}/tenant/api/courses/${encodeURIComponent(courseCode)}/?apply=session`,
+        { method: "GET" },
+        `查询科目场次 ${courseCode}`,
+      );
+      const associated = courseSessionAssociations(payload).some((session) => (
+        String(session?.id ?? session?.session_id ?? session?.sessionId ?? session).trim() === String(sessionId).trim()
+      ));
+      if (!associated) continue;
+      const detail = unwrapCourseDetail(payload);
+      courses.push({
+        code: String(detail.code || detail.course_code || courseCode).trim(),
+        name: String(detail.name || detail.course_name || normalizeCourseName(knownCourse)).trim(),
+        form_codes: [],
+        paper_names: [],
+      });
+    } catch (error) {
+      emitLog(`[易考信息同步] 科目 ${courseCode} 的场次关联读取失败`, "warning");
+    }
+  }
+  return courses;
+}
+
+async function fetchSessionSubjectPaperSnapshot({
+  login,
+  apiBase,
+  sessionId,
+  sessionDetail = null,
+  knownCourses = [],
+  requestJson,
+  emitLog = () => {},
+}) {
+  const formsPath = `/tenant/api/session/${encodeURIComponent(sessionId)}/forms/`;
+  let formsPayload = {};
+  try {
+    formsPayload = await requestJson(login, `${apiBase}${formsPath}`, { method: "GET" }, `查询场次试卷列表 ${sessionId}`);
+  } catch (error) {
+    if (!sessionDetail) throw error;
+    emitLog("[易考信息同步] 场次试卷列表读取失败，继续使用场次详情回读科目和试卷", "warning");
+  }
+  const papers = normalizeFormList(formsPayload);
+  let courseListPayload = null;
+  if (papers.length) {
+    try {
+      courseListPayload = await requestJson(
+        login,
+        `${apiBase}/tenant/api/course_list/1/1000/`,
+        { method: "GET" },
+        "查询租户科目列表",
+      );
+    } catch (error) {
+      emitLog("[易考信息同步] 租户科目列表读取失败，继续使用平台已有科目匹配已绑试卷", "warning");
+    }
+  }
+  let detailSnapshot = sessionDetailSubjectPaperSnapshot(sessionDetail, sessionId);
+  if (!detailSnapshot.courses.length) {
+    try {
+      const sessionListPayload = await requestJson(
+        login,
+        `${apiBase}/tenant/api/session/?session_ids=${encodeURIComponent(sessionId)}`,
+        { method: "GET" },
+        `从场次列表读取科目和试卷 ${sessionId}`,
+      );
+      detailSnapshot = sessionDetailSubjectPaperSnapshot(sessionListPayload, sessionId);
+    } catch (error) {
+      emitLog("[易考信息同步] 场次列表科目读取失败，继续使用已取得的试卷信息", "warning");
+    }
+  }
+  if (!detailSnapshot.courses.length && Array.isArray(knownCourses) && knownCourses.length) {
+    const associatedCourses = await fetchKnownCoursesForSession({
+      login,
+      apiBase,
+      sessionId,
+      knownCourses,
+      requestJson,
+      emitLog,
+    });
+    if (associatedCourses.length) detailSnapshot = { courses: associatedCourses, papers: [] };
+  }
+  const matchedSnapshot = buildSessionSubjectPaperSnapshot({
+    formsPayload,
+    courseListPayload,
+    knownCourses: [...detailSnapshot.courses, ...(Array.isArray(knownCourses) ? knownCourses : [])],
+  });
+  const snapshot = mergeSessionSubjectPaperSnapshots(detailSnapshot, matchedSnapshot);
+  emitLog(`[易考信息同步] 已读取 ${snapshot.courses.length} 个科目、${snapshot.papers.length} 份试卷`);
+  return snapshot;
 }
 
 function sessionFormResults(sessionId, papers, source = "session_forms") {
@@ -223,51 +528,177 @@ function sessionFormResults(sessionId, papers, source = "session_forms") {
   }));
 }
 
-function filterSessionFormsForCourses(papers, courses = []) {
-  const requestedCourses = Array.isArray(courses) ? courses : [];
-  if (!requestedCourses.length) return papers;
-  const requested = requestedCourses.map((course) => ({
-    code: normalizeCourseCode(course),
-    paperName: normalizeCoursePaperName(course),
-  }));
-  const requestedCodes = new Set(requested.map((course) => course.code).filter(Boolean));
-  if (!requestedCodes.size) return papers;
-  const withCourseCodes = papers.filter((paper) => paper.courseCode);
-  return papers.filter((paper) => requested.some((course) => {
-    if (withCourseCodes.length && paper.courseCode !== course.code) return false;
-    return !course.paperName || paperNameMatches(course.paperName, paper.name);
-  }));
+function paperMatchesCourseIdentity(paper, course, workflowSerial = "") {
+  const courseCode = normalizeCourseCode(course);
+  const courseName = normalizeCourseName(course);
+  if (paper?.courseCode) return paper.courseCode === courseCode;
+  return paperNameContainsIdentifier(paper?.name, courseCode)
+    || paperNameContainsCourseName(paper?.name, courseName)
+    || fuzzyCourseNameScore(paper?.name, courseName) > 0
+    || paperNameContainsIdentifier(paper?.name, workflowSerial);
 }
 
-async function fetchSessionForms({ login, apiBase, sessionId, courses, requestJson, emitLog }) {
+function filterSessionFormsForCourses(papers, courses = [], workflowSerial = "") {
+  const requestedCourses = Array.isArray(courses) ? courses : [];
+  if (!requestedCourses.length) return papers;
+  const requestedCodes = new Set(requestedCourses.map(normalizeCourseCode).filter(Boolean));
+  if (!requestedCodes.size) return papers;
+  return papers.filter((paper) => requestedCourses.some((course) => (
+    paperMatchesCourseIdentity(paper, course, workflowSerial)
+  )));
+}
+
+async function fetchSessionForms({ login, apiBase, sessionId, courses, workflowSerial, requestJson, emitLog }) {
   const path = `/tenant/api/session/${encodeURIComponent(sessionId)}/forms/`;
-  emitLog(`[试卷绑定] 人工绑定回查 GET ${path}`);
   const payload = await requestJson(login, `${apiBase}${path}`, { method: "GET" }, `查询场次试卷列表 ${sessionId}`);
-  emitLog(`[试卷绑定] 场次试卷列表 responseBody = ${compactBody(payload)}`);
-  const papers = filterSessionFormsForCourses(normalizeFormList(payload), courses);
+  const papers = filterSessionFormsForCourses(normalizeFormList(payload), courses, workflowSerial);
+  emitLog(`[试卷绑定] 已检查正式场次，当前已绑定 ${papers.length} 份试卷`);
   return sessionFormResults(sessionId, papers);
 }
 
-function selectFormCodesForCourse({ courseCode, paperName, formPapers }) {
+function selectFormCodesForCourse({ courseCode, courseName, workflowSerial, examDate, formPapers, multiSubject = false }) {
   const papers = (Array.isArray(formPapers) ? formPapers : []).map(normalizePaperCandidate).filter((paper) => paper.code);
-  if (!paperName) return { status: papers.length ? "matched" : "missing", formCodes: papers.map((paper) => paper.code), candidates: papers };
+  const normalizedExamDate = normalizeExamDateIdentifier(examDate);
+  const signalDefinitions = [
+    {
+      key: "course_code",
+      label: "科目编号",
+      value: courseCode,
+      matches: (paper) => paperMatchesCourseCode(paper, courseCode),
+    },
+    {
+      key: "workflow_serial",
+      label: "泛微流水号",
+      value: workflowSerial,
+      matches: (paper) => paperNameContainsIdentifier(paper.name, workflowSerial),
+    },
+    {
+      key: "course_name",
+      label: "科目名称",
+      value: courseName,
+      matches: (paper) => paperNameContainsCourseName(paper.name, courseName),
+    },
+  ];
+  const withSignals = papers.map((paper) => ({
+    paper,
+    signals: signalDefinitions
+      .filter((definition) => String(definition.value || "").trim() && definition.matches(paper))
+      .map((definition) => definition.key),
+  }));
+  const selectBestMatches = (items, {
+    fallbackKey = "",
+    matchScore = null,
+    matchedByOverride = "",
+    matchedByLabelOverride = "",
+    matchedValueOverride = "",
+  } = {}) => {
+    if (!items.length) return { status: "missing", formCodes: [], candidates: papers, matchedBy: "", matchedByLabel: "", matchedValue: "" };
+    const maxSignalCount = Math.max(...items.map((item) => item.signals.length));
+    const bestItems = items.filter((item) => item.signals.length === maxSignalCount);
+    const matchedDefinitions = fallbackKey
+      ? signalDefinitions.filter((definition) => definition.key === fallbackKey)
+      : signalDefinitions.filter((definition) => bestItems.some((item) => item.signals.includes(definition.key)));
+    const matchedBy = matchedDefinitions.map((definition) => definition.key).join("_and_");
+    const matchedByLabel = matchedDefinitions.map((definition) => definition.label).join("及");
+    const matchedValue = matchedDefinitions.map((definition) => definition.value).filter(Boolean).join(" / ");
+    const candidates = bestItems.map((item) => item.paper);
+    return {
+      status: candidates.length === 1 ? "matched" : "ambiguous",
+      formCodes: candidates.length === 1 ? [candidates[0].code] : [],
+      candidates,
+      matchedBy: matchedByOverride || matchedBy || fallbackKey,
+      matchedByLabel: matchedByLabelOverride || matchedByLabel || "科目名称近似",
+      matchedValue: matchedValueOverride || matchedValue || courseName,
+      ...(matchScore === null ? {} : { matchScore }),
+    };
+  };
 
-  const matches = papers.filter((paper) => {
-    const leadingCourseCode = extractLeadingCourseCode(paper.name);
-    if (leadingCourseCode && leadingCourseCode !== courseCode) return false;
-    return paperNameMatches(paperName, paper.name);
-  });
-  if (matches.length === 1) return { status: "matched", formCodes: [matches[0].code], candidates: matches };
-  if (matches.length > 1) return { status: "ambiguous", formCodes: [], candidates: matches };
-  return { status: "missing", formCodes: [], candidates: papers };
+  const codeMatches = withSignals.filter((item) => item.signals.includes("course_code"));
+  const serialMatches = withSignals.filter((item) => item.signals.includes("workflow_serial"));
+  const selectClosestNameMatch = (items, { requireSerial = false } = {}) => {
+    const scored = items
+      .map((item) => ({ ...item, score: fuzzyCourseNameScore(item.paper.name, courseName) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score);
+    if (!scored.length) return null;
+    const bestScore = scored[0].score;
+    const bestMatches = scored
+      .filter((item) => Math.abs(bestScore - item.score) < Number.EPSILON)
+      .map((item) => ({
+        ...item,
+        signals: requireSerial ? ["workflow_serial", "course_name"] : ["course_name"],
+      }));
+    return selectBestMatches(bestMatches, {
+      matchScore: bestScore,
+      matchedByOverride: requireSerial ? "workflow_serial_and_course_name_fuzzy" : "course_name_fuzzy",
+      matchedByLabelOverride: requireSerial ? "泛微流水号及科目名称近似" : "科目名称近似",
+      matchedValueOverride: requireSerial ? `${workflowSerial} / ${courseName}` : courseName,
+    });
+  };
+  const selectDateAndNameMatch = () => {
+    if (!normalizedExamDate) return null;
+    const dateMatches = withSignals.filter((item) => paperNameContainsIdentifier(item.paper.name, normalizedExamDate));
+    if (!dateMatches.length) return null;
+    const exactNameMatches = dateMatches.filter((item) => paperNameContainsCourseName(item.paper.name, courseName));
+    if (exactNameMatches.length) {
+      return selectBestMatches(exactNameMatches.map((item) => ({ ...item, signals: [] })), {
+        matchedByOverride: "exam_date_and_course_name",
+        matchedByLabelOverride: "考试日期及科目名称",
+        matchedValueOverride: `${normalizedExamDate} / ${courseName}`,
+      });
+    }
+    const scored = dateMatches
+      .map((item) => ({ ...item, score: fuzzyCourseNameScore(item.paper.name, courseName) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score);
+    if (!scored.length) return null;
+    const bestScore = scored[0].score;
+    const bestMatches = scored
+      .filter((item) => Math.abs(bestScore - item.score) < Number.EPSILON)
+      .map((item) => ({ ...item, signals: [] }));
+    return selectBestMatches(bestMatches, {
+      matchScore: bestScore,
+      matchedByOverride: "exam_date_and_course_name_fuzzy",
+      matchedByLabelOverride: "考试日期及科目名称近似",
+      matchedValueOverride: `${normalizedExamDate} / ${courseName}`,
+    });
+  };
+  if (multiSubject) {
+    if (codeMatches.length) return selectBestMatches(codeMatches);
+    const closestSerialNameMatch = selectClosestNameMatch(serialMatches, { requireSerial: true });
+    if (closestSerialNameMatch) return closestSerialNameMatch;
+    const dateAndNameMatch = selectDateAndNameMatch();
+    if (dateAndNameMatch) return dateAndNameMatch;
+    return {
+      status: "missing",
+      formCodes: [],
+      candidates: withSignals
+        .filter((item) => item.signals.includes("workflow_serial") || item.signals.includes("course_name"))
+        .map((item) => item.paper),
+      matchedBy: "workflow_serial_and_course_name",
+      matchedByLabel: "泛微流水号及科目名称",
+      matchedValue: `${workflowSerial} / ${courseName}`,
+    };
+  }
+  if (codeMatches.length) return selectBestMatches(codeMatches);
+  if (serialMatches.length) {
+    const closestSerialNameMatch = selectClosestNameMatch(serialMatches, { requireSerial: true });
+    if (closestSerialNameMatch) return closestSerialNameMatch;
+    return selectBestMatches(serialMatches);
+  }
+  const closestNameMatch = selectClosestNameMatch(withSignals);
+  if (closestNameMatch) return closestNameMatch;
+
+  return { status: "missing", formCodes: [], candidates: papers, matchedBy: "", matchedByLabel: "", matchedValue: "" };
 }
 
-function duplicatePaperMatchForCourse({ courseCode, courseName, paperName, candidates }) {
+function duplicatePaperMatchForCourse({ courseCode, courseName, selected }) {
   return {
     course_code: courseCode,
     course_name: courseName,
-    paper_name: paperName,
-    candidates: (Array.isArray(candidates) ? candidates : []).map((paper) => ({
+    matched_by: selected?.matchedBy || "",
+    matched_value: selected?.matchedValue || "",
+    candidates: (Array.isArray(selected?.candidates) ? selected.candidates : []).map((paper) => ({
       code: paper.code,
       name: paper.name,
     })),
@@ -275,36 +706,31 @@ function duplicatePaperMatchForCourse({ courseCode, courseName, paperName, candi
 }
 
 async function fetchTenantFormList({ login, apiBase, requestJson, emitLog }) {
-  const path = "/tenant/api/form/list/?form_type=form&order_by=-id";
-  emitLog(`[试卷绑定] GET ${path}`);
+  const path = "/tenant/api/form/list/?form_type=active&order_by=-id";
   const payload = await requestJson(login, `${apiBase}${path}`, { method: "GET" }, "查询租户试卷列表");
   const papers = normalizeFormList(payload);
-  emitLog(`[试卷绑定] 租户试卷列表 responseBody = ${compactBody(payload)}`);
+  emitLog(`[试卷绑定] 已查询活跃试卷，共 ${papers.length} 份`);
   return papers;
 }
 
-async function fetchSessionPaperBindingDetail({ login, apiBase, sessionId, courses, requestJson, emitLog }) {
+async function fetchSessionPaperBindingDetail({ login, apiBase, sessionId, courses, workflowSerial, requestJson, emitLog }) {
   try {
-    const formResults = await fetchSessionForms({ login, apiBase, sessionId, courses, requestJson, emitLog });
+    const formResults = await fetchSessionForms({ login, apiBase, sessionId, courses, workflowSerial, requestJson, emitLog });
     if (formResults.length) {
       return { source: "forms", results: formResults };
     }
   } catch (error) {
-    emitLog(`[试卷绑定] 场次试卷列表回查失败：${error instanceof Error ? error.message : String(error)}`, "warning");
+    emitLog("[试卷绑定] 场次试卷列表回查失败，继续检查场次详情", "warning");
   }
 
   const detailPath = `/tenant/api/session/${encodeURIComponent(sessionId)}/`;
-  emitLog(`[试卷绑定] 人工绑定回查 GET ${detailPath}`);
   try {
     const payload = await requestJson(login, `${apiBase}${detailPath}`, { method: "GET" }, `回查正式场次试卷 ${sessionId}`);
-    emitLog(`[试卷绑定] 人工绑定回查 responseBody = ${compactBody(payload)}`);
     return { source: "detail", payload };
   } catch (error) {
-    emitLog(`[试卷绑定] 人工绑定详情回查失败：${error instanceof Error ? error.message : String(error)}`, "warning");
+    emitLog("[试卷绑定] 正式场次详情回查失败，已改用场次列表继续检查", "warning");
     const listPath = `/tenant/api/session/?session_ids=${encodeURIComponent(sessionId)}`;
-    emitLog(`[试卷绑定] 人工绑定回查 GET ${listPath}`);
     const payload = await requestJson(login, `${apiBase}${listPath}`, { method: "GET" }, `回查正式场次列表试卷 ${sessionId}`);
-    emitLog(`[试卷绑定] 人工绑定列表回查 responseBody = ${compactBody(payload)}`);
     return { source: "list", payload };
   }
 }
@@ -314,6 +740,7 @@ async function detectSessionPaperBindings({
   apiBase,
   sessionId,
   courses,
+  workflowSerial = "",
   requestJson,
   emitLog = () => {},
 }) {
@@ -325,6 +752,7 @@ async function detectSessionPaperBindings({
     apiBase,
     sessionId: normalizedSessionId,
     courses,
+    workflowSerial,
     requestJson,
     emitLog,
   });
@@ -361,15 +789,12 @@ async function detectSessionPaperBindings({
   for (const course of requestedCourses) {
     const requestedCourseCode = normalizeCourseCode(course);
     const requestedCourseName = normalizeCourseName(course);
-    const requestedPaperName = normalizeCoursePaperName(course);
     if (!requestedCourseCode) throw new Error(INVALID_PAPER_BINDING_MESSAGE);
     const matched = sessionCourses.find((candidate) => {
       if (candidate.code && candidate.code === requestedCourseCode) return true;
       return !candidate.code && requestedCourseName && candidate.name === requestedCourseName;
     });
-    const papers = (matched?.papers || [])
-      .filter((paper) => paper.code || paper.name)
-      .filter((paper) => !requestedPaperName || paperNameMatches(requestedPaperName, paper.name));
+    const papers = (matched?.papers || []).filter((paper) => paper.code || paper.name);
     if (!matched || !papers.length) {
       missingCourseCodes.push(requestedCourseCode);
       continue;
@@ -385,65 +810,11 @@ async function detectSessionPaperBindings({
   }
 
   if (missingCourseCodes.length) {
-    emitLog(`[试卷绑定] 人工绑定回查仍缺少试卷：${missingCourseCodes.join("、")}`, "warning");
+    emitLog(`[试卷绑定] 正式场次仍有 ${missingCourseCodes.length} 个科目未绑定试卷`, "warning");
     return { status: "waiting_manual", missingCourseCodes };
   }
   emitLog("[试卷绑定] 人工绑定回查确认正式场次已有试卷", "success");
   return { status: "success", results };
-}
-
-function extractCourseCode(payload, fallbackCode) {
-  const course = unwrapCourseDetail(payload);
-  return String(course?.code || course?.course_code || fallbackCode || "").trim();
-}
-
-function extractFormCodesFromCourseDetail(payload) {
-  const course = unwrapCourseDetail(payload);
-  const formLists = [
-    course?.res,
-    course?.results,
-    course?.forms,
-    course?.form_codes,
-    course?.formCodes,
-    course?.data?.res,
-    course?.data?.results,
-    course?.data?.form_codes,
-    course?.data?.formCodes,
-  ];
-  const codes = formLists.flatMap((value) => normalizeFormCodes(value));
-  return Array.from(new Set(codes));
-}
-
-function extractFormPapersFromCourseDetail(payload) {
-  const course = unwrapCourseDetail(payload);
-  const formLists = [
-    course?.res,
-    course?.results,
-    course?.forms,
-    course?.form_codes,
-    course?.formCodes,
-    course?.data?.res,
-    course?.data?.results,
-    course?.data?.form_codes,
-    course?.data?.formCodes,
-  ];
-  return formLists.flatMap((value) => {
-    if (Array.isArray(value)) return value.map(normalizePaperCandidate).filter((paper) => paper.code);
-    return normalizeFormCodes(value).map((code) => ({ code, name: code }));
-  });
-}
-
-async function fetchCourseFormBinding({ login, apiBase, courseCode, requestJson, emitLog }) {
-  const path = `/tenant/api/courses/${encodeURIComponent(courseCode)}/?apply=form`;
-  emitLog(`[试卷绑定] GET ${path}`);
-  const detail = await requestJson(login, `${apiBase}${path}`, { method: "GET" }, `查询科目试卷 ${courseCode}`);
-  emitLog(`[试卷绑定] 科目详情 responseBody = ${compactBody(detail)}`);
-  return {
-    courseCode: extractCourseCode(detail, courseCode),
-    formCodes: extractFormCodesFromCourseDetail(detail),
-    formPapers: extractFormPapersFromCourseDetail(detail),
-    detail,
-  };
 }
 
 function validatePaperBinding({ sessionId, courseCode, formCodes }) {
@@ -472,11 +843,6 @@ async function postCourseSessionFormCodes({ login, apiBase, binding, requestJson
     form_codes: binding.formCodes,
   };
 
-  emitLog(`[试卷绑定] POST ${path}`);
-  emitLog(`[试卷绑定] HTTP Method = POST`);
-  emitLog(`[试卷绑定] session_id = ${binding.sessionId}`);
-  emitLog(`[试卷绑定] payload = ${JSON.stringify(payload)}`);
-
   try {
     const responseBody = await requestJson(
       login,
@@ -489,16 +855,11 @@ async function postCourseSessionFormCodes({ login, apiBase, binding, requestJson
       },
       `绑定试卷 ${binding.formCodes.join("、")} 到正式场次 ${binding.sessionId}`,
     );
-    const httpStatus = responseBody?.__tenantResponse ? responseBody.httpStatus : 200;
     const body = responseBody?.__tenantResponse ? responseBody.body : responseBody;
-    emitLog(`[试卷绑定] httpStatus = ${httpStatus}`);
-    emitLog(`[试卷绑定] responseBody = ${compactBody(body)}`);
+    emitLog(`[试卷绑定] 科目“${binding.courseName || binding.courseCode}”已绑定到正式场次`, "success");
     return { ...payload, responseBody: body };
   } catch (error) {
-    emitLog(`[试卷绑定] url = ${path}`, "warning");
-    emitLog(`[试卷绑定] requestBody = ${JSON.stringify(payload)}`, "warning");
-    emitLog(`[试卷绑定] httpStatus = ${error?.status || "未知"}`, "warning");
-    emitLog(`[试卷绑定] responseBody = ${compactBody(error?.detail)}`, "warning");
+    emitLog(`[试卷绑定] 科目“${binding.courseName || binding.courseCode}”绑定失败（HTTP ${error?.status || "未知"}）`, "warning");
     if (error?.status === 400) {
       const bindingError = new Error(INVALID_PAPER_BINDING_MESSAGE);
       bindingError.status = error.status;
@@ -516,8 +877,6 @@ async function putCourseFormCodes({ login, apiBase, binding, requestJson, emitLo
     name: binding.courseName || binding.courseCode,
     form_codes: binding.formCodes,
   };
-  emitLog(`[试卷绑定] PUT ${path}`);
-  emitLog(`[试卷绑定] payload = ${JSON.stringify(payload)}`);
   const responseBody = await requestJson(
     login,
     `${apiBase}${path}`,
@@ -529,10 +888,8 @@ async function putCourseFormCodes({ login, apiBase, binding, requestJson, emitLo
     },
     `更新科目绑定试卷 ${binding.courseCode}`,
   );
-  const httpStatus = responseBody?.__tenantResponse ? responseBody.httpStatus : 200;
   const body = responseBody?.__tenantResponse ? responseBody.body : responseBody;
-  emitLog(`[试卷绑定] 科目绑定试卷 httpStatus = ${httpStatus}`);
-  emitLog(`[试卷绑定] 科目绑定试卷 responseBody = ${compactBody(body)}`);
+  emitLog(`[试卷绑定] 已将 ${binding.formCodes.length} 份活跃试卷关联到科目“${binding.courseName || binding.courseCode}”`);
   return { ...payload, responseBody: body };
 }
 
@@ -541,6 +898,8 @@ async function bindPapersToFormalSession({
   apiBase,
   sessionId,
   courses,
+  workflowSerial = "",
+  examDate = "",
   requestJson,
   emitLog = () => {},
 }) {
@@ -549,59 +908,33 @@ async function bindPapersToFormalSession({
   const missingCourseCodes = [];
   const duplicatePaperMatches = [];
   const results = [];
-  let tenantFormList = null;
 
-  emitLog(`[试卷绑定] 开始绑定试卷，session_id=${sessionId || ""}`);
+  emitLog("[试卷绑定] 开始检查活跃试卷");
+  const tenantFormList = await fetchTenantFormList({ login, apiBase, requestJson, emitLog });
 
   for (const course of courses) {
     const requestedCourseCode = normalizeCourseCode(course);
     const courseName = normalizeCourseName(course);
-    const paperName = normalizeCoursePaperName(course);
     if (!requestedCourseCode) throw new Error(INVALID_PAPER_BINDING_MESSAGE);
 
-    let refreshed;
-    try {
-      refreshed = await fetchCourseFormBinding({
-        login,
-        apiBase,
-        courseCode: requestedCourseCode,
-        requestJson,
-        emitLog,
-      });
-    } catch (error) {
-      if (error?.status === 404) {
-        missingCourseCodes.push(requestedCourseCode);
-        continue;
-      }
-      throw error;
-    }
-
-    const effectivePaperName = paperName || courseName;
-    let shouldUpdateCourseForms = false;
-    let selected = selectFormCodesForCourse({
+    const selected = selectFormCodesForCourse({
       courseCode: requestedCourseCode,
-      paperName: effectivePaperName,
-      formPapers: refreshed.formPapers,
+      courseName,
+      workflowSerial,
+      examDate,
+      formPapers: tenantFormList,
+      multiSubject: courses.length > 1,
     });
-    if (!selected.formCodes.length && !refreshed.formCodes.length) {
-      if (!tenantFormList) {
-        tenantFormList = await fetchTenantFormList({ login, apiBase, requestJson, emitLog });
-      }
-      selected = selectFormCodesForCourse({
-        courseCode: requestedCourseCode,
-        paperName: effectivePaperName,
-        formPapers: tenantFormList,
-      });
-      shouldUpdateCourseForms = Boolean(selected.formCodes.length);
-    }
-    const selectedFormCodes = selected.formCodes.length ? selected.formCodes : paperName ? selected.formCodes : refreshed.formCodes;
+    const selectedFormCodes = selected.formCodes;
 
-    if (effectivePaperName) {
-      emitLog(
-        `[试卷绑定] 按试卷名称匹配：${effectivePaperName}，匹配状态=${selected.status}，候选=${selected.candidates.map((item) => `${item.code}/${item.name}`).join("、") || "无"}`,
-        selected.status === "matched" ? "success" : "warning",
-      );
-    }
+    const matchMessage = selected.status === "matched"
+      ? `已按${selected.matchedByLabel}“${selected.matchedValue}”匹配活跃试卷“${selected.candidates[0]?.name || ""}”`
+      : selected.status === "ambiguous"
+        ? `活跃试卷中有 ${selected.candidates.length} 份试卷命中${selected.matchedByLabel}“${selected.matchedValue}”，需要人工确认`
+        : selected.matchedBy === "workflow_serial_and_course_name"
+          ? `活跃试卷中未找到同时包含泛微流水号“${workflowSerial}”和科目名称“${courseName}”的试卷`
+          : `活跃试卷中未找到包含科目编号“${requestedCourseCode}”或科目名称“${courseName}”${workflowSerial ? `或泛微流水号“${workflowSerial}”` : ""}的试卷`;
+    emitLog(`[试卷绑定] ${matchMessage}`, selected.status === "matched" ? "success" : "warning");
 
     if (!selectedFormCodes.length) {
       missingCourseCodes.push(requestedCourseCode);
@@ -609,8 +942,7 @@ async function bindPapersToFormalSession({
         duplicatePaperMatches.push(duplicatePaperMatchForCourse({
           courseCode: requestedCourseCode,
           courseName,
-          paperName: effectivePaperName,
-          candidates: selected.candidates,
+          selected,
         }));
       }
       continue;
@@ -618,25 +950,18 @@ async function bindPapersToFormalSession({
 
     const validated = validatePaperBinding({
       sessionId,
-      courseCode: refreshed.courseCode || requestedCourseCode,
+      courseCode: requestedCourseCode,
       formCodes: selectedFormCodes,
     });
     preparedBindings.push({
       ...validated,
       courseName,
       paperNames: selected.candidates.map((item) => item.name).filter(Boolean),
-      shouldUpdateCourseForms,
     });
   }
 
   if (missingCourseCodes.length) {
-    const duplicateNames = duplicatePaperMatches
-      .map((match) => `${match.course_code}/${match.paper_name}`)
-      .join("、");
-    const message = duplicatePaperMatches.length
-      ? `发现重复试卷，请人工确认：${duplicateNames}`
-      : `${MISSING_FORM_CODES_MESSAGE}：${missingCourseCodes.join("、")}`;
-    emitLog(`[试卷绑定] ${message}`, "warning");
+    emitLog(`[试卷绑定] ${missingCourseCodes.length} 个科目未在活跃试卷中找到对应试卷`, "warning");
     return {
       status: "waiting_manual",
       missingCourseCodes,
@@ -645,12 +970,8 @@ async function bindPapersToFormalSession({
   }
 
   for (const binding of preparedBindings) {
-    emitLog(`[试卷绑定] 科目=${binding.courseName || binding.courseCode}，course_code=${binding.courseCode}，form_codes=[${binding.formCodes.join(", ")}]`);
-    if (binding.shouldUpdateCourseForms) {
-      await putCourseFormCodes({ login, apiBase, binding, requestJson, emitLog });
-    }
+    await putCourseFormCodes({ login, apiBase, binding, requestJson, emitLog });
     const response = await postCourseSessionFormCodes({ login, apiBase, binding, requestJson, emitLog });
-    emitLog("[试卷绑定] 调用试卷绑定接口成功");
     results.push({
       session_id: binding.sessionId,
       course_name: binding.courseName,
@@ -661,7 +982,7 @@ async function bindPapersToFormalSession({
     });
   }
 
-  emitLog("[试卷绑定] 正式考试试卷绑定完成");
+  emitLog(`[试卷绑定] 试卷绑定完成，共 ${results.length} 个科目`, "success");
   return { status: "success", results };
 }
 
@@ -669,6 +990,8 @@ export {
   INVALID_PAPER_BINDING_MESSAGE,
   MISSING_FORM_CODES_MESSAGE,
   bindPapersToFormalSession,
+  buildSessionSubjectPaperSnapshot,
   detectSessionPaperBindings,
+  fetchSessionSubjectPaperSnapshot,
   validatePaperBinding,
 };

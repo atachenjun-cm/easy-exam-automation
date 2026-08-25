@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>考试数据助手</title>
+  <link rel="icon" href="/web/assets/easy-exam-brand-light.png" type="image/png">
+  <link rel="stylesheet" href="/web/public_exam_assistant.css">
+</head>
+<body>
+  <header class="assistant-header">
+    <div class="header-inner">
+      <div class="brand-block">
+        <img class="brand-mark" src="/web/assets/easy-exam-brand-light.png" alt="易考">
+        <div class="brand-copy">
+          <strong>考试数据助手</strong>
+          <span><i aria-hidden="true"></i>实时数据</span>
+        </div>
+      </div>
+      <button class="icon-button" id="newConversationButton" type="button" title="新对话" aria-label="新对话">＋</button>
+    </div>
+  </header>
+
+  <main class="conversation" id="conversation" aria-label="考试数据助手对话">
+    <div class="messages" id="messages" aria-live="polite"></div>
+  </main>
+
+  <footer class="composer-band">
+    <form class="composer" id="assistantForm">
+      <label class="visually-hidden" for="assistantInput">输入问题</label>
+      <textarea id="assistantInput" rows="1" maxlength="500" placeholder="输入考试日期或名称" autocomplete="off"></textarea>
+      <button class="send-button" id="sendButton" type="submit" title="发送" aria-label="发送">↑</button>
+    </form>
+  </footer>
+
+  <script type="module" src="/web/public_exam_assistant.mjs"></script>
+</body>
+</html>

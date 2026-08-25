@@ -9,9 +9,11 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 test("easy exam service launchd template points at the Application Support runtime", () => {
   const plist = fs.readFileSync(path.join(rootDir, "deploy", "com.ata.easy-exam-service.plist.template"), "utf8");
   assert.match(plist, /<string>com\.ata\.easy-exam-service<\/string>/);
-  assert.match(plist, /\/Users\/ata\/Library\/Application Support\/easy-exam-automation\/app\/scripts\/run_local_service\.sh/);
-  assert.doesNotMatch(plist, /\/Users\/ata\/Documents\/easy-exam-automation/);
-  assert.equal(plist.includes("/Users/chen"), false);
+  assert.match(plist, /__EASY_EXAM_APP_DIR__\/scripts\/run_local_service\.sh/);
+  assert.match(plist, /__EASY_EXAM_RUNTIME_DIR__\/logs\/service\.stdout\.log/);
+  assert.match(plist, /<string>__EASY_EXAM_NODE__<\/string>/);
+  assert.match(plist, /<string>__EASY_EXAM_PYTHON__<\/string>/);
+  assert.doesNotMatch(plist, /\/Users\//);
 });
 
 test("chen local web launchd template points at the synced runtime", () => {
@@ -34,9 +36,10 @@ test("local service runner uses current bundled runtimes", () => {
 test("wechat collector launchd template uses OCR capture mode", () => {
   const plist = fs.readFileSync(path.join(rootDir, "deploy", "com.ata.easy-exam-wechat-collector.plist.template"), "utf8");
   assert.match(plist, /<string>--captureMode<\/string>\s*<string>ocr<\/string>/);
-  assert.match(plist, /\/Users\/ata\/Library\/Application Support\/easy-exam-automation\/app\/scripts\/wechat_visible_collect\.mjs/);
-  assert.match(plist, /\/Users\/ata\/Library\/Application Support\/easy-exam-automation\/runtime\/wechat-requirement-groups\.json/);
-  assert.doesNotMatch(plist, /\/Users\/ata\/Documents\/easy-exam-automation/);
+  assert.match(plist, /__EASY_EXAM_APP_DIR__\/scripts\/wechat_visible_collect\.mjs/);
+  assert.match(plist, /__EASY_EXAM_RUNTIME_DIR__\/wechat-requirement-groups\.json/);
+  assert.match(plist, /<string>__EASY_EXAM_NODE__<\/string>/);
+  assert.doesNotMatch(plist, /\/Users\//);
 });
 
 test("customer service scheduler LaunchAgent runs hourly", () => {

@@ -41,6 +41,13 @@ test("navigation orders project management, exam list, then auto configuration",
   assert.ok(projectIndex < examIndex && examIndex < autoIndex);
 });
 
+test("requirements and template pages remain routable without sidebar entries", () => {
+  assert.ok(html.includes('id="requirementsNavBtn" data-route-menu="requirements" type="button" hidden'));
+  assert.ok(html.includes('id="templatesNavBtn" data-route-menu="templates" type="button" hidden'));
+  assert.ok(html.includes('RequirementListPage({ root: requirementsView, loadRequirements })'));
+  assert.ok(html.includes('staticPage("templates", templatesView)'));
+});
+
 test("exam list room count uses the confirmed class icon asset", () => {
   assert.ok(html.includes("class-count-icon"));
   assert.ok(html.includes("class-icon-exact-person-blue"));
@@ -149,6 +156,41 @@ test("requirement center renders list and detail surfaces", () => {
 });
 
 test("WeChat collector page renders config and scheduler status surfaces", () => {
+  const wechatSystemConfigPanel = sourceBetween(
+    '<details class="system-config-section system-config-wechat-section" id="wechatCollectorSystemConfigPanel">',
+    '\n          </div></div>\n          </details>\n        </section>\n        <section class="task-view" id="userManagementView" hidden>',
+  );
+  const wechatSystemConfigIds = [
+    "wechatCollectorLaunchSummary",
+    "dryRunWechatCollectorBtn",
+    "runWechatPipelineSmokeBtn",
+    "runWechatCollectorOnceBtn",
+    "wechatCollectorPreflight",
+    "wechatPipelineSmoke",
+    "wechatCollectorRequirementCenter",
+    "wechatLlmEnabled",
+    "loadWechatLlmModelsBtn",
+    "saveWechatLlmConfigBtn",
+    "installWechatCollectorAutomationBtn",
+    "uninstallWechatCollectorAutomationBtn",
+    "wechatCollectorGoLive",
+    "installWechatCollectorServiceBtn",
+    "uninstallWechatCollectorServiceBtn",
+    "wechatCollectorService",
+    "installWechatCollectorSchedulerBtn",
+    "uninstallWechatCollectorSchedulerBtn",
+    "wechatCollectorScheduler",
+  ];
+  for (const id of wechatSystemConfigIds) {
+    assert.ok(wechatSystemConfigPanel.includes(`id="${id}"`), `${id} must remain inside the WeChat system configuration card`);
+  }
+  assert.equal((wechatSystemConfigPanel.match(/<details class="wechat-system-config-section">/g) || []).length, 5);
+  assert.equal(wechatSystemConfigPanel.includes('<details class="wechat-system-config-section" open'), false);
+  assert.ok(wechatSystemConfigPanel.includes('<details class="wechat-system-config-section"><summary>微信采集上线状态</summary>'));
+  assert.ok(wechatSystemConfigPanel.includes('<details class="wechat-system-config-section"><summary>1. 初始化验证 / 上线前检查</summary>'));
+  assert.ok(wechatSystemConfigPanel.includes('<details class="wechat-system-config-section"><summary>LLM 候选解析</summary>'));
+  assert.ok(wechatSystemConfigPanel.includes('<details class="wechat-system-config-section"><summary>2. 上线自动采集</summary>'));
+  assert.ok(wechatSystemConfigPanel.includes('<details class="wechat-system-config-section"><summary>高级维护：服务与定时任务</summary>'));
   assert.ok(html.includes('id="wechatCollectorNavBtn"'));
   assert.ok(html.includes('id="systemConfigNavBtn"'));
   assert.ok(html.includes('id="wechatCollectorView"'));
@@ -276,6 +318,8 @@ test("WeChat collector page renders config and scheduler status surfaces", () =>
   assert.ok(html.includes('data-wechat-action="show-attachments"'));
   assert.ok(html.includes("系统配置"));
   assert.ok(html.includes("微信采集配置"));
+  assert.ok(html.includes('<details class="system-config-section system-config-wechat-section" id="wechatCollectorSystemConfigPanel"><summary><div><h2 class="panel-title">微信采集配置</h2><p class="subtitle">微信采集所需的状态、环境检查、链路验证、解析配置、安装和维护均在本卡片内完成。</p></div></summary>\n          <div class="view-actions system-config-section-header-actions"><button class="btn primary" id="installWechatCollectorAutomationBtn" type="button" disabled title="等待上线前检查">安装自动采集</button></div>\n          <div class="panel system-config-section-panel"><div class="panel-body">'));
+  assert.equal(html.includes('<h2 class="panel-title">2. 上线自动采集</h2><p class="subtitle">只有“上线前必须完成”全部通过后，才安装定时自动采集。</p></div><div class="view-actions"><button class="btn" id="installWechatCollectorAutomationBtn"'), false);
   assert.ok(html.includes('id="wechatCollectorLaunchSummary"'));
   assert.ok(html.includes("微信采集上线状态"));
   assert.ok(html.includes("renderWechatCollectorLaunchSummary"));
@@ -284,7 +328,7 @@ test("WeChat collector page renders config and scheduler status surfaces", () =>
   assert.ok(html.includes("去微信采集页逐群验证"));
   assert.ok(html.includes("批量真实采集所有启用群"));
   assert.ok(html.includes("<details><summary>高级操作：批量真实采集</summary>"));
-  assert.ok(html.includes("<details><summary>高级维护：服务与定时任务</summary>"));
+  assert.ok(html.includes("<details class=\"wechat-system-config-section\"><summary>高级维护：服务与定时任务</summary>"));
   assert.ok(html.includes("一般不用改 Endpoint"));
   assert.ok(html.includes("清空已保存密钥"));
   assert.ok(html.includes("LLM 候选解析"));
@@ -517,8 +561,19 @@ test("exam list is task-aggregated and exam detail owns dual session cards", () 
   assert.ok(html.includes('id="examFilterTabs"'));
   assert.ok(html.includes('id="examQueryBtn"'));
   assert.ok(html.includes('id="examStatusFilterBtn"'));
+  assert.ok(html.includes('examStatusFilterLabel.textContent = statusCountText(EXAM_LIST_MODE_LABELS[selectedMode], examStatusCounts[selectedMode])'));
+  assert.ok(html.includes('button.textContent = statusCountText(EXAM_STATUS_FILTER_OPTION_LABELS[mode], examStatusCounts[mode])'));
   assert.ok(html.includes('id="examTimeFilterBtn"'));
   assert.equal(html.includes('id="refreshExamsBtn"'), false);
+  assert.ok(html.includes('class="panel task-detail-overview exam-log-panel is-collapsed" id="examExecutionPanel"'));
+  assert.ok(html.includes('id="examExecutionToggle" type="button" aria-expanded="false" aria-controls="examExecutionBody"'));
+  assert.ok(html.includes('id="examExecutionBody" style="max-height: 0px; opacity: 0" inert'));
+  assert.ok(html.includes("function setExamExecutionExpanded(expanded)"));
+  assert.ok(html.includes("setExamExecutionExpanded(false);"));
+  assert.ok(html.includes('examExecutionToggle.addEventListener("click"'));
+  assert.equal(html.includes('id="examContinueBtn"'), false);
+  assert.equal(html.includes('id="examRefreshBtn"'), false);
+  assert.equal(html.includes("快捷操作与执行日志"), false);
   assert.equal(html.includes('id="examTimeClearBtn"'), false);
   assert.equal(html.includes("exam-time-clear-btn"), false);
   assert.ok(html.includes('class="exam-filter-menu exam-calendar-menu" id="examTimeFilterMenu"'));
@@ -562,16 +617,18 @@ test("exam list is task-aggregated and exam detail owns dual session cards", () 
   assert.ok(html.includes("style=\"--progress-fill:${progress}%\""));
   assert.ok(html.includes("data-candidate-task-id"));
   assert.ok(html.includes('placeholder="考试名称 / 场次名称 / 考试口令 / 账号"'));
-  assert.ok(html.includes("<th>项目名称</th>"));
+  assert.ok(html.includes("<th>考试名称</th>"));
+  assert.equal(html.includes("<th>项目名称</th>"), false);
   assert.ok(html.includes("<th>正式考试</th><th>试考</th>"));
   assert.ok(html.includes("<th>配置进度</th>"));
   assert.ok(html.includes("<th>考试口令</th>"));
-  assert.ok(html.includes("function projectNameCell(task)"));
+  assert.ok(html.includes("function examNameCell(task)"));
+  assert.ok(html.includes("safeText(projectCardTitle(task))"));
   assert.ok(html.includes("function sessionSummaries(sessions, label)"));
   assert.ok(html.includes('sessionSummaries(task.formalSessions, "正式考试")'));
   assert.ok(html.includes('sessionSummaries(task.trialSessions, "试考")'));
   assert.ok(html.includes("统一口令 ${safeText(unifiedCode)}"));
-  assert.ok(html.includes('<td>${projectNameCell(task)}</td>'));
+  assert.ok(html.includes('<td>${examNameCell(task)}</td>'));
   assert.ok(html.includes(".exam-unified-code { color: var(--text);"));
   assert.ok(html.includes("function formatSessionTime(session)"));
   assert.ok(html.includes("（ID:${safeText(session.session_id || \"--\")}）"));
@@ -609,10 +666,23 @@ test("project and system views expose the selective PR 5 collaboration controls"
   assert.ok(html.includes('id="operationBatchCreateBtn"'));
   assert.ok(html.includes('id="operationBatchRecordBtn"'));
   assert.ok(html.includes('id="contentRequirementEmailRecipients"'));
-  assert.ok(html.includes('id="contentRequirementEmailSendBtn"'));
+  assert.ok(html.includes('id="contentRequirementEmailCc"'));
+  assert.ok(html.includes('id="operationContentSyncBtn"'));
+  assert.ok(html.includes('id="operationContentSyncState"'));
+  assert.equal(html.includes('id="contentRequirementEmailSendBtn"'), false);
   assert.ok(html.includes('id="emailSettingsPanel"'));
   assert.ok(html.includes('id="saveEmailSettingsBtn"'));
   assert.ok(html.includes('id="sendEmailTestBtn"'));
+  assert.ok(html.includes('<details class="system-config-section system-config-email-section"><summary><div><h2 class="panel-title">邮箱配置</h2><p class="subtitle">使用 Outlook 公司邮箱发送内容任务单。收件人不在这里保存，发送时按项目当次输入。</p></div></summary>\n          <div class="view-actions system-config-section-header-actions"><button class="btn" id="sendEmailTestBtn"'));
+  assert.ok(html.includes('<details class="system-config-section system-config-operation-section"><summary><div><h2 class="panel-title">运营控制台自动化环境</h2><p class="subtitle">只检查和修复本机浏览器自动化运行环境；运控账号登录、内网连通由使用者自行保证。</p></div></summary>\n          <div class="view-actions system-config-section-header-actions"><button class="btn" id="checkOperationConsoleEnvironmentBtn"'));
+  assert.equal(/<details class="system-config-section[^"]*" open/.test(html), false);
+  assert.match(html, /\.system-config-section\s*\{[^}]*border:\s*1px solid var\(--line\)[^}]*border-radius:\s*var\(--radius-card\)[^}]*background:\s*var\(--panel\)[^}]*box-shadow:\s*var\(--shadow\)/s);
+  assert.match(html, /\.system-config-section\s*>\s*summary\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0, 1fr\)[^}]*min-height:\s*74px/s);
+  assert.equal(html.includes('.system-config-section > summary::before'), false);
+  assert.match(html, /\.system-config-section-header-actions\s*\{[^}]*display:\s*none[^}]*position:\s*absolute[^}]*top:\s*17px[^}]*right:\s*16px/s);
+  assert.match(html, /\.system-config-section\[open\]\s*>\s*\.system-config-section-header-actions\s*\{\s*display:\s*flex;\s*\}/s);
+  assert.match(html, /\.system-config-wechat-section\[open\]\s*>\s*summary\s*\{\s*padding-right:\s*220px;\s*\}/s);
+  assert.match(html, /\.system-config-section-panel\s*\{[^}]*border:\s*0[^}]*box-shadow:\s*none/s);
   assert.ok(html.includes("data-requirement-edit-field"));
   assert.ok(html.includes("/staff-edit"));
 
@@ -620,6 +690,13 @@ test("project and system views expose the selective PR 5 collaboration controls"
   assert.ok(html.includes('id="examListView"'));
   assert.ok(html.includes('id="candidateImportPanel"'));
   assert.ok(html.includes('id="fanweiRequirementTable"'));
+});
+
+test("content task email fields match the content exam value typography", () => {
+  assert.match(
+    html,
+    /#contentRequirementEmailRecipients,\s*#contentRequirementEmailCc\s*\{\s*font-size:\s*14px;\s*line-height:\s*1\.55;\s*\}/,
+  );
 });
 
 test("requirement edit payload includes only dirty fields and preserves intentional clears", () => {
@@ -659,13 +736,16 @@ test("requirement edit payload includes only dirty fields and preserves intentio
   });
 });
 
-test("rendering a project clears non-persisted content email recipients", () => {
+test("rendering a project clears non-persisted content email recipients and CC", () => {
   const renderProjectDetail = sourceBetween(
     "      function renderProjectDetail(task) {",
     "\n      async function loadProjectDetail(projectId) {",
   );
 
   assert.ok(renderProjectDetail.includes('contentRequirementEmailRecipients.value = "";'));
+  assert.ok(renderProjectDetail.includes('contentRequirementEmailCc.value = "";'));
+  assert.ok(renderProjectDetail.includes('contentRequirementEmailState.textContent = "";'));
+  assert.ok(renderProjectDetail.includes("contentRequirementEmailState.hidden = true;"));
 });
 
 test("project detail loads ignore stale project responses", async () => {
@@ -752,13 +832,14 @@ test("stale project mutation responses do not overwrite the active project or DO
   const dependencies = {
     taskViewState,
     contentRequirementEmailRecipients: { value: "a@example.com" },
+    contentRequirementEmailCc: { value: "cc@example.com" },
     contentRequirementEmailState,
     fetchJson: async () => deferred.promise,
     isCurrentProject: (taskId) => taskViewState.currentProjectId === taskId,
   };
   const sendContentRequirementEmailFromProject = compileInlineFunction(
     "      async function sendContentRequirementEmailFromProject() {",
-    "\n      async function saveContentTaskRemark(input) {",
+    "\n      function validateOperationContentPreparation(prepared) {",
     dependencies,
   );
 
@@ -781,13 +862,17 @@ test("every project mutation guards each response before updating shared state",
     ["handleProjectRequirementChangeAction", "      async function handleProjectRequirementChangeAction(button) {", "\n      async function handleProjectRequirementSubmitAction(button) {"],
     ["handleProjectRequirementSubmitAction", "      async function handleProjectRequirementSubmitAction(button) {", "\n      function projectWechatIdentity(task = {}) {"],
     ["saveProjectWechatBinding", "      async function saveProjectWechatBinding() {", "\n      function renderProjectDetail(task) {"],
-    ["sendContentRequirementEmailFromProject", "      async function sendContentRequirementEmailFromProject() {", "\n      async function checkOperationConsoleEnvironment() {"],
+    ["sendContentRequirementEmailFromProject", "      async function sendContentRequirementEmailFromProject() {", "\n      function validateOperationContentPreparation(prepared) {"],
+    ["syncOperationContentFromProject", "      async function syncOperationContentFromProject() {", "\n      async function saveContentTaskRemark(input) {"],
   ];
 
   for (const [name, start, end] of handlers) {
     const source = sourceBetween(start, end);
     assert.ok(source.includes("const taskId = task?.taskId;"), `${name} must capture taskId`);
-    const awaitIndexes = Array.from(source.matchAll(/const result = await fetchJson/g), (match) => match.index);
+    const mutationPattern = name === "syncOperationContentFromProject"
+      ? /const (?:prepared|result) = await (?:fetchJson|completeOperationContentHelper)/g
+      : /const result = await fetchJson/g;
+    const awaitIndexes = Array.from(source.matchAll(mutationPattern), (match) => match.index);
     assert.ok(awaitIndexes.length > 0, `${name} must contain a mutation request`);
     for (const [index, awaitIndex] of awaitIndexes.entries()) {
       const nextAwaitIndex = awaitIndexes[index + 1] ?? source.length;
@@ -845,7 +930,7 @@ test("project navigation clears stale state and disables actions until current r
     "operationBatchRefreshBtn",
     "operationBatchCreateBtn",
     "operationBatchRecordBtn",
-    "contentRequirementEmailSendBtn",
+    "operationContentSyncBtn",
     "projectWechatBindingRefreshBtn",
     "projectWechatBindingSaveBtn",
   ]) {
@@ -936,19 +1021,132 @@ test("recipient status text uses raw text and manual batch recording preserves i
   );
 
   assert.equal(emailFunctions.includes("safeText((result.result?.recipients || []).join"), false);
+  assert.ok(html.includes('id="operationBatchNameInput"'));
+  assert.ok(html.indexOf('id="operationBatchCodeInput"') < html.indexOf('id="operationBatchNameInput"'));
   assert.ok(recordBatch.includes("const draftHtml = projectOperationBatchDraft.innerHTML;"));
+  assert.ok(recordBatch.includes("const operationBatchName = operationBatchNameInput.value.trim();"));
+  assert.ok(recordBatch.includes("operationBatchName,"));
   assert.ok(recordBatch.includes("projectOperationBatchDraft.innerHTML = draftHtml;"));
 });
 
-test("operation batch create locks its action while the request is in flight", () => {
+test("operation batch draft loading refills the manual code and name fields", () => {
+  const nameResolver = sourceBetween(
+    "      function operationBatchNameFromTask(task = {}) {",
+    "\n      function generatedOperationBatchNameFromTask",
+  );
+  const draftLoader = sourceBetween(
+    "      async function loadProjectOperationBatchDraft(task = taskViewState.currentProject) {",
+    "\n      async function confirmOperationBatchNotCreated()",
+  );
+
+  assert.ok(nameResolver.includes("taskViewState.currentOperationBatchDraft?.fields?.batchName?.value"));
+  assert.ok(nameResolver.includes('task.config?.fanweiSource?.raw?.fields?.["批次名称"]'));
+  assert.ok(nameResolver.includes('task.config?.fanweiSource?.batchNameMode'));
+  assert.ok(nameResolver.includes("generatedOperationBatchNameFromTask(task)"));
+  assert.ok(draftLoader.includes("operationBatchCodeInput.value = taskViewState.currentProject.config?.operationBatchCode"));
+  assert.ok(draftLoader.includes("operationBatchNameInput.value = operationBatchNameFromTask(taskViewState.currentProject)"));
+});
+
+test("operation batch create calls automation and exposes progress in the dialog", () => {
   const handler = sourceBetween(
     "      async function createProjectOperationBatch() {",
     "\n      async function recordProjectOperationBatchCode() {",
   );
+  assert.ok(html.includes('id="operationBatchActionState"'));
+  assert.ok(handler.includes("/operation-batch/create"));
+  assert.ok(handler.includes('ensureOperationBatchLocalHelper("operationBatchCreate")'));
+  assert.ok(handler.includes('fetchFanweiHelper(localHelper.path'));
+  assert.ok(handler.includes("preparationId: prepared.preparationId"));
+  assert.ok(handler.includes("setOperationBatchActionState(pendingMessage)"));
   assert.ok(handler.includes("operationBatchCreateBtn.disabled = true"));
   assert.ok(handler.includes("try {"));
   assert.ok(handler.includes("finally"));
   assert.ok(handler.includes("updateOperationBatchActions(taskViewState.currentProject)"));
+  assert.ok(html.includes("setOperationBatchActionState(message, true)"));
+  assert.ok(html.includes('id="operationBatchSyncBtn"'));
+  assert.ok(html.includes("/operation-batch/reconcile"));
+  assert.ok(html.includes('id="operationBatchSyncBtn" type="button">添加日程</button>'));
+  assert.ok(html.includes('operationBatchSyncBtn.textContent = "添加日程"'));
+  assert.ok(handler.includes("正在按批次代码定位，并核对批次代码和批次名称"));
+  assert.ok(handler.includes("批次日程已添加，发布状态和批次信息已同步"));
+  assert.ok(html.includes("批次已发布；日程仍待添加"));
+  assert.ok(html.includes('id="operationBatchHelperUpdateBtn"'));
+  assert.ok(html.includes("helper_update_required"));
+  assert.ok(html.includes("operationBatchCreate: 19"));
+  assert.ok(html.includes("operationBatchReconcile: 16"));
+  assert.ok(html.includes("operationBatchUpdate: 16"));
+  assert.ok(html.includes("Number(health.helperVersion || 0) < minimumVersion"));
+  assert.ok(html.includes("health.capabilities?.selfUpdate === true"));
+  assert.ok(html.includes("/api/fanwei/helper-update-manifest"));
+  assert.ok(html.includes('fetchFanweiHelper("/update"'));
+  assert.ok(html.includes("waitForUpdatedFanweiHelper"));
+  assert.ok(html.includes("本机助手已更新完成"));
+  assert.ok(html.includes("本机助手已是最新版本"));
+  assert.ok(html.includes("operation_batch_playwright_missing"));
+  assert.ok(html.includes("downloadFanweiHelperInstaller"));
+});
+
+test("automatic helper updates are opt-in by helper capability so legacy v8 stays untouched", () => {
+  const updater = sourceBetween(
+    "      async function maybeAutoUpdateFanweiHelper(health, { onStatus } = {}) {",
+    "\n      async function updateFanweiLocalHelper()",
+  );
+  const helperGate = sourceBetween(
+    "      async function ensureScoreStampLocalHelper(requiredCapability = \"\", { onUpdateStatus } = {}) {",
+    "\n      async function submitScoreStampApplicationResult",
+  );
+  assert.ok(updater.includes("health?.capabilities?.selfUpdate !== true) return health"));
+  assert.ok(updater.includes("/api/fanwei/helper-update-manifest"));
+  assert.ok(updater.includes('fetchFanweiHelper("/update"'));
+  assert.ok(helperGate.includes("health.capabilities?.selfUpdate === true"));
+  assert.ok(helperGate.includes("currentVersionUsable"));
+  assert.ok(helperGate.includes("onUpdateStatus"));
+  assert.ok(html.includes('confirmText: isContentSync ? "继续同步运控" : "继续添加日程"'));
+});
+
+test("Fanwei read stays available without a forced helper update and exposes stuck-update recovery", () => {
+  const statusLoader = sourceBetween(
+    "      async function loadFanweiAutoReadStatus() {",
+    "\n      async function createFanweiRequirementImport()",
+  );
+  const reader = sourceBetween(
+    "      async function copyFanweiReaderScript() {",
+    "\n      async function loadFanweiAutoReadStatus()",
+  );
+  assert.ok(statusLoader.includes("health.capabilities?.fanweiRead !== true && health.capabilities?.selfUpdate === true"));
+  assert.ok(statusLoader.includes("当前助手不支持泛微读取"));
+  assert.ok(statusLoader.includes('error.code === "helper_update_in_progress"'));
+  assert.ok(statusLoader.includes("showFanweiHelperUpdateRecovery()"));
+  assert.ok(reader.includes('error.code === "helper_update_in_progress"'));
+  assert.ok(reader.includes("showFanweiHelperUpdateRecovery()"));
+  assert.ok(html.includes("请先重启电脑"));
+  assert.ok(html.includes("fanweiInstallHelperBtn.hidden = false"));
+});
+
+test("manual helper update reports both completed and already-current outcomes", () => {
+  const updater = sourceBetween(
+    "      async function maybeAutoUpdateFanweiHelper(health, { onStatus } = {}) {",
+    "\n      async function updateFanweiLocalHelper()",
+  );
+
+  assert.ok(updater.includes("本机助手已更新完成"));
+  assert.ok(updater.includes("本机助手已是最新版本"));
+  assert.ok(updater.includes("waitForUpdatedFanweiHelper"));
+  assert.ok(updater.includes("可以重新添加日程"));
+  assert.ok(html.includes('helperUpdateStatus: "updated"'));
+  assert.ok(html.includes('title: "本机助手更新完成"'));
+});
+
+test("operation batch exposes a confirmation-gated recovery action after an uncertain create", () => {
+  const handler = sourceBetween(
+    "      async function confirmOperationBatchNotCreated() {",
+    "      async function createProjectOperationBatch() {",
+  );
+  assert.ok(html.includes('id="operationBatchRetryBtn"'));
+  assert.ok(handler.includes("await showConfirmDialog"));
+  assert.ok(handler.includes("confirmNoExternalBatch: true"));
+  assert.ok(handler.includes("/operation-batch/retry"));
+  assert.ok(html.includes("operationBatchRetryBtn.hidden = Boolean(code) || !blocked"));
 });
 
 test("candidate page loads and preselects task-scoped sessions", () => {
@@ -1044,6 +1242,12 @@ test("candidate import keeps the right preview rail visible while scrolling", ()
   assert.match(html, /\.candidate-panel\s*\{[^}]*overflow:\s*visible/s);
   assert.match(html, /\.candidate-right\s*\{[^}]*position:\s*sticky[^}]*top:\s*18px[^}]*max-height:\s*calc\(100vh - 36px\)[^}]*overflow-y:\s*auto/s);
   assert.match(html, /@media\s*\(max-width:\s*1120px\)\s*\{[\s\S]*?\.candidate-right\s*\{[^}]*position:\s*static[^}]*max-height:\s*none[^}]*overflow-y:\s*visible/s);
+});
+
+test("candidate import keeps long session names inside the left rail", () => {
+  assert.match(html, /\.candidate-session-card\s+\.candidate-card-body\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
+  assert.match(html, /\.candidate-session-card\s+\.candidate-card-body\s*>\s*\*,\s*[\r\n\s]*\.candidate-session-grid\s*>\s*\*\s*\{[^}]*min-width:\s*0/s);
+  assert.match(html, /\.mapping-card select,\s*[\r\n\s]*\.custom-field-name,\s*[\r\n\s]*\.session-select\s*\{[^}]*max-width:\s*100%[^}]*min-width:\s*0[^}]*box-sizing:\s*border-box/s);
 });
 
 test("candidate import title uses a page topbar outside the content panel", () => {
@@ -1210,7 +1414,12 @@ test("local login page and logout controls are present", () => {
   assert.ok(html.includes('id="authLoginEmailInput"'));
   assert.ok(html.includes('id="authLoginPasswordInput"'));
   assert.ok(html.includes('id="logoutBtn"'));
-  assert.ok(html.includes("请通过服务网址打开"));
+  assert.ok(html.includes("本机请使用"));
+  assert.ok(html.includes("http://127.0.0.1:8765/login"));
+  assert.ok(html.includes("http://172.16.13.214:8765/login"));
+  assert.ok(html.includes('id="loginForm" method="post"'));
+  assert.ok(html.includes('id="authLoginEmailInput" name="email"'));
+  assert.ok(html.includes('id="authLoginPasswordInput" name="password"'));
   assert.ok(html.includes("AuthController"));
 });
 
@@ -1390,8 +1599,12 @@ test("auto config renders operations dashboard structure without changing contro
   assert.ok(html.includes("easyExam:autoWorkbenchSplit:v3"));
   assert.ok(html.includes("installWorkbenchResizeControls"));
   assert.ok(html.includes('id="loginUsernameInput"'));
+  assert.ok(html.includes('id="tenantIdInput" type="text"'));
+  assert.ok(html.indexOf('id="tenantIdInput"') < html.indexOf('id="loginUsernameInput"'));
   assert.ok(html.includes('id="loginPasswordInput"'));
   assert.ok(html.includes('id="tenantApiKeyInput"'));
+  assert.ok(html.includes("tenantId: tenantIdInput.value.trim()"));
+  assert.ok(html.includes('tenantIdInput.value = mode === "edit" ? credentials.tenantId || "" : ""'));
   assert.ok(html.includes('id="saveLoginBtn"'));
   assert.ok(html.includes('id="dropZone"'));
   assert.ok(html.includes('id="progressNumber"'));
@@ -1524,6 +1737,10 @@ test("project management supports deleting projects", () => {
   assert.ok(html.includes('id="projectSearchBtn" type="button">查询</button>'));
   assert.ok(html.includes('id="projectSearchInput" aria-label="搜索项目"'));
   assert.ok(html.includes('id="projectStatusFilter" aria-label="项目状态"'));
+  assert.ok(html.includes('"": visibleTasks.filter((task) => !task.hiddenAt).length'));
+  assert.ok(html.includes('archived: visibleTasks.filter((task) => task.hiddenAt).length'));
+  assert.ok(html.includes('option.textContent = statusCountText(label, projectStatusCounts[option.value] || 0)'));
+  assert.ok(html.includes('projectStatusFilter.addEventListener("change", renderProjectList)'));
   assert.equal(html.includes('<span class="sr-only">搜索项目</span>'), false);
   assert.equal(html.includes('<span class="sr-only">项目状态</span>'), false);
   assert.ok(html.includes('id="projectStats" hidden'));
@@ -1554,7 +1771,7 @@ test("site errors use the centered application dialog", () => {
   assert.ok(html.includes('id="siteErrorConfirmBtn"'));
   assert.match(html, /\.account-editor-modal\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*0;[^}]*height:\s*fit-content;[^}]*margin:\s*auto;/s);
   assert.match(html, /\.session-time-picker\.account-editor-modal\s*\{[\s\S]*inset:\s*auto;[\s\S]*margin:\s*0;/s);
-  assert.ok(html.includes("function showErrorDialog(message)"));
+  assert.ok(html.includes("function showErrorDialog(message, options = {})"));
   assert.ok(html.includes("siteErrorModal.showModal()"));
   assert.ok(html.includes('siteErrorModal.addEventListener("cancel"'));
   assert.ok(html.includes('if (action === "edit") return showErrorDialog("项目编辑将在独立表单中接入，不会打开自动配置组件。");'));
@@ -1564,6 +1781,17 @@ test("site errors use the centered application dialog", () => {
   assert.ok(html.includes("showErrorDialog(error.message || String(error))"));
   assert.equal(html.includes("alert(error.message || String(error))"), false);
   assert.equal(html.includes("alert(error.message);"), false);
+});
+
+test("site confirmations use the centered application dialog instead of browser prompts", () => {
+  assert.ok(html.includes('class="account-editor-modal account-delete-modal" id="siteConfirmModal"'));
+  assert.ok(html.includes('id="siteConfirmCancelBtn"'));
+  assert.ok(html.includes('id="siteConfirmBtn"'));
+  assert.ok(html.includes("function showConfirmDialog(message, options = {})"));
+  assert.ok(html.includes("siteConfirmModal.showModal()"));
+  assert.ok(html.includes('siteConfirmModal.addEventListener("cancel"'));
+  assert.ok(html.includes('showConfirmDialog(data.message || "当前场次已存在班级'));
+  assert.equal(/\b(?:window\.)?confirm\s*\(/.test(html), false);
 });
 
 test("project management archives cards and exposes an archived filter", () => {
@@ -1577,19 +1805,18 @@ test("project management archives cards and exposes an archived filter", () => {
   assert.ok(html.includes("Boolean(task.hiddenAt)"));
 });
 
-test("project management renders local cards before detail synchronization", () => {
-  assert.ok(html.includes('import { createStagedListLoader } from "/web/staged_list_loader.mjs"'));
+test("project management loads cards without per-project detail synchronization", () => {
   const source = sourceBetween(
-    "const runProjectListLoad = createStagedListLoader({",
+    "async function runProjectListLoad()",
     "async function deleteProjectCard",
   );
   assert.ok(source.includes("Promise.all(["));
   assert.ok(source.includes("fetchJson(`/api/tasks?includeArchived=1&_=${Date.now()}`)"));
   assert.ok(source.includes("fetchJson(`/api/exams?_=${Date.now()}`)"));
-  assert.ok(source.includes("applyInitial:"));
-  assert.ok(source.includes("renderProjectList();"));
-  assert.ok(source.includes("loadDetail:"));
-  assert.ok(source.includes("applyDetails:"));
+  assert.ok(source.includes("projectTasksWithSessions(taskData.tasks || [], sessions)"));
+  assert.ok(source.includes("setProjectListRefreshState();"));
+  assert.equal(source.includes("fetchJson(`/api/tasks/${encodeURIComponent"), false);
+  assert.equal(source.includes("createStagedListLoader"), false);
 });
 
 test("project management renders projects as soon as auto config creates an exam", () => {
@@ -1607,7 +1834,7 @@ test("project management renders projects as soon as auto config creates an exam
 
   const renderFunction = sourceBetween(
     "function renderProjectList()",
-    "async function loadProjects()",
+    "async function loadProjects(",
   );
   assert.ok(renderFunction.includes("const visibleTasks = taskViewState.tasks.filter(isAutoConfiguredProject);"));
   assert.ok(renderFunction.includes("const projects = visibleTasks.filter((task) => {"));
@@ -1616,8 +1843,50 @@ test("project management renders projects as soon as auto config creates an exam
   assert.equal(renderFunction.includes("const projects = taskViewState.tasks.filter((task) => {"), false);
 });
 
+test("project cards use the exam name as their title", () => {
+  const projectCardTitle = compileInlineFunction(
+    "function projectCardTitle(task = {}) {",
+    "\n      function hasConfiguredExam",
+  );
+
+  assert.equal(projectCardTitle({ projectName: "项目名", config: { examName: "考试名" } }), "考试名");
+  assert.equal(projectCardTitle({ projectName: "项目名", examName: "摘要考试名" }), "摘要考试名");
+  assert.equal(projectCardTitle({
+    projectName: "项目名",
+    config: { examRequirement: { fields: { "考试名称": "需求单考试名" } } },
+  }), "需求单考试名");
+  assert.equal(projectCardTitle({
+    projectName: "项目名",
+    config: {
+      examRequirements: [],
+      examRequirement: { fields: { "考试名称": "旧版需求单考试名" } },
+    },
+  }), "旧版需求单考试名");
+  assert.equal(projectCardTitle({
+    projectName: "项目名",
+    sessions: [{ sessionType: "formal", name: "正式场次考试名" }],
+  }), "正式场次考试名");
+  assert.equal(projectCardTitle({ projectName: "历史项目名" }), "历史项目名");
+
+  const renderFunction = sourceBetween(
+    "function renderProjectList()",
+    "async function loadProjects(",
+  );
+  assert.ok(renderFunction.includes("safeText(projectCardTitle(task))"));
+});
+
+test("project list enters with a fresh load while retaining existing cards during refresh", () => {
+  const pageSource = fs.readFileSync(path.join(rootDir, "web/pages/ProjectListPage.mjs"), "utf8");
+  assert.ok(pageSource.includes("loadProjects({ forceRefresh: true })"));
+  assert.ok(html.includes('id="projectListRefreshState" aria-live="polite" hidden'));
+  assert.ok(html.includes("function setProjectListRefreshState(message = \"\")"));
+  const source = sourceBetween("async function loadProjects(", "let projectDeleteConfirmTrigger");
+  assert.ok(source.includes("setProjectListRefreshState();"));
+  assert.equal(source.includes("正在刷新项目"), false);
+});
+
 test("project cards sort by formal then trial exam start time descending", () => {
-  const source = sourceBetween("function projectExamStartTimestamp(task)", "const runProjectListLoad = createStagedListLoader({");
+  const source = sourceBetween("function projectExamStartTimestamp(task)", "async function runProjectListLoad()");
   assert.ok(source.includes('session.sessionType === "formal"'));
   assert.ok(source.includes('session.sessionType === "trial"'));
   assert.ok(source.includes("Number.NEGATIVE_INFINITY"));
@@ -1625,19 +1894,40 @@ test("project cards sort by formal then trial exam start time descending", () =>
   assert.ok(source.includes('Date.parse(right.updatedAt || "")'));
 });
 
-test("project card actions use a bounded two-column grid", () => {
+test("project card actions only expose archive and delete in a bounded grid", () => {
   assert.match(html, /\.project-card\s*\{[^}]*overflow:\s*hidden[^}]*box-sizing:\s*border-box/s);
-  assert.match(html, /\.card-actions\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*max-width:\s*100%/s);
+  assert.match(html, /\.card-actions\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*max-height:\s*0[^}]*visibility:\s*hidden[^}]*pointer-events:\s*none/s);
+  assert.match(html, /\.project-card\.is-actions-visible \.card-actions\s*\{[^}]*max-height:\s*140px[^}]*visibility:\s*visible[^}]*pointer-events:\s*auto/s);
   assert.match(html, /\.card-actions\s+button\s*\{[^}]*width:\s*100%[^}]*min-width:\s*0[^}]*text-overflow:\s*ellipsis/s);
-  assert.ok(html.includes('class="card-actions"'));
+  const renderFunction = sourceBetween("function renderProjectList()", "async function runProjectListLoad()");
+  assert.ok(renderFunction.includes('data-action="toggle-actions"'));
+  assert.ok(renderFunction.includes('aria-expanded="false"'));
+  assert.ok(renderFunction.includes('aria-label="展开项目操作"'));
+  assert.ok(renderFunction.includes('data-action="archive"'));
+  assert.ok(renderFunction.includes('data-action="delete"'));
+  assert.equal(renderFunction.includes('data-action="view"'), false);
+  assert.equal(renderFunction.includes('data-action="edit"'), false);
+  assert.equal(renderFunction.includes('data-action="auto"'), false);
 });
 
-test("project card actions reveal smoothly on hover focus or card click", () => {
-  assert.match(html, /\.card-actions\s*\{[^}]*max-height:\s*0[^}]*opacity:\s*0[^}]*visibility:\s*hidden[^}]*transition:\s*max-height 200ms ease-out/s);
-  assert.match(html, /\.project-card:hover \.card-actions,[\s\S]*\.project-card\.is-actions-visible \.card-actions\s*\{[^}]*max-height:\s*140px[^}]*opacity:\s*1[^}]*visibility:\s*visible/s);
-  assert.ok(html.includes('data-task-id="${safeText(task.taskId)}" tabindex="0"'));
-  assert.ok(html.includes('card.classList.add("is-actions-visible")'));
-  assert.ok(html.includes('projectGrid.addEventListener("keydown"'));
+test("project cards open details directly by click or keyboard", () => {
+  assert.ok(html.includes('data-task-id="${safeText(task.taskId)}" role="link" tabindex="0"'));
+  const clickHandler = sourceBetween(
+    'projectGrid.addEventListener("click", (event) => {',
+    'projectGrid.addEventListener("keydown", (event) => {',
+  );
+  assert.ok(clickHandler.includes('router.navigate(`/projects/${encodeURIComponent(card.dataset.taskId)}`)'));
+  assert.ok(clickHandler.includes('if (action === "toggle-actions")'));
+  assert.ok(clickHandler.includes('card.classList.add("is-actions-visible")'));
+  assert.ok(clickHandler.includes('actionButton.setAttribute("aria-expanded", "true")'));
+  assert.ok(clickHandler.includes('if (action === "archive")'));
+  assert.ok(clickHandler.includes('if (action === "delete")'));
+  const keyboardHandler = sourceBetween(
+    'projectGrid.addEventListener("keydown", (event) => {',
+    'requirementsList.addEventListener("click", (event) => {',
+  );
+  assert.ok(keyboardHandler.includes('event.key !== "Enter" && event.key !== " "'));
+  assert.ok(keyboardHandler.includes('router.navigate(`/projects/${encodeURIComponent(card.dataset.taskId)}`)'));
 });
 
 test("exam list renders session rows before detail synchronization", () => {
@@ -1653,6 +1943,35 @@ test("exam list renders session rows before detail synchronization", () => {
   assert.ok(source.includes("applyDetails:"));
 });
 
+test("list pages reuse visible data while refreshing", () => {
+  assert.ok(html.includes("const LIST_CACHE_TTL_MS = 30 * 1000;"));
+  assert.ok(html.includes("function hasFreshListCache(cache)"));
+  assert.ok(html.includes("function runCachedListLoad(cache, loader)"));
+  assert.ok(html.includes("async function loadProjects({ forceRefresh = false } = {})"));
+  assert.ok(html.includes("async function loadExams({ forceRefresh = false } = {})"));
+  assert.ok(html.includes("if (!forceRefresh && taskViewState.tasks.length) {"));
+  assert.ok(html.includes("if (!forceRefresh && taskViewState.sessions.length) {"));
+  assert.ok(html.includes("return await runCachedListLoad(cache, runProjectListLoad);"));
+  assert.ok(html.includes("return runCachedListLoad(cache, runExamListLoad);"));
+});
+
+test("detail pages reuse task data before background refresh", () => {
+  assert.ok(html.includes("const TASK_DETAIL_CACHE_TTL_MS = 30 * 1000;"));
+  assert.ok(html.includes("function rememberTaskDetail(task)"));
+  assert.ok(html.includes("function getTaskDetailCache(taskId)"));
+  assert.ok(html.includes("function loadTaskDetail(taskId, { forceRefresh = false } = {})"));
+  assert.ok(html.includes("async function openTaskDetail(taskId, { forceRefresh = false } = {})"));
+  assert.ok(html.includes("if (cached && !forceRefresh)"));
+  assert.ok(html.includes("loadTaskDetail(taskId, { forceRefresh })"));
+  const projectDetailLoader = sourceBetween(
+    "      async function loadProjectDetail(projectId) {",
+    "      function requirementNextAction",
+  );
+  assert.ok(projectDetailLoader.includes("const cached = typeof getTaskDetailCache === \"function\" ? getTaskDetailCache(projectId) : null;"));
+  assert.ok(projectDetailLoader.includes("if (cached.fresh)"));
+  assert.ok(projectDetailLoader.includes("void loadPanels(cached.task);"));
+});
+
 test("exam task overview starts collapsed and removes redundant top actions", () => {
   assert.equal(html.includes('id="backToExamsBtn"'), false);
   assert.equal(html.includes('id="refreshTaskBtn"'), false);
@@ -1660,8 +1979,11 @@ test("exam task overview starts collapsed and removes redundant top actions", ()
   assert.ok(html.includes('id="taskOverviewTitle"'));
   assert.ok(html.includes('id="taskOverviewProgress"'));
   assert.ok(html.includes('id="taskOverviewBody" style="max-height: 0px; opacity: 0" inert'));
+  assert.ok(html.includes('<div class="panel exam-progress-panel"><div class="panel-head"><h2 class="panel-title">进度步骤</h2></div>'));
+  assert.equal(html.includes("各步骤独立更新，按实际执行结果展示。"), false);
   assert.ok(html.includes("批次名称"));
-  assert.match(html, /<textarea class="task-overview-input" data-score-stamp-batch-name-input rows="1"[^>]*>\$\{safeText\(task\.config\?\.scoreStampBatchName \|\| ""\)\}<\/textarea>/);
+  assert.ok(html.includes("const scoreStampBatchName = String(task.config?.scoreStampBatchName || operationBatchNameFromTask(task) || \"\").trim();"));
+  assert.match(html, /<textarea class="task-overview-input" data-score-stamp-batch-name-input rows="1"[^>]*>\$\{safeText\(scoreStampBatchName\)\}<\/textarea>/);
   assert.match(html, /data-score-stamp-batch-name-save="\$\{safeText\(task\.taskId\)\}" type="button" hidden>保存<\/button>/);
   assert.ok(html.includes("/score-stamp-batch-name"));
   assert.ok(html.includes("async function saveScoreStampBatchName(taskId, batchName)"));
@@ -1677,7 +1999,7 @@ test("exam task overview starts collapsed and removes redundant top actions", ()
   assert.ok(html.includes("if (saveButton && !saveButton.disabled) saveButton.hidden = true;"));
   assert.ok(html.includes("function setTaskOverviewExpanded(expanded)"));
   assert.ok(html.includes("transition: max-height 200ms ease-out, opacity 200ms ease-out"));
-  assert.match(html, /#taskDetailView \.task-detail-overview-title\s*\{[^}]*font-size:\s*inherit/);
+  assert.match(html, /#taskDetailView \.task-detail-overview-title,\s*#taskDetailView \.exam-progress-panel \.panel-title\s*\{[^}]*font-size:\s*16px;[^}]*line-height:\s*1\.3;[^}]*font-weight:\s*800/);
   assert.equal(html.includes('<div class="task-overview-label">任务编号</div><div class="task-overview-value">${safeText(task.taskId)}</div>'), false);
   assert.equal(html.includes("#taskOverview .task-overview-grid { grid-template-columns: repeat(6"), false);
   assert.match(html, /#taskOverview \.task-overview-grid\s*\{[^}]*grid-template-columns:\s*max-content var\(--task-batch-width, 320px\) max-content max-content max-content;[^}]*align-items:\s*start;[^}]*justify-content:\s*space-between;[^}]*column-gap:\s*16px/);
@@ -1701,7 +2023,39 @@ test("exam task detail keeps every formal session and only enabled trial session
   assert.ok(renderTaskDetail.includes('item.sessionType === sessionType && Number(item.requirementIndex || 0) === requirementIndex'));
   assert.ok(renderTaskDetail.includes('data-requirement-index="${requirementIndex}"'));
   assert.ok(renderTaskDetail.includes('`需求单 ${requirementIndex + 1} · ${label}`'));
+  assert.equal(renderTaskDetail.includes('data-not-started-candidates-download'), false);
   assert.equal(renderTaskDetail.includes("const sessionByType = new Map"), false);
+});
+
+test("trial candidate export reads the live session and handles download errors", () => {
+  const displaySteps = sourceBetween(
+    "      function buildTaskDisplaySteps(task) {",
+    "      function buildSessionChangeRecordStep",
+  );
+  assert.ok(displaySteps.includes("buildTrialNotStartedCandidateDownloadAction(task)"));
+  assert.ok(displaySteps.includes('stepMap.get("trial_session_create")'));
+  assert.ok(displaySteps.includes("triggerActionHtml"));
+  assert.ok(html.includes("async function downloadNotStartedCandidates(button)"));
+  assert.ok(html.includes("function buildTrialNotStartedCandidateDownloadAction(task)"));
+  assert.ok(html.includes("/not-started-candidates/download"));
+  assert.ok(html.includes("downloadFileNameFromDisposition(response.headers.get(\"Content-Disposition\"))"));
+  assert.ok(html.includes('const notStartedCandidatesDownload = event.target.closest("[data-not-started-candidates-download]")'));
+  assert.ok(html.includes("taskStepGrid.addEventListener"));
+  assert.ok(html.includes("未开考考生名单下载失败"));
+});
+
+test("exam list and detail display the exam name instead of the project name", () => {
+  const taskRenderer = sourceBetween(
+    "      function renderTaskDetail(task, options = {}) {",
+    "\n      async function downloadTaskMonitorAccounts",
+  );
+  const examListRenderer = sourceBetween(
+    "      function renderExamList() {",
+    "\n      const runExamListLoad = createStagedListLoader({",
+  );
+  assert.ok(taskRenderer.includes("taskOverviewTitle.textContent = projectCardTitle(task)"));
+  assert.ok(examListRenderer.includes("safeText(projectCardTitle(task))"));
+  assert.equal(examListRenderer.includes("safeText(task.projectName)"), false);
 });
 
 test("exam progress cards show independent status rows for every requirement", () => {
@@ -1735,7 +2089,7 @@ test("project detail overview starts collapsed like exam detail", () => {
     "      function renderProjectDetail(task) {",
     "\n      async function loadProjectDetail(projectId) {",
   );
-  assert.ok(renderProjectDetail.includes('projectOverviewTitle.textContent = task.projectName || "未命名项目";'));
+  assert.ok(renderProjectDetail.includes('projectOverviewTitle.textContent = projectCardTitle(task) || "未命名项目";'));
   assert.ok(renderProjectDetail.includes('task-overview-label">泛微流水号'));
   assert.ok(renderProjectDetail.includes('${safeText(card.sourceKey || "未记录")}'));
   assert.equal(renderProjectDetail.includes('task-overview-label">项目状态'), false);
@@ -1746,6 +2100,128 @@ test("project detail overview starts collapsed like exam detail", () => {
     "\n      function requirementNextAction(item = {}) {",
   );
   assert.ok(loadProjectDetail.includes("setProjectOverviewExpanded(false);"));
+});
+
+test("operation batch update button appears only for confirmed managed differences", () => {
+  assert.match(
+    html,
+    /id="operationBatchUpdateManagedBtn" type="button" hidden>更新批次<\/button>/,
+  );
+  const workflowRenderer = sourceBetween(
+    "      function renderProjectWorkflow(task = {}, workflow = {}, batchDraft = {}) {",
+    "\n      function projectRequirementFormalTime(requirement = {}) {",
+  );
+  assert.ok(workflowRenderer.includes("workflow.steps?.batch?.baselineRequired"));
+  assert.ok(workflowRenderer.includes("workflow.steps?.batch?.managedChanges"));
+
+  const updateActions = sourceBetween(
+    "      function updateOperationBatchActions(task = taskViewState.currentProject) {",
+    "\n      function setOperationBatchActionState(message = \"\", isError = false) {",
+  );
+  assert.ok(updateActions.includes("!taskViewState.currentOperationBatchBaselineRequired"));
+  assert.ok(updateActions.includes("taskViewState.currentOperationBatchManagedChanges.length"));
+  assert.ok(updateActions.includes("operationBatchUpdateManagedBtn.hidden = !hasManagedChanges;"));
+  assert.ok(updateActions.includes('operationBatchUpdateManagedBtn.textContent = updateStatus === "updating" ? "正在更新" : "更新批次";'));
+  assert.equal(updateActions.includes('"update_failed"'), false);
+
+  const taskViewState = {
+    currentProject: null,
+    currentOperationBatchUpdateStatus: "success",
+    currentOperationBatchBaselineRequired: false,
+    currentOperationBatchManagedChanges: [],
+  };
+  const operationBatchCreateBtn = {};
+  const operationBatchUpdateManagedBtn = {};
+  const operationBatchSyncBtn = {};
+  const operationBatchRetryBtn = {};
+  const operationBatchRecordBtn = {};
+  const updateOperationBatchActions = compileInlineFunction(
+    "      function updateOperationBatchActions(task = taskViewState.currentProject) {",
+    "\n      function setOperationBatchActionState(message = \"\", isError = false) {",
+    {
+      taskViewState,
+      operationBatchCreateBtn,
+      operationBatchUpdateManagedBtn,
+      operationBatchSyncBtn,
+      operationBatchRetryBtn,
+      operationBatchRecordBtn,
+    },
+  );
+  const createdTask = {
+    config: {
+      operationBatchCode: "EZT261018",
+      operationBatch: { code: "EZT261018", status: "success" },
+    },
+  };
+
+  updateOperationBatchActions(createdTask);
+  assert.equal(operationBatchUpdateManagedBtn.hidden, true);
+
+  taskViewState.currentOperationBatchUpdateStatus = "update_available";
+  taskViewState.currentOperationBatchManagedChanges = [{ path: "schedules[0].name" }];
+  updateOperationBatchActions(createdTask);
+  assert.equal(operationBatchUpdateManagedBtn.hidden, false);
+  assert.equal(operationBatchUpdateManagedBtn.textContent, "更新批次");
+
+  taskViewState.currentOperationBatchBaselineRequired = true;
+  updateOperationBatchActions(createdTask);
+  assert.equal(operationBatchUpdateManagedBtn.hidden, true);
+});
+
+test("operation batch draft follows the operation console two-column field order", () => {
+  const labelsSource = sourceBetween(
+    "      const operationBatchFieldLabels = [",
+    "\n\n      function operationBatchSourceLabel(source) {",
+  ).trim();
+  const operationBatchFieldLabels = Function(
+    `${labelsSource}; return operationBatchFieldLabels;`,
+  )();
+  assert.deepEqual(operationBatchFieldLabels.map(([key]) => key), [
+    "operationTaskSerial",
+    "projectCode",
+    "projectName",
+    "businessDirection",
+    "businessDepartment",
+    "businessOwner",
+    "batchName",
+    "projectDepartment",
+    "examDateRange",
+    "estimatedTotalSubjectCount",
+    "estimatedMaxSubjectCount",
+    "estimatedCityCount",
+    "systemType",
+    "stationUsage",
+    "arrangementService",
+    "onlineSettlementArrangementSource",
+    "billingBasis",
+    "serviceExam",
+    "servicePersonnel",
+    "contentParticipation",
+    "contentService",
+  ]);
+  assert.equal(operationBatchFieldLabels.some(([key]) => key === "remark"), false);
+  assert.match(html, /\.operation-batch-param-list\s*\{[^}]*grid-template-columns:\s*repeat\(2,/s);
+  assert.match(html, /data-operation-param="operationTaskSerial"[^}]*\{[^}]*grid-column:\s*1\s*\/\s*-1/s);
+
+  const renderOperationBatchDraft = compileInlineFunction(
+    "      function renderOperationBatchDraft(draft = {}, hasCreatedBatch = false) {",
+    "\n\n      function updateOperationBatchActions(task = taskViewState.currentProject) {",
+    {
+      operationBatchFieldLabels,
+      safeText: (value) => String(value ?? ""),
+      operationBatchSourceLabel: () => "泛微",
+    },
+  );
+  const rendered = renderOperationBatchDraft({
+    fields: {
+      examStartDate: { value: "2026-08-06", source: "fanwei" },
+      examEndDate: { value: "2026-08-08", source: "fanwei" },
+    },
+  });
+  assert.ok(rendered.includes('class="operation-param-list operation-batch-param-list"'));
+  assert.ok(rendered.includes('data-operation-param="examDateRange"'));
+  assert.ok(rendered.includes("2026-08-06 ~ 2026-08-08"));
+  assert.equal(rendered.includes('data-operation-param="remark"'), false);
 });
 
 test("project auto configuration action lives in the upper requirement source card", () => {
@@ -1759,7 +2235,11 @@ test("project auto configuration action lives in the upper requirement source ca
   assert.ok(html.includes("<summary>需求变更</summary>"));
   assert.ok(html.includes("projectSourceRequirementChangeHistory"));
   assert.ok(html.includes("projectWorkflowSourceChangeNotice"));
-  assert.ok(html.includes('return "有变更请确认"'));
+  assert.ok(html.includes("workflow.steps?.[stepKey]?.changeNotice"));
+  assert.ok(html.includes('const statusLabel = status === "update_available" ? ""'));
+  assert.ok(html.includes('${statusLabel ? `<span class="tag'));
+  assert.ok(html.includes('<details id="projectWechatBindingPanel" class="project-detail-disclosure is-collapsed">\n            <summary>微信采集</summary>'));
+  assert.equal(html.includes("<summary>本项目微信群</summary>"), false);
   const changePanel = html.slice(
     html.indexOf('<details id="projectRequirementInlinePanel"'),
     html.indexOf('<details id="projectWechatBindingPanel"'),
@@ -1774,6 +2254,48 @@ test("project auto configuration action lives in the upper requirement source ca
   assert.equal(operationPanel.includes("运控任务流"), false);
   assert.ok(operationPanel.includes('id="operationBatchRefreshBtn" type="button" hidden'));
   assert.ok(html.includes('projectAutoConfigBtn.addEventListener("click"'));
+});
+
+test("project workflow warnings render only unresolved operation field differences", () => {
+  const notice = compileInlineFunction(
+    "      function projectWorkflowSourceChangeNotice(workflow = {}, stepKey = \"\") {",
+    "\n      function renderProjectSourceRequirementChangeLog",
+  );
+  const historicalOnly = {
+    steps: { batch: { changeNotice: "" } },
+    projectSourceChangeHistory: [{ source: "fanwei" }],
+  };
+  assert.equal(notice(historicalOnly, "batch"), "");
+  assert.equal(notice({ steps: { batch: { changeNotice: "有变更请确认" } } }, "batch"), "有变更请确认");
+});
+
+test("project detail sections default to collapsed disclosures", () => {
+  for (const [id, title] of [
+    ["projectRequirementInlinePanel", "需求变更"],
+    ["projectWechatBindingPanel", "微信采集"],
+    ["projectSessionsPanel", "考试任务与场次"],
+    ["projectFilesPanel", "相关文件"],
+    ["projectLogsPanel", "项目日志"],
+  ]) {
+    assert.match(html, new RegExp(`<details[^>]*id="${id}"[^>]*>\\s*<summary>[\\s\\S]*?${title}[\\s\\S]*?</summary>`));
+    assert.equal(new RegExp(`<details[^>]*id="${id}"[^>]*\\sopen(?:\\s|>)`).test(html), false);
+  }
+  assert.ok(html.includes('const projectDetailDisclosures = Array.from(document.querySelectorAll("#projectDetailView > .project-detail-disclosure"))'));
+  assert.ok(html.includes("projectDetailDisclosures.forEach((panel) => setProjectDetailDisclosureExpanded(panel, false))"));
+});
+
+test("project session card sits directly above operation collaboration", () => {
+  const projectDetailMarkup = sourceBetween(
+    '        <section class="task-view" id="projectDetailView" hidden>',
+    '\n        <section class="task-view" id="examListView" hidden>',
+  );
+  const sourceIndex = projectDetailMarkup.indexOf('id="projectSourceStrip"');
+  const sessionsIndex = projectDetailMarkup.indexOf('id="projectSessionsPanel"');
+  const operationIndex = projectDetailMarkup.indexOf('id="projectOperationBatchPanel"');
+
+  assert.ok(sourceIndex >= 0 && sessionsIndex >= 0 && operationIndex >= 0);
+  assert.ok(sourceIndex < sessionsIndex);
+  assert.ok(sessionsIndex < operationIndex);
 });
 
 test("exam detail progress cards include paper binding and grouped candidate flows", () => {
@@ -1812,7 +2334,17 @@ test("exam detail progress cards include paper binding and grouped candidate flo
   assert.ok(html.includes("paperFormBind"));
   assert.ok(html.includes('stepName: "试卷绑定"'));
   assert.ok(html.includes("const stepLogs = sortTaskLogsNewestFirst(["));
-  assert.ok(html.includes("/steps/paper_form_bind/retry"));
+  assert.ok(html.includes("function concisePaperBindLogMessage(message, fallback = \"\")"));
+  assert.ok(html.includes("message: concisePaperBindLogMessage(log.message, paperState.errorMessage)"));
+  assert.ok(html.includes("试卷绑定|试考默认卷"));
+  assert.ok(html.includes("\\b(GET|POST|PUT)\\s+\\/"));
+  assert.ok(html.includes("responseBody|requestBody|payload|HTTP Method|httpStatus"));
+  assert.ok(html.includes('summaries.push("[试考默认卷] 开始绑定默认试考卷")'));
+  assert.ok(html.includes("legacyTrialCourseMatch"));
+  assert.ok(html.includes('const message = step.stepKey === "trial_paper_bind"'));
+  assert.ok(html.includes("? concisePaperBindLogMessage(log.message, step.errorMessage)"));
+  assert.ok(html.includes('message === "试卷绑定状态已更新"'));
+  assert.ok(html.includes('/steps/${encodeURIComponent(retry.dataset.retryStep)}/retry'));
   assert.ok(html.includes('<div class="task-step-times">开始：${formatTaskTime(step.startedAt)}<br>完成：${formatTaskTime(step.completedAt)}</div>'));
   assert.equal(html.includes("耗时：${formatDuration(step.durationMs)}"), false);
 });
@@ -1835,11 +2367,28 @@ test("paper binding controls and state are separated by requirement", () => {
 });
 
 test("formal course binding feedback lists courses from every requirement", () => {
+  const buildCourseBindFeedback = compileInlineFunction(
+    "      function buildCourseBindFeedback(courseStep = {}, task = {}) {",
+    "\n      function shouldShowRetryStepAction(step) {",
+    {
+      taskRequirementCount: () => 1,
+      taskRequirementConfigForView: (task) => task.config.examRequirements[0].config,
+      safeText: (value) => String(value ?? ""),
+      buildCourseCodeCopyButton: () => "",
+    },
+  );
+  const feedback = buildCourseBindFeedback(
+    { result: { courses: [{ name: "旧科目", code: "20260803-01-01" }] } },
+    { config: { examRequirements: [{ config: { courses: [{ name: "新科目", code: "20260803-01-01" }] } }] } },
+  );
+
   assert.ok(html.includes('buildCourseBindFeedback(stepMap.get("course_create"), task)'));
-  assert.ok(html.includes("Object.entries(courseStep?.requirementProgress || {})"));
-  assert.ok(html.includes("progress?.result?.courses"));
+  assert.ok(html.includes("taskRequirementConfigForView(task, requirementIndex)?.courses"));
+  assert.ok(html.includes("courseStep?.requirementProgress?.[String(requirementIndex)]?.result?.courses"));
   assert.ok(html.includes("requirementCourses.length ? requirementCourses : fallbackCourses"));
   assert.ok(html.includes('<span class="course-bind-label">需求单</span>${requirementIndex + 1}'));
+  assert.ok(feedback.includes("新科目"));
+  assert.equal(feedback.includes("旧科目"), false);
 });
 
 test("all step card supporting content stays collapsed until its card opens", () => {
@@ -1859,12 +2408,16 @@ test("configuration progress comes from required progress cards", () => {
   assert.ok(html.includes('["paper_bind_display", "试卷绑定"]'));
   assert.ok(html.includes("function taskConfigurationProgress(task)"));
   assert.ok(html.includes("buildTaskDisplaySteps(task).filter(isConfigurationProgressStep)"));
+  assert.ok(html.includes("if (!Array.isArray(task?.steps) || !task.steps.length) return clampProgress(task?.progress);"));
   assert.ok(html.includes("completedSteps / progressSteps.length"));
   assert.ok(html.includes("function taskConfigurationStageFromSteps(progressSteps"));
   assert.ok(html.includes('const failedStep = progressSteps.find((step) => step.status === "failed");'));
   assert.ok(html.includes("if (failedStep) return failedStep.stepName;"));
   assert.ok(html.includes('const currentStep = progressSteps.find((step) => step.status !== "success");'));
-  assert.ok(html.includes("const displayProgress = currentTaskProgress(task);"));
+  const projectListSource = sourceBetween("function renderProjectList()", "async function runProjectListLoad()");
+  assert.equal(projectListSource.includes("currentTaskProgress(task)"), false);
+  assert.equal(projectListSource.includes("当前进度"), false);
+  assert.equal(projectListSource.includes("mini-progress"), false);
   assert.ok(html.includes("const progressSteps = displaySteps.filter(isConfigurationProgressStep);"));
   assert.ok(html.includes("const displayProgress = taskConfigurationProgressFromSteps(progressSteps, task.progress);"));
   assert.ok(html.includes("currentTaskProgress(task)"));
@@ -1917,7 +2470,8 @@ test("exam detail shows project shared sheet before score processing with a manu
   assert.ok(html.includes("buildNotificationMessage"));
   assert.ok(html.includes("buildPsychologicalNotificationMessage"));
   assert.ok(html.includes("考生您好！"));
-  assert.ok(html.includes("心理测评网址:https://eztest.org/exam/"));
+  assert.ok(html.includes("https://eztest.cn/exam/session/${examPathCode}/"));
+  assert.ok(html.includes("https://eztest.org/exam/${examPathCode}/uniform/login/"));
   assert.ok(html.includes("/uniform/login/"));
   assert.ok(html.includes('examCode.replace(/^E(?=\\d+$)/i, "")'));
   assert.ok(html.includes("正式考试和试考时，"));
@@ -1927,7 +2481,7 @@ test("exam detail shows project shared sheet before score processing with a manu
   assert.ok(html.includes("const trialNotice = hasTrial"));
   assert.ok(html.includes("data-shared-sheet-fill"));
   assert.ok(html.includes("打开在线表"));
-  assert.ok(html.includes("https://docs.qq.com/sheet/DR3NiT296WmtpWXVM?tab=BB08J2"));
+  assert.ok(html.includes("https://docs.qq.com/sheet/DY1pQTURrc1BSSlND?tab=gd4707"));
   assert.match(html, /\.task-step-action,\s*\.sms-platform-link,\s*\.sms-candidate-download\s*\{[\s\S]*min-height:\s*28px;[\s\S]*background:\s*var\(--blue\);[\s\S]*color:\s*#fff;[\s\S]*padding:\s*5px 10px;[\s\S]*font-size:\s*12px;/);
   assert.match(html, /\.task-step-action:disabled,\s*\.sms-candidate-download:disabled\s*\{[\s\S]*color:\s*var\(--muted\);[\s\S]*background:\s*#f4f7fb;[\s\S]*opacity:\s*1;[\s\S]*cursor:\s*not-allowed;/);
   assert.match(html, /\.sms-copy-button\s*\{[\s\S]*width:\s*28px;[\s\S]*background:\s*transparent;[\s\S]*color:\s*var\(--blue\);[\s\S]*padding:\s*0;/);
@@ -1980,7 +2534,9 @@ test("exam detail shows project shared sheet before score processing with a manu
   assert.ok(smsBuilder.includes('<div class="sms-action-row">${buildSmsCandidateTable(requirementCandidates)}<a class="sms-platform-link"'));
   assert.ok(smsBuilder.includes('<div class="sms-message-list"><div class="sms-message-body">${buildSmsCopyButton(notificationMessage)}<div class="sms-message-text">${safeText(notificationMessage)}</div></div><div class="sms-message-body">${buildSmsCopyButton(psychologicalNotificationMessage)}<div class="sms-message-text">${safeText(psychologicalNotificationMessage)}</div></div></div>'));
   assert.ok(html.includes("function buildSmsCopyButton(message)"));
+  assert.ok(html.includes("function buildCourseCodeCopyButton(courseCode)"));
   assert.ok(html.includes('aria-label="复制短信"'));
+  assert.ok(html.includes('aria-label="复制科目编号"'));
   assert.ok(html.includes('class="sms-copy-icon"'));
   assert.ok(html.includes(".sms-message-body + .sms-message-body"));
   assert.equal(smsBuilder.includes('data-sms-toggle="message"'), false);
@@ -2013,12 +2569,67 @@ test("exam detail shows project shared sheet before score processing with a manu
   assert.ok(html.includes("function copyTextToClipboard"));
   assert.ok(html.includes("navigator.clipboard.writeText"));
   assert.ok(html.includes('document.execCommand("copy")'));
-  assert.ok(html.includes('await copyTextToClipboard(smsCopy.dataset.copySms || "")'));
+  assert.ok(html.includes('event.target.closest("[data-copy-sms], [data-copy-course-code]")'));
+  assert.ok(html.includes('await copyTextToClipboard(smsCopy.dataset.copyCourseCode ?? smsCopy.dataset.copySms ?? "")'));
   assert.ok(html.includes('smsCopy.classList.add("is-copied")'));
   assert.ok(html.includes('smsCopy.setAttribute("aria-label", "已复制")'));
+  assert.ok(html.includes('.sms-copy-button.is-copied::after'));
+  assert.ok(html.includes('content: "已复制"'));
+  assert.ok(html.includes('bottom: calc(100% + 9px)'));
+  assert.ok(html.includes('if (card && window.getSelection()?.toString().trim()) return;'));
   assert.equal(html.includes('smsCopy.textContent = "已复制"'), false);
   assert.ok(html.includes("!step.hideDetail"));
   assert.equal(html.includes("!step.hideLogs"), false);
+});
+
+test("psychological SMS uses the exam password in the selected address format", () => {
+  const usesUnifiedAddress = compileInlineFunction(
+    "      function notificationUsesUnifiedExamAddress(config, session) {",
+    "\n      function buildNotificationMessage(task, requirementIndex = 0) {",
+    {
+      notificationTextValue: (value) => String(value ?? "").trim(),
+      unifiedExamCodeFromNotificationUrl: (value) => {
+        const match = String(value ?? "").match(/\/exam\/(\d+)\/uniform\/login\/?/i);
+        return match ? `E${match[1]}` : "";
+      },
+    },
+  );
+  const buildMessage = compileInlineFunction(
+    "      function buildPsychologicalNotificationMessage(task, requirementIndex = 0) {",
+    "\n      function buildRequirementSmsHtml(task) {",
+    {
+      taskRequirementConfigForView: (task) => task.config,
+      getTaskSessionByRequirement: (task) => task.session,
+      notificationTextValue: (value) => String(value ?? "").trim(),
+      notificationExamTitle: (value) => String(value ?? "").replace(/-试考$/, ""),
+      fullNotificationDateTime: () => "2026年8月8日(周六)10:00",
+      notificationTimeOnly: () => "17:00",
+      notificationExamPassword: (config, session) => config.examPassword || session.session_id,
+      notificationUsesUnifiedExamAddress: usesUnifiedAddress,
+    },
+  );
+  const task = {
+    config: {
+      examName: "心理测评",
+      startTimeDisplay: "2026-08-08 10:00",
+      endTimeDisplay: "2026-08-08 17:00",
+      examPassword: "434392",
+    },
+    session: { session_id: "434392" },
+  };
+
+  const independentMessage = buildMessage({
+    ...task,
+    config: { ...task.config, examAddress: "独立考试地址" },
+  });
+  assert.match(independentMessage, /心理测评网址:https:\/\/eztest\.cn\/exam\/session\/434392\//);
+  assert.doesNotMatch(independentMessage, /uniform\/login/);
+
+  const unifiedMessage = buildMessage({
+    ...task,
+    config: { ...task.config, examAddress: "统一考试地址", examPassword: "E107910" },
+  });
+  assert.match(unifiedMessage, /心理测评网址:https:\/\/eztest\.org\/exam\/107910\/uniform\/login\//);
 });
 
 test("score feedback downloads use the server-provided exam-prefixed filename", () => {
@@ -2056,13 +2667,14 @@ test("score process card can retry OA seal application and download encrypted st
   assert.ok(html.includes("已打开 OA 申请页并上传加密压缩包"));
   assert.ok(html.includes("async function triggerScoreStampApplication(taskId)"));
   assert.ok(html.includes("async function triggerScoreStampApplicationViaHelper(taskId)"));
-  assert.ok(html.includes("async function ensureScoreStampLocalHelper()"));
+  assert.ok(html.includes("async function ensureScoreStampLocalHelper(requiredCapability"));
   assert.ok(html.includes("async function submitScoreStampApplicationResult(taskId, stampApplication)"));
   assert.ok(html.includes("SCORE_STAMP_TODO_LIST_URL"));
   assert.ok(html.includes("https://oa.ata.net.cn/wui/index.html#/main/workflow/listDoing?menuIds=1,13&menuPathIds=1,13&_key=wx3if1"));
   assert.ok(html.includes(">提交申请</a>"));
   assert.ok(html.includes("stampStatus === \"opened\" && stampApplication.saved"));
   assert.ok(html.includes('fetchFanweiHelper("/score-stamp/start"'));
+  assert.ok(html.includes('ensureScoreStampLocalHelper("scoreStampApplication")'));
   assert.ok(html.includes("/scores/stamp-application/prepare"));
   assert.ok(html.includes("/scores/stamp-application/result"));
   assert.ok(html.includes("本机助手版本过旧"));
@@ -2140,6 +2752,8 @@ test("Fanwei local helper owns status, Chrome launch, and reads on the coworker'
   assert.equal(copyFunction.includes("applyImportResult"), false);
   assert.equal(copyFunction.includes("/api/fanwei/requirement-import"), false);
   assert.ok(copyFunction.includes('fanweiReadTransport === "server"'));
+  assert.ok(copyFunction.includes("virtualSerial || fanweiReadTransport"));
+  assert.ok(copyFunction.includes("正在生成全合成的虚拟泛微需求"));
   assert.ok(copyFunction.includes('`${runtime.apiBase}/api/fanwei/local-read`'));
   assert.equal(copyFunction.includes("/api/fanwei/auto-read"), false);
   assert.equal(copyFunction.includes("navigator.clipboard.writeText(script)"), false);
@@ -2277,6 +2891,225 @@ test("fanwei test page keeps field cards and requirement dropdowns", () => {
   assert.ok(renderValueFunction.includes("fanwei-select"));
 });
 
+test("fanwei requirement sheets expose a scoped three-stage 42-item configuration picker", () => {
+  const fanweiSection = sourceBetween(
+    '<section class="task-view" id="fanweiTestView"',
+    '<section class="task-view" id="projectDetailView"',
+  );
+  const catalogSource = sourceBetween("const fanweiConfigCatalog = {", "const fanweiConfigItems =");
+  const itemIds = [...catalogSource.matchAll(/id:\s*"([a-z0-9_]+)"/g)].map((match) => match[1]);
+
+  assert.ok(html.includes('id="fanweiConfigPickerModal"'));
+  assert.ok(html.includes('class="account-editor-modal fanwei-config-picker-modal"'));
+  assert.ok(html.includes('id="fanweiConfigPickerModal" aria-label="配置选择"'));
+  assert.equal(html.includes('id="fanweiConfigPickerTitle"'), false);
+  assert.ok(html.includes('id="fanweiConfigPickerOptions"'));
+  assert.ok(html.includes('id="fanweiConfigPickerSelected"'));
+  assert.ok(html.includes('data-fanwei-config-stage="before"'));
+  assert.ok(html.includes('data-fanwei-config-stage="during"'));
+  assert.ok(html.includes('data-fanwei-config-stage="after"'));
+  assert.ok(html.includes('aria-selected="true">开考前</button>'));
+  assert.ok(html.includes('aria-selected="false">考试中</button>'));
+  assert.ok(html.includes('aria-selected="false">考试后</button>'));
+  assert.equal(html.includes("开考前配置</button>"), false);
+  assert.equal(html.includes("考试中配置</button>"), false);
+  assert.equal(html.includes("考试后配置</button>"), false);
+  assert.equal(itemIds.length, 42);
+  assert.equal(new Set(itemIds).size, 42);
+
+  const pickerStyles = sourceBetween(
+    "      .fanwei-config-picker-modal {",
+    "      .exam-list-table th,",
+  );
+  assert.ok(pickerStyles.includes("--fanwei-picker-glass-surface:"));
+  assert.ok(pickerStyles.includes("background: var(--fanwei-picker-glass-surface);"));
+  assert.ok(pickerStyles.includes("background: var(--fanwei-picker-glass-raised);"));
+  assert.ok(pickerStyles.includes("border-bottom: 1px solid var(--fanwei-picker-glass-divider);"));
+  assert.equal(pickerStyles.includes(".fanwei-config-picker-modal::backdrop { background: rgba(15, 23, 42, 0.42); }"), false);
+
+  const baseRowIds = sourceBetween(
+    "const fanweiConfigBaseRowIds = new Set([",
+    "]);",
+  );
+  ["nda", "monitor", "save_video", "eagle_eye", "lock_screen", "manual_score"].forEach((id) => {
+    assert.ok(baseRowIds.includes(`"${id}"`));
+  });
+
+  const renderStackFunction = sourceBetween(
+    "function renderFanweiRequirementStack()",
+    "function activateFanweiRequirement",
+  );
+  assert.ok(renderStackFunction.includes('data-fanwei-config-open="${index}"'));
+  assert.ok(renderStackFunction.includes(">增加配置</button>"));
+  assert.ok(
+    renderStackFunction.indexOf('data-fanwei-requirement-delete="${index}"')
+      < renderStackFunction.indexOf("${configButton}"),
+  );
+  assert.ok(html.includes(".fanwei-requirement-config {\n        margin-left: auto;"));
+  assert.ok(html.includes(".fanwei-requirement-config,\n      .fanwei-requirement-copy {\n        width: 90px;\n        min-width: 90px;\n        min-height: 29px;\n        height: 29px;"));
+  assert.equal(html.includes(".fanwei-requirement-copy {\n        min-height: 29px;\n        height: 29px;\n        margin-left: auto;"), false);
+
+  const renderRowsFunction = sourceBetween(
+    "function renderFanweiRequirementRows(fields, requirementIndex)",
+    "function renderFanweiRequirementStack()",
+  );
+  assert.ok(renderRowsFunction.includes("!fanweiConfigBaseRowIds.has(item.id)"));
+
+  const saveFunction = sourceBetween(
+    "function saveFanweiConfigSelection()",
+    "function closeFanweiConfigPicker",
+  );
+  assert.ok(saveFunction.includes("uiState.fanweiRequirements[requirementIndex]"));
+  assert.ok(saveFunction.includes("explicit: true"));
+  assert.equal(saveFunction.includes("uiState.fanweiRequirements.map"), false);
+});
+
+test("fanwei config picker reflects the current requirement before opening", () => {
+  const catalogSource = sourceBetween("const fanweiConfigCatalog = {", "const fanweiConfigItems =");
+  const defaultSelection = compileInlineFunction(
+    "function defaultFanweiConfigSelection(fields = {})",
+    "\n\n      function cloneFanweiConfigSelection",
+    {
+      fanweiDefaultConfigIds: ["watermark", "copy_item_unable"],
+      fanweiConfigItems: [
+        "nda", "monitor", "save_video", "login_validation", "face_detection_dur", "ai_gaze",
+        "eagle_eye", "desktop_monitor", "desktop_monitor_video", "lock_screen", "client_required",
+        "exclusive_network", "watermark", "copy_item_unable", "show_point", "public_score", "manual_score",
+      ].map((id) => ({ id })),
+    },
+  );
+  const clientSelection = defaultSelection({
+    "考试类型": "客户端考试",
+    "登录验证": "自动验证；考后公安验证",
+    "登陆次数": "10",
+    "视频监控": "需要",
+    "视频录制": "开启录制",
+    "鹰眼监控": "需要",
+    "考试承诺书内容": "已填写",
+  });
+  const webSelection = defaultSelection({
+    "考试类型": "网页考试",
+    "登录验证方式": "人工审核",
+    "允许离开次数（网页考试时填写）": "3",
+  });
+  const recordingDisabledSelection = defaultSelection({
+    "视频监控": "需要",
+    "视频录制": "无需录制",
+  });
+  const openPicker = sourceBetween(
+    "function openFanweiConfigPicker(requirementIndex = uiState.activeFanweiRequirementIndex)",
+    "\n\n      function applyFanweiConfigSelectionToFields",
+  );
+  const platformRenderer = sourceBetween(
+    "function fanweiConfigPlatformOptionsHtml(selected)",
+    "\n\n      function renderFanweiConfigPicker",
+  );
+  const controlRenderer = sourceBetween(
+    "function fanweiConfigControlHtml(item)",
+    "\n\n      function fanweiConfigOptionHtml",
+  );
+
+  assert.equal(clientSelection.values.lockMode, "client");
+  assert.equal(clientSelection.values.loginMode, "auto");
+  assert.equal(clientSelection.values.loginMethod, "post_exam_public_security");
+  assert.equal(clientSelection.values.loginTimes, 10);
+  assert.ok(clientSelection.selectedIds.includes("client_required"));
+  assert.ok(clientSelection.selectedIds.includes("exclusive_network"));
+  assert.ok(clientSelection.selectedIds.includes("watermark"));
+  assert.ok(clientSelection.selectedIds.includes("copy_item_unable"));
+  assert.equal(clientSelection.selectedIds.includes("ai_gaze"), false);
+  assert.equal(clientSelection.selectedIds.includes("desktop_monitor"), false);
+  assert.equal(clientSelection.selectedIds.includes("show_point"), false);
+  assert.equal(clientSelection.selectedIds.includes("public_score"), false);
+  assert.equal(clientSelection.selectedIds.includes("app_required"), false);
+  assert.equal(webSelection.values.lockMode, "web");
+  assert.equal(webSelection.values.loginMode, "manual");
+  assert.equal(webSelection.values.webLeaveTimes, 3);
+  assert.equal(webSelection.selectedIds.includes("client_required"), false);
+  assert.ok(recordingDisabledSelection.selectedIds.includes("monitor"));
+  assert.equal(recordingDisabledSelection.selectedIds.includes("save_video"), false);
+  const explicitOptionalSelection = defaultSelection({
+    "视线追踪": "需要",
+    "桌面监控": "是",
+    "显示分值": "开启",
+    "查看成绩": "是",
+    "答题水印": "否",
+    "禁止复制": "关闭",
+  });
+  assert.ok(explicitOptionalSelection.selectedIds.includes("ai_gaze"));
+  assert.ok(explicitOptionalSelection.selectedIds.includes("desktop_monitor"));
+  assert.ok(explicitOptionalSelection.selectedIds.includes("show_point"));
+  assert.ok(explicitOptionalSelection.selectedIds.includes("public_score"));
+  assert.equal(explicitOptionalSelection.selectedIds.includes("watermark"), false);
+  assert.equal(explicitOptionalSelection.selectedIds.includes("copy_item_unable"), false);
+  assert.ok(openPicker.includes("collectFanweiRequirementFields(requirementIndex)"));
+  assert.ok(openPicker.includes("defaultFanweiConfigSelection(requirement.fields)"));
+  assert.ok(platformRenderer.includes('["client_required", "app_required"]'));
+  assert.ok(platformRenderer.includes("fanwei-config-platform-row"));
+  assert.ok(controlRenderer.includes('class="fanwei-config-lock-leave-controls"'));
+  assert.ok(html.includes(".fanwei-config-lock-leave-controls {\n        flex: 0 0 100%;"));
+  assert.match(catalogSource, /id: "client_required"[^\n]+mutexGroup: "client_platform"/);
+  assert.match(catalogSource, /id: "app_required"[^\n]+mutexGroup: "client_platform"/);
+  assert.match(catalogSource, /id: "save_video"[^\n]+inlineParent: "monitor"/);
+  const dependencySelector = sourceBetween(
+    "function fanweiConfigSelectWithDependencies(item, selected)",
+    "\n\n      function fanweiConfigRemoveWithDependents",
+  );
+  assert.ok(dependencySelector.includes("if (selected.has(item.id)) return;"));
+  assert.ok(dependencySelector.includes("fanweiConfigRemoveWithDependents(candidate.id, selected)"));
+  assert.ok(html.includes("需报备后人工开启"));
+  const pickerRenderer = sourceBetween(
+    "function renderFanweiConfigPicker()",
+    "\n\n      function openFanweiConfigPicker",
+  );
+  const pickerSummaryRenderer = sourceBetween(
+    "function renderFanweiConfigPickerSummary()",
+    "\n\n      function renderFanweiConfigPicker()",
+  );
+  const displayValue = sourceBetween(
+    "function fanweiConfigDisplayValue(item, selection = fanweiConfigPickerDraft)",
+    "\n\n      function fanweiConfigSegment",
+  );
+  assert.ok(pickerRenderer.includes("if (item.inlineParent) return \"\""));
+  assert.ok(pickerRenderer.includes("renderFanweiConfigPickerSummary()"));
+  assert.ok(pickerSummaryRenderer.includes("selected.has(item.id) && !item.inlineParent"));
+  assert.ok(displayValue.includes('item.id === "monitor" && selected.has("save_video")'));
+  assert.ok(displayValue.includes('return "是 · 开启录制"'));
+  const liveInputListener = sourceBetween(
+    'fanweiConfigPickerOptions.addEventListener("input", (event) => {',
+    'fanweiConfigPickerOptions.addEventListener("change", (event) => {',
+  );
+  assert.ok(liveInputListener.includes("updateFanweiConfigInputValue(input)"));
+  assert.ok(liveInputListener.includes("renderFanweiConfigPickerSummary()"));
+});
+
+test("desktop-only client options stay nested and hidden until desktop is selected", () => {
+  const visibility = sourceBetween(
+    "function fanweiConfigItemVisible(item, selected)",
+    "\n\n      function fanweiConfigSelectWithDependencies",
+  );
+  const catalogSource = sourceBetween("const fanweiConfigCatalog = {", "const fanweiConfigItems =");
+
+  ["exclusive_network", "check_bluetooth", "smart_input_disabled"].forEach((id) => {
+    assert.match(
+      catalogSource,
+      new RegExp(`id: "${id}"[^\\n]+parent: "client_required"[^\\n]+hideUntilParent: true`),
+    );
+  });
+  assert.ok(visibility.includes("!selected.has(item.parent)"));
+});
+
+test("fanwei requirement copies and submit payload keep independent configuration selections", () => {
+  const duplicateFunction = sourceBetween(
+    "function duplicateFanweiRequirement()",
+    "function renderFanweiModel(model = {})",
+  );
+  assert.ok(duplicateFunction.includes("cloneFanweiConfigSelection(sourceRequirement.configSelection)"));
+  assert.ok(html.includes("function collectAllFanweiRequirementConfigSelections()"));
+  assert.ok(html.includes("requirementConfigSelectionsList"));
+  assert.ok(html.includes("collectAllFanweiRequirementConfigSelections()"));
+});
+
 test("fanwei requirement copies keep independent fields and switch the active layer", () => {
   assert.ok(html.includes("fanweiRequirements: []"));
   assert.ok(html.includes("activeFanweiRequirementIndex: 0"));
@@ -2295,7 +3128,7 @@ test("fanwei requirement copies keep independent fields and switch the active la
     "function renderFanweiModel(model = {})",
   );
   assert.ok(duplicateFunction.includes("collectFanweiRequirementFields(uiState.activeFanweiRequirementIndex)"));
-  assert.ok(duplicateFunction.includes("uiState.fanweiRequirements.push({ fields: { ...sourceFields } })"));
+  assert.ok(duplicateFunction.includes("fields: { ...sourceFields }"));
   assert.ok(duplicateFunction.includes("uiState.activeFanweiRequirementIndex = uiState.fanweiRequirements.length - 1"));
   assert.equal(duplicateFunction.includes("当前编辑"), false);
 
@@ -2356,6 +3189,10 @@ test("fanwei fallback reader ignores conditionally hidden form rows", () => {
 
   assert.match(readerFunction, /getClientRects\(\)\.length/);
   assert.match(readerFunction, /row\.cells\.length && isVisible\(row\.tr\)/);
+  assert.match(readerFunction, /\.wf-req-sign-list-content/);
+  assert.match(readerFunction, /\.left-department-span/);
+  assert.match(readerFunction, /\.logitem-Recipient/);
+  assert.match(readerFunction, /flowOpinionRows/);
 });
 
 test("dark theme covers the complete Fanwei workbench", () => {
@@ -2542,31 +3379,254 @@ test("project detail renders sourced operation workflow and keeps local archive 
     "projectWorkflowGates",
   ]) assert.ok(html.includes(`id="${id}"`));
   assert.ok(html.includes("泛微 + 实际执行"));
+  const archivePanel = html.slice(
+    html.indexOf('data-operation-detail="archive"'),
+    html.indexOf('id="operationDetailActions"'),
+  );
+  assert.equal(archivePanel.includes("运控归档信息"), false);
+  assert.equal(archivePanel.includes("字段顺序与运营控制台归档弹窗一致"), false);
+  assert.equal(archivePanel.includes('class="workflow-source-badge actual_result"'), false);
+  assert.ok(archivePanel.indexOf('id="projectOperationArchiveDraft"') < archivePanel.indexOf('id="operationArchiveEditBtn"'));
+  assert.ok(archivePanel.indexOf('id="operationArchiveEditBtn"') < archivePanel.indexOf('id="operationArchiveSaveBtn"'));
+  assert.ok(archivePanel.indexOf('id="operationArchiveSaveBtn"') < archivePanel.indexOf('id="operationArchiveCancelEditBtn"'));
+  assert.ok(archivePanel.indexOf('id="operationArchiveCancelEditBtn"') < archivePanel.indexOf('id="operationArchiveRefreshEvidenceBtn"'));
+  assert.ok(archivePanel.indexOf('id="operationArchiveEditBtn"') < archivePanel.indexOf('id="operationArchiveRefreshEvidenceBtn"'));
+  assert.ok(archivePanel.includes('id="operationArchiveSaveBtn"'));
+  assert.ok(archivePanel.includes('id="operationArchiveCancelEditBtn"'));
+  assert.ok(archivePanel.includes('id="operationArchiveRefreshEvidenceBtn"'));
+  assert.ok(archivePanel.includes("更新易考数据"));
+  assert.equal(archivePanel.includes("更新参考人数和截图"), false);
+  assert.equal(archivePanel.includes("其他归档信息不变"), false);
+  assert.equal(archivePanel.includes("执行门槛"), false);
+  assert.equal(archivePanel.includes("字段缺失会停在待补充"), false);
+  assert.ok(archivePanel.includes('id="projectWorkflowGates" hidden'));
+  assert.equal(archivePanel.includes('id="operationArchiveAttachments"'), false);
+  assert.equal(html.includes("operationArchiveAttachmentPayload"), false);
+  assert.ok(html.includes('class="operation-archive-field-grid"'));
+  assert.ok(html.includes('class="operation-archive-screenshot"'));
+  assert.ok(html.includes("function renderOperationArchiveScreenshot"));
+  assert.ok(html.includes("易考正式考试截图"));
+  const renderArchiveScreenshot = compileInlineFunction(
+    "      function renderOperationArchiveScreenshot(screenshot = {}) {",
+    "\n      function renderOperationArchiveDraft",
+    { safeText: (value) => String(value ?? "") },
+  );
+  assert.equal(renderArchiveScreenshot({}), "");
+  assert.equal(renderArchiveScreenshot({ status: "capturing" }), "");
+  assert.equal(renderArchiveScreenshot({ status: "failed" }), "");
+  assert.equal(renderArchiveScreenshot({ status: "success", files: [] }), "");
+  assert.match(renderArchiveScreenshot({
+    status: "success",
+    files: [{ url: "/screenshots/formal.png", sessionName: "正式考试" }],
+  }), /易考正式考试截图[\s\S]*formal\.png/);
+  assert.ok(html.includes("${warningRows}${renderOperationArchiveScreenshot(screenshot)}"));
+  assert.ok(html.includes('state.screenshot?.status === "success"'));
+  assert.ok(html.includes('["基础归档信息", entries.filter(([key]) => operationArchiveBaseFieldKeys.has(key))]'));
+  assert.ok(html.includes('["执行结果", entries.filter(([key]) => !operationArchiveBaseFieldKeys.has(key))]'));
+  assert.ok(html.includes('data-operation-archive-field="${safeText(key)}"${hidden ? " hidden" : ""}'));
+  assert.ok(html.includes('if (assessment && scope) scope.hidden = assessment.value !== "是";'));
+  assert.ok(html.includes('operationArchiveInspectBtn.hidden = false;'));
+  assert.ok(html.includes('completed ? "重新归档" : "填写归档"'));
+  assert.ok(html.includes("async function refreshOperationArchiveEvidence()"));
+  assert.ok(html.includes("/operation-archive/evidence/refresh"));
+  assert.ok(html.includes('operationArchiveRefreshEvidenceBtn.addEventListener("click"'));
+  assert.ok(html.includes("请先确认已在运控端人工处理为可归档状态"));
+  const workflowMeta = sourceBetween(
+    "      const projectWorkflowStepMeta = [",
+    "\n      const projectWorkflowStatusLabels",
+  );
+  assert.ok(workflowMeta.indexOf('["content", "内容任务"') < workflowMeta.indexOf('["personnel", "人员任务"'));
   const contentPanel = html.slice(
     html.indexOf('data-operation-detail="content"'),
     html.indexOf('data-operation-detail="archive"'),
   );
   assert.equal(contentPanel.includes("内容任务信息"), false);
   assert.equal(contentPanel.includes("考试配置只读取"), false);
-  assert.ok(html.includes("function renderProjectContentExamList(requirements = [], sessions = [], remarks = {})"));
+  assert.equal(contentPanel.includes("等待发送。"), false);
+  assert.ok(contentPanel.includes('id="contentRequirementEmailState" style="margin-top:8px;" hidden'));
+  assert.ok(contentPanel.includes('<button class="btn primary" id="operationContentSyncBtn" type="button">发送内容任务单</button>'));
+  assert.equal(contentPanel.includes("发送记录"), false);
+  assert.equal(contentPanel.includes("contentRequirementEmailHistory"), false);
+  assert.equal(html.includes("已按内容人员匹配"), false);
+  assert.ok(contentPanel.includes('id="operationContentSyncState" style="margin-top:8px;" hidden'));
+  assert.ok(html.includes('function projectContentActualCourseState(task = {})'));
+  assert.ok(html.includes('function renderProjectContentExamList(requirements = [], sessions = [], remarks = {}, defaultRemark = "", actualCourseState = {})'));
+  assert.ok(html.includes('task.config?.tenantId || ""'));
+  assert.ok(html.includes('projectContentActualCourseState(task)'));
+  assert.ok(html.includes('renderOperationContentConfiguration(workflow.operationContentDraft?.configuration)'));
+  assert.ok(html.indexOf('renderOperationContentConfiguration(workflow.operationContentDraft?.configuration)') < html.indexOf('renderProjectContentExamList('));
+  assert.ok(html.includes('class="content-configuration-summary"'));
+  assert.ok(html.includes('<div class="content-configuration-block"><h4 class="content-configuration-title">配置项</h4><section class="content-configuration-summary">'));
+  assert.match(html, /\.content-configuration-summary\s*\{[^}]*border:\s*1px solid var\(--line\)[^}]*background:\s*var\(--panel\)/s);
+  assert.ok(html.includes('const tenantRemark = tenantId ? `租户 ID：${tenantId}` : ""'));
+  assert.ok(html.includes("return value === tenantId && tenantId ? tenantRemark : value"));
   assert.ok(html.includes("projectRequirementTrialTime(requirement, trialSession)"));
   assert.ok(html.includes('subjects: "试考"'));
+  assert.ok(html.includes('actualCourseState.trial?.[originalIndex] ? [{ name: "试考", code: "SKTY" }] : []'));
   assert.ok(html.includes("left.startTimestamp - right.startTimestamp"));
   assert.ok(html.includes("${safeText(exam.name)}</span><span class=\"content-exam-value\">${safeText(exam.time)}</span><span class=\"content-exam-value\">${safeText(exam.subjects)}"));
-  assert.ok(html.includes("<span>序号</span><span>考试名称</span><span>考试时间</span><span>科目信息</span><span>来源</span><span>备注</span>"));
+  assert.ok(html.includes("<span>序号</span><span>考试名称</span><span>考试时间</span><span>科目信息</span><span>备注</span>"));
   assert.ok(html.includes('class="content-exam-index">${index + 1}</span>'));
   assert.ok(html.includes('data-content-exam-remark-key="${safeText(exam.key)}"'));
   assert.ok(html.includes('placeholder="填写备注"'));
   assert.ok(html.includes("async function saveContentTaskRemark(input)"));
   assert.ok(html.includes("/content-task-remarks"));
   assert.ok(html.includes('projectContentTaskDraft.addEventListener("change"'));
+  const contentSync = sourceBetween(
+    "      async function syncOperationContentFromProject() {",
+    "\n      async function saveContentTaskRemark(input) {",
+  );
+  assert.ok(contentSync.includes("/operation-content/sync"));
+  assert.ok(contentSync.includes('ensureOperationBatchLocalHelper("operationContentSync")'));
+  assert.ok(contentSync.includes("validateOperationContentPreparation(prepared)"));
+  assert.ok(contentSync.includes("保存完成后将直接发送任务单"));
+  assert.ok(contentSync.includes('title: isResend ? "填写变更内容" : "确认同步运控并发送任务单"'));
+  assert.ok(contentSync.includes('label: "变更内容"'));
+  assert.ok(contentSync.includes('value: dispatchPreview.suggestedChangeSummary || ""'));
+  assert.ok(contentSync.includes('placeholder: "系统已列出本次与上次发送任务的全部差异，可补充说明"'));
+  assert.ok(contentSync.includes("required: true"));
+  assert.ok(contentSync.includes("previewDraftFingerprint: dispatchPreview.currentFingerprint"));
+  assert.ok(contentSync.includes("previewBaselineFingerprint: dispatchPreview.baselineFingerprint"));
+  assert.ok(contentSync.includes('timeoutMs: 240000'));
+  assert.ok(contentSync.includes("changed.configuration"));
+  assert.ok(contentSync.includes("changed.subjects"));
+  assert.ok(contentSync.includes('!["sent", "already_sent"].includes(dispatch.status)'));
+  assert.ok(contentSync.includes('dispatch.status === "already_sent"'));
+  assert.ok(html.includes('localHelper.path !== "/operation-content/sync"'));
+  assert.ok(html.includes("operationContentSync: 26"));
+  assert.ok(html.includes('confirmText: isContentSync ? "继续同步并发送" : "继续添加日程"'));
+  assert.ok(html.includes('id="operationContentSyncBtn" type="button">发送内容任务单</button>'));
+  assert.ok(html.includes("function operationContentTaskHasSent(task = {})"));
+  assert.ok(html.includes('contentSync.initialSendVerification?.status === "verified"'));
+  assert.ok(html.includes('contentSync.dispatchStatus === "sent"'));
+  assert.ok(html.includes('Boolean(String(contentSync.lastDispatchedAt || "").trim())'));
+  assert.ok(html.includes("operationContentSyncBtn.textContent = operationContentTaskHasSent(task)"));
+  assert.ok(html.includes('? "重新发送内容任务单"'));
+  assert.equal(html.includes('operationContentSyncBtn.textContent = "同步运控并发送任务单"'), false);
+  assert.equal(html.includes('operationContentSyncBtn.textContent = "重新同步并发送任务单"'), false);
+  assert.ok(html.includes('operationContentSyncBtn.addEventListener("click"'));
   const contentExamRenderer = sourceBetween(
-    "      function renderProjectContentExamList(requirements = [], sessions = [], remarks = {}) {",
+    '      function renderProjectContentExamList(requirements = [], sessions = [], remarks = {}, defaultRemark = "", actualCourseState = {}) {',
     "\n      const projectDialogTriggers",
   );
   assert.equal(contentExamRenderer.includes("考试 ${index + 1}"), false);
-  assert.ok(html.includes("项目列表中的“归档”仅隐藏本地项目卡，两者互不替代"));
+  assert.equal(contentExamRenderer.includes("<span>来源</span>"), false);
+  assert.equal(contentExamRenderer.includes("workflow-source-badge easy_exam_requirement"), false);
+  assert.equal(html.includes("项目列表中的“归档”仅隐藏本地项目卡，两者互不替代"), false);
   assert.ok(html.includes("/operation-workflow?_=${Date.now()}"));
+});
+
+test("content task detail prepends the operation configuration summary", () => {
+  const renderOperationContentConfiguration = compileInlineFunction(
+    '      function renderOperationContentConfiguration(configuration = {}) {',
+    "\n      function renderProjectContentExamList",
+    { safeText: (value) => String(value ?? "") },
+  );
+  const rendered = renderOperationContentConfiguration({
+    background: "ATA通用模板",
+    loginMode: "准考证号",
+    itemTypes: ["客观题"],
+    contentSources: ["ATA现有内容"],
+    closePaper: "否",
+    reviewPaper: "否",
+    singleMaxSubjects: "24",
+    paperLanguages: ["简体中文"],
+    osLanguages: ["简体中文"],
+    closureStart: "2026-08-19 10:00",
+    closureEnd: "2026-08-19 17:00",
+  });
+
+  for (const value of [
+    "配置项",
+    "ATA通用模板",
+    "准考证号",
+    "客观题",
+    "ATA现有内容",
+    "单科最大科次",
+    "24",
+    "2026-08-19 10:00 ~ 2026-08-19 17:00",
+  ]) assert.ok(rendered.includes(value));
+});
+
+test("content task remarks retain formal and trial course codes", () => {
+  const projectContentActualCourseState = compileInlineFunction(
+    '      function projectContentActualCourseState(task = {}) {',
+    "\n      function contentTaskRemarkWithCourseCodes",
+  );
+  const contentTaskRemarkWithCourseCodes = compileInlineFunction(
+    '      function contentTaskRemarkWithCourseCodes(remark = "", courses = []) {',
+    "\n      function renderProjectContentExamList",
+  );
+  const renderProjectContentExamList = compileInlineFunction(
+    '      function renderProjectContentExamList(requirements = [], sessions = [], remarks = {}, defaultRemark = "", actualCourseState = {}) {',
+    "\n      const projectDialogTriggers",
+    {
+      contentTaskRemarkWithCourseCodes,
+      projectRequirementFormalTime: (requirement) => requirement.fields?.["考试日期时间"] || "待补充",
+      projectRequirementSubjects: (requirement) => (requirement.config?.courses || []).map((course) => course.name).join("、") || "待补充",
+      projectRequirementTrialTime: (requirement) => requirement.fields?.["试考日期时间"] || "",
+      projectDateTimeStartTimestamp: (value) => Date.parse(value) || Number.MAX_SAFE_INTEGER,
+      safeText: (value) => String(value ?? ""),
+    },
+  );
+
+  assert.equal(
+    contentTaskRemarkWithCourseCodes("租户 ID：tenant-1", [
+      { name: "语文", code: "20260731-01-01" },
+      { name: "数学", course_code: "20260731-01-02" },
+    ]),
+    "租户 ID：tenant-1；科目编号：语文（20260731-01-01）、数学（20260731-01-02）",
+  );
+  assert.equal(
+    contentTaskRemarkWithCourseCodes("", [{ name: "试考", code: "SKTY" }]),
+    "科目编号：试考（SKTY）",
+  );
+
+  assert.deepEqual(
+    projectContentActualCourseState({
+      config: { examRequirements: [{}, {}] },
+      steps: [
+        {
+          stepKey: "course_create",
+          status: "running",
+          requirementProgress: {
+            0: { status: "success", result: { courses: [{ name: "语文", code: "C001" }] } },
+            1: { status: "pending", result: { courses: [{ name: "数学", code: "PREVIEW-ONLY" }] } },
+          },
+        },
+        {
+          stepKey: "trial_paper_bind",
+          status: "running",
+          requirementProgress: {
+            0: { status: "success", result: {} },
+            1: { status: "pending", result: {} },
+          },
+        },
+      ],
+    }),
+    { formal: [[{ name: "语文", code: "C001" }], []], trial: [true, false] },
+  );
+
+  const rendered = renderProjectContentExamList([
+    {
+      fields: { "考试名称": "第一场", "考试日期时间": "2026-08-01 09:00", "试考日期时间": "2026-07-31 16:00" },
+      config: { courses: [{ name: "语文", code: "C001" }, { name: "数学", code: "C002" }] },
+    },
+  ], [], {}, "tenant-1", {
+    formal: [[{ name: "语文", code: "C001" }, { name: "数学", code: "C002" }]],
+    trial: [true],
+  });
+  assert.ok(rendered.includes("租户 ID：tenant-1；科目编号：语文（C001）、数学（C002）"));
+  assert.ok(rendered.includes("租户 ID：tenant-1；科目编号：试考（SKTY）"));
+
+  const pendingRendered = renderProjectContentExamList([
+    {
+      fields: { "考试名称": "未创建考试", "考试日期时间": "2026-08-01 09:00", "试考日期时间": "2026-07-31 16:00" },
+      config: { courses: [{ name: "语文", code: "PREGENERATED-001" }] },
+    },
+  ], [], {}, "tenant-1", { formal: [[]], trial: [false] });
+  assert.equal(pendingRendered.includes("PREGENERATED-001"), false);
+  assert.equal(pendingRendered.includes("SKTY"), false);
 });
 
 test("operation workflow and source cards open account-style editable dialogs", () => {
@@ -2578,6 +3638,7 @@ test("operation workflow and source cards open account-style editable dialogs", 
     "sourceDetailSaveBtn",
   ]) assert.ok(html.includes(`id="${id}"`));
   assert.ok(html.includes('class="account-editor-modal operation-detail-modal"'));
+  assert.ok(html.includes('class="account-editor-actions" id="operationDetailActions"'));
   assert.ok(html.includes('data-workflow-step="${safeText(key)}"'));
   assert.ok(html.includes('data-project-source="${safeText(item.key)}"'));
   assert.ok(html.includes('class="project-source-item project-source-item-with-requirements"'));
@@ -2585,12 +3646,125 @@ test("operation workflow and source cards open account-style editable dialogs", 
   assert.ok(html.includes('data-project-source="examRequirement" data-project-source-index="${index}"'));
   assert.ok(html.includes('aria-label="查看和修改需求单 ${index + 1}"'));
   assert.ok(html.includes("function openOperationDetail(stepKey, trigger = null)"));
+  assert.ok(html.includes('operationDetailActions.hidden = stepKey === "content";'));
+  const workflowRenderer = sourceBetween(
+    "      function renderProjectWorkflow(task = {}, workflow = {}, batchDraft = {}) {",
+    "\n      function projectRequirementFormalTime(requirement = {}) {",
+  );
+  assert.ok(workflowRenderer.includes("workflow.contentEmailDefaults || {}"));
+  assert.ok(workflowRenderer.includes("contentRequirementEmailRecipients.value"));
+  assert.ok(workflowRenderer.includes("contentRequirementEmailCc.value"));
+  assert.equal(workflowRenderer.includes("contentEmailDefaults.matched"), false);
+  const sendContentEmail = sourceBetween(
+    "      async function sendContentRequirementEmailFromProject() {",
+    "\n      async function saveContentTaskRemark(input) {",
+  );
+  assert.ok(sendContentEmail.includes("JSON.stringify({ recipients, cc })"));
+  assert.ok(sendContentEmail.includes("result.result?.cc"));
   assert.ok(html.includes("function openProjectSourceDetail(source, trigger = null)"));
   assert.ok(html.includes('sourceDetailModal.classList.toggle("is-single-column", source === "examRequirement")'));
   assert.match(html, /#sourceDetailModal\.is-single-column \.source-detail-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/s);
+  assert.match(html, /#sourceDetailModal\[data-source="fanwei"\] \.source-detail-grid\s*\{[^}]*grid-template-columns:\s*repeat\(6, minmax\(0, 1fr\)\)/s);
+  assert.match(html, /#sourceDetailModal\[data-source="fanwei"\] \.source-detail-grid > \.field[\s\S]*grid-column:\s*1\s*\/\s*-1/s);
+  assert.match(html, /\.source-detail-field-title\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/s);
+  assert.ok(html.includes('["申请人", "申请人部门", "申请日期", "运控流水号", "项目名称", "项目编码", "系统类型", "预估科次", "结算依据", "预估收入", "是否需要ATA安排人工监考", "是否需要ATA安排集中监考场地", "是否需要人工阅卷", "阅卷安排", "EPI测试", "性格测试工具", "考核内容是否仅性格测试"]'));
+  assert.ok(html.includes('["ATA内容制题参与方式", "内容来源", "是否需要封闭制题", "试题类型", "科目数", "试卷数"]'));
+  assert.ok(html.includes('" source-detail-field-paired"'));
+  assert.ok(html.includes('" source-detail-field-triple"'));
   assert.ok(html.includes("async function saveProjectSourceDetail()"));
+  assert.ok(html.includes("async function deleteProjectExamRequirement()"));
+  assert.ok(html.includes('sourceDetailCancelBtn.textContent = source === "examRequirement" ? "删除" : "取消"'));
+  assert.ok(html.includes('sourceDetailCancelBtn.classList.toggle("danger", source === "examRequirement")'));
+  assert.ok(html.includes('method: "DELETE"'));
+  assert.ok(html.includes('body: JSON.stringify({ source: "examRequirement", requirementIndex })'));
+  assert.ok(html.includes("删除后不会进入自动配置。"));
   assert.ok(html.includes("renderProjectDetail(result.task)"));
   assert.ok(html.includes("/source-snapshot"));
+  assert.ok(html.includes("function sourceFanweiFieldGroup(task = {}, fields = {})"));
+  assert.ok(html.includes("function sourceFanweiFieldsForDisplay(task = {}, fields = {})"));
+  assert.ok(html.includes("taskViewState.currentOperationBatchDraft?.fields?.batchName?.value"));
+  assert.ok(html.includes("generatedOperationBatchNameFromTask(task)"));
+  assert.ok(html.includes('class="source-detail-inline-fields"'));
+  assert.ok(html.includes('sourceFanweiFieldGroup(task, sourceFanweiFieldsForDisplay(task, raw.fields || {}))'));
+  assert.ok(html.includes("const fanweiMultiColumnFieldGroups = ["));
+  assert.ok(html.includes('["结算依据", "预估收入"]'));
+  assert.ok(html.includes('if (["附件", "项目经理操作"].includes(key)) return true;'));
+  assert.ok(html.includes('if (key === "批次名称" && entriesByKey.has("项目编码"))'));
+  assert.ok(html.includes('group.includes("项目编码") && entriesByKey.has("批次名称")'));
+  assert.ok(html.includes('rows.map((row, index) => ["考试日期", "场次安排说明", "备注"].map'));
+  assert.ok(html.includes('const fieldClass = " source-detail-field-triple";'));
+  assert.ok(html.includes("function sourceExamSceneRowsForTask(task = {}, rows = [])"));
+  assert.ok(html.includes("sourceExamSceneGroup(sourceExamSceneRowsForTask(task, raw.examSceneRows || []))"));
+  assert.match(html, /#sourceDetailModal \.field-input\s*\{[^}]*font-family:\s*inherit;[^}]*font-size:\s*16px;[^}]*line-height:\s*1\.4;/s);
+  assert.ok(html.includes("function isUnselectedFanweiField(key, value)"));
+  assert.ok(html.includes("!isUnselectedFanweiField(key, value)"));
+  for (const option of ["项目实施一部", "项目实施二部", "项目实施三部", "项目实施四部", "项目实施五部", "悦考在线运维部"]) {
+    assert.ok(html.includes(`"${option}"`), `missing operation project department option: ${option}`);
+  }
+  assert.ok(html.includes('["contentParticipation", "内容制题参与方式"]'));
+  assert.ok(html.includes('["contentService", "内容服务"]'));
+});
+
+test("Fanwei scene defaults use formal exam times from EasyExam requirements", () => {
+  const sourceExamSceneRowsForTask = compileInlineFunction(
+    "      function sourceExamSceneRowsForTask(task = {}, rows = []) {",
+    "\n      function openProjectSourceDetail(source, trigger = null) {",
+    {
+      projectExamRequirements: (task) => task.config?.examRequirements || [],
+      projectRequirementFormalTime: (requirement) => requirement.fields?.["考试日期时间"] || "待补充",
+      parseFlexibleTimeRange: (value) => {
+        const points = [...String(value || "").matchAll(/(\d{4})\/(\d{1,2})\/(\d{1,2}) (\d{1,2}):(\d{2})/g)]
+          .map((match) => ({
+            year: Number(match[1]),
+            month: Number(match[2]),
+            day: Number(match[3]),
+            hour: Number(match[4]),
+            minute: Number(match[5]),
+          }));
+        return points.length >= 2 ? { start: points[0], end: points[1] } : null;
+      },
+      padTimePart: (value) => String(value).padStart(2, "0"),
+    },
+  );
+
+  const task = {
+    config: {
+      examRequirements: [
+        { fields: { "考试日期时间": "2026/8/8 09:30-2026/8/8 11:00" } },
+        { fields: { "考试日期时间": "2026/8/9 14:00-2026/8/9 16:30" } },
+      ],
+    },
+  };
+  assert.deepEqual(sourceExamSceneRowsForTask(task, [
+    { "考试日期": "2026-08-01", "场次安排说明": "08:00-09:00", "备注": "保留备注" },
+  ]), [
+    { "考试日期": "2026-08-08", "场次安排说明": "09:30-11:00", "备注": "保留备注" },
+    { "考试日期": "2026-08-09", "场次安排说明": "14:00-16:30" },
+  ]);
+  const existingRows = [{ "考试日期": "2026-08-01", "场次安排说明": "08:00-09:00", "备注": "原值" }];
+  assert.deepEqual(sourceExamSceneRowsForTask({ config: { examRequirements: [{ fields: {} }] } }, existingRows), existingRows);
+});
+
+test("Fanwei source display derives batch name from the abbreviated exam name", () => {
+  const generatedBatchName = compileInlineFunction(
+    "      function generatedOperationBatchNameFromTask(task = {}) {",
+    "\n      function operationBatchInfoText(task = {}) {",
+  );
+
+  assert.equal(generatedBatchName({
+    projectName: "蜀道投资集团有限责任公司招聘笔试",
+    config: {
+      examName: "蜀道轨道交通集团2026年第一批公开招聘笔试",
+      fanweiSource: { raw: { examSceneRows: [{ "考试日期": "2026-08-06" }] } },
+    },
+  }), "蜀道轨道交通集团招聘笔试_2026年8月");
+  assert.equal(generatedBatchName({
+    projectName: "四川省交通建设集团有限责任公司2026年社会招聘笔试",
+    config: {
+      examName: "四川省交通建设集团有限责任公司2026年社会招聘笔试",
+      businessRequirement: { formal_exam_time_range: "2026/8/6 19:00:00-2026/8/6 21:00:00" },
+    },
+  }), "四川省交通建设集团招聘笔试_2026年8月");
 });
 
 test("EasyExam source editing includes the established requirement dropdown options", () => {
@@ -2631,6 +3805,263 @@ test("project configuration opens saved EasyExam requirements from the upper sou
   assert.equal(changeRenderer.includes("renderProjectExamRequirementSnapshot"), false);
   assert.ok(changeRenderer.includes("projectSourceRequirementChangeHistory"));
   assert.ok(changeRenderer.includes("暂无需求变更记录"));
+});
+
+test("project WeChat changes render compact review cards for both session states", () => {
+  const renderer = sourceBetween(
+    "      function renderProjectRequirementChangeLog(detail = {}, { actions = true } = {}) {",
+    "\n      function renderRequirementNextStep(requirement)",
+  );
+  const action = sourceBetween(
+    "      async function handleProjectRequirementChangeAction(button) {",
+    "\n      async function handleProjectRequirementSubmitAction(button)",
+  );
+  const binding = sourceBetween(
+    "      async function saveProjectWechatBinding() {",
+    "\n      function renderProjectDetail(task)",
+  );
+
+  assert.ok(renderer.includes('class="project-requirement-review-card"'));
+  assert.ok(renderer.includes("微信群原话"));
+  assert.ok(renderer.includes("审核通过并更新需求单"));
+  assert.ok(renderer.includes("未建立考试场次 · 审核后更新需求单"));
+  assert.ok(renderer.includes("已建立考试场次 · 审核后更新需求单，并标记需同步场次"));
+  assert.ok(renderer.includes("需同步已建场次"));
+  assert.ok(action.includes("/api/tasks/${encodeURIComponent(taskId)}/requirements/"));
+  assert.ok(action.includes("taskViewState.currentProject = result.task || task"));
+  assert.equal(binding.includes("!identity.requirementRequestId"), false);
+  assert.ok(binding.includes("intervalMinutes < 15"));
+  assert.ok(html.includes('id="projectWechatIntervalMinutes" type="number" min="15"'));
+});
+
+test("exam views surface pending requirement changes and open the confirmed time-change flow", () => {
+  const projectRenderer = sourceBetween(
+    "      function renderProjectDetail(task) {",
+    "\n      async function loadProjectDetail(projectId) {",
+  );
+  const projectSessionRenderer = sourceBetween(
+    "      function renderProjectSessionRows(task = taskViewState.currentProject) {",
+    "\n      async function previewProjectSessionSync() {",
+  );
+  const taskRenderer = sourceBetween(
+    "      function renderTaskDetail(task, options = {}) {",
+    "\n      function downloadFileNameFromDisposition",
+  );
+  const changeOpener = sourceBetween(
+    "      async function openSessionChange(taskId, sessionId, trigger = null) {",
+    "\n      async function submitSessionChange() {",
+  );
+  const changeSubmitter = sourceBetween(
+    "      async function submitSessionChange() {",
+    "\n      function formatSessionTime(session) {",
+  );
+  const diffRenderer = sourceBetween(
+    "      function renderSessionChangeDiff() {",
+    "\n      function formatApiErrorDetail(error) {",
+  );
+  const timeValidator = sourceBetween(
+    "      function validateSessionChangeTimeRange({ report = false } = {}) {",
+    "\n      function renderSessionChangeDiff() {",
+  );
+  const initialValue = compileInlineFunction(
+    "      function sessionChangeInitialFieldValue(field, suggested = {}, requirementPending = false) {",
+    "\n      function sessionChangeChangedValues() {",
+  );
+  const changedValues = compileInlineFunction(
+    "      function sessionChangeChangedValues() {",
+    "\n      function sessionChangeCourseInputNames() {",
+    {
+      taskViewState: {
+        sessionChange: {
+          current: {
+            name: "原场次",
+            start: "2026/08/03 09:00",
+            end: "2026/08/03 11:00",
+            early: 30,
+            later: 20,
+            message: "原欢迎语",
+            notice: "原登录提示",
+          },
+        },
+      },
+      sessionChangeFormValues: () => ({
+        name: "",
+        start: "2026-08-03 09:00",
+        end: "2026-08-03 11:00",
+        early: null,
+        later: null,
+        message: "",
+        notice: "",
+      }),
+      tenantTimeToDisplayTime: (value) => String(value || "").replaceAll("-", "/"),
+    },
+  );
+
+  assert.ok(html.includes("<th>状态</th><th>操作</th>"));
+  assert.ok(html.includes('class="session-requirement-notice" id="sessionRequirementChangeNotice" hidden'));
+  assert.equal(html.includes("sessionRequirementChangeActionBtn"), false);
+  assert.ok(html.includes('class="account-editor-modal session-change-modal" id="sessionChangePanel"'));
+  assert.equal(html.includes('id="sessionChangeMeta"'), false);
+  assert.ok(html.includes('class="settings-grid" id="sessionChangeEditorFields"'));
+  assert.ok(html.includes('class="field session-change-name-field"'));
+  assert.ok(html.includes(".session-change-name-field { grid-column: 1 / -1; }"));
+  assert.ok(html.includes('class="account-editor-actions"><button class="btn" id="sessionChangeCancelBtn"'));
+  assert.ok(html.includes("function taskHasPendingRequirementChange(task = {})"));
+  assert.ok(html.includes('<span class="tag amber">需求有变请确认</span>'));
+  assert.ok(projectSessionRenderer.includes("sessionRequirementChangeBadge(session)"));
+  assert.ok(projectSessionRenderer.includes("data-project-session-change-task-id"));
+  assert.ok(projectSessionRenderer.includes(">修改场次</button>"));
+  assert.ok(taskRenderer.includes("pendingRequirementSessions"));
+  assert.ok(taskRenderer.includes("sessionRequirementChangeNotice.hidden"));
+  assert.ok(taskRenderer.includes("sessionRequirementChangeBadge(session)"));
+  assert.ok(html.includes(".task-session-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 12px;"));
+  assert.ok(html.includes(".session-requirement-notice {"));
+  assert.ok(html.includes("min-height: 72px;"));
+  assert.ok(changeOpener.includes("showProjectDialog(sessionChangePanel, trigger)"));
+  assert.ok(html.includes("sessionChangePanel.addEventListener(\"cancel\""));
+  assert.ok(changeOpener.includes("preview.requirementChange"));
+  assert.ok(changeOpener.includes("requirementChange.suggestedChanges"));
+  assert.ok(changeOpener.includes("sessionChangeInitialFieldValue(field, suggested, requirementChange.pending)"));
+  assert.ok(changeOpener.includes("const hasRequirementChanges = Boolean(requirementChange.pending || courseRequirementChange.pending)"));
+  assert.ok(changeOpener.includes("sessionChangeEditorFields.hidden = true"));
+  assert.ok(changeOpener.includes("sessionChangeConfirmRow.hidden = !hasRequirementChanges"));
+  assert.ok(changeOpener.includes("sessionChangeSubmitBtn.hidden = !hasRequirementChanges"));
+  assert.ok(changeOpener.includes("courseRequirementChange.pending && courses.length"));
+  assert.equal(changeOpener.includes('setSessionChangeAlert("需求有变请确认"'), false);
+  assert.ok(diffRenderer.includes('label: "考试时间"'));
+  assert.ok(diffRenderer.includes('field !== "start" && field !== "end"'));
+  assert.ok(diffRenderer.includes('class="project-requirement-diff-row"'));
+  assert.ok(timeValidator.includes('end < start'));
+  assert.equal(timeValidator.includes("sessionChangeCurrentMinuteValue"), false);
+  assert.equal(timeValidator.includes("考试时间不能早于当前时间"), false);
+  assert.ok(changeSubmitter.includes("requirementChangeId: taskViewState.sessionChange.requirementChangeId"));
+  assert.ok(changeSubmitter.includes("renderSessionChangeSuccess(completedParts)"));
+  assert.ok(changeSubmitter.includes("renderSessionChangeFailure(completedParts)"));
+  assert.ok(changeSubmitter.includes("error?.response?.task"));
+  assert.equal(changeSubmitter.includes("formatApiErrorDetail(error)"), false);
+  assert.equal(changeSubmitter.includes("throw error"), false);
+  assert.ok(html.includes("修改记录已写入下方执行日志。"));
+  assert.ok(taskRenderer.includes("(task.steps || []).flatMap((step) => (step.logs || [])"));
+  assert.ok(html.includes('projectDetailSessionRows.addEventListener("click"'));
+  assert.ok(html.includes(".then(() => openSessionChange(taskId, sessionId))"));
+  assert.equal(initialValue("name", { start: "新时间" }, true), "");
+  assert.equal(initialValue("name", { name: "新场次" }, true), "新场次");
+  assert.equal(initialValue("name", {}, false), "");
+  assert.ok(html.includes('id="sessionChangeConfirmRow" style="margin-top:12px;" hidden'));
+  assert.ok(diffRenderer.includes('"无需求变更"'));
+  assert.deepEqual(changedValues(), {});
+});
+
+test("session change record details do not collapse the outer task card", () => {
+  const taskStepClickHandler = sourceBetween(
+    '      taskStepGrid.addEventListener("click", async (event) => {',
+    "\n\n      dropZone.addEventListener",
+  );
+  const recordGuardIndex = taskStepClickHandler.indexOf(
+    'const sessionChangeRecordCard = event.target.closest(".session-change-record-card")',
+  );
+  const outerCardToggleIndex = taskStepClickHandler.indexOf(
+    'const card = event.target.closest(".task-step-card")',
+  );
+
+  assert.ok(recordGuardIndex >= 0);
+  assert.ok(recordGuardIndex < outerCardToggleIndex);
+  assert.match(
+    taskStepClickHandler.slice(recordGuardIndex, outerCardToggleIndex),
+    /if \(sessionChangeRecordCard\) \{\s*event\.stopPropagation\(\);\s*return;\s*\}/,
+  );
+});
+
+test("project session sync previews current EasyExam differences and only updates after confirmation", () => {
+  const rowRenderer = sourceBetween(
+    "      function renderProjectSessionRows(task = taskViewState.currentProject) {",
+    "\n      async function previewProjectSessionSync() {",
+  );
+  const previewHandler = sourceBetween(
+    "      async function previewProjectSessionSync() {",
+    "\n      async function applyProjectSessionSync(sessionId) {",
+  );
+  const applyHandler = sourceBetween(
+    "      async function applyProjectSessionSync(sessionId) {",
+    "\n      function toggleAllProjectSessionSyncDiffs() {",
+  );
+  const clickHandler = sourceBetween(
+    '      projectDetailSessionRows.addEventListener("click", (event) => {',
+    "\n      projectWorkflowSteps.addEventListener",
+  );
+  const historyCard = sourceBetween(
+    "      function sessionChangeHistoryCard(record = {}, index = 0) {",
+    "\n      function inferredPaperName",
+  );
+
+  assert.ok(html.includes('id="projectSessionSyncBtn"'));
+  assert.ok(html.includes(">同步易考信息</button>"));
+  assert.ok(html.includes('id="projectSessionSyncCount"'));
+  assert.match(html, /\.project-session-sync-button\s*\{[^}]*min-height:\s*28px;[^}]*font-size:\s*12px;/s);
+  assert.ok(rowRenderer.includes('"有差异"'));
+  assert.ok(rowRenderer.includes('"查看差异"'));
+  assert.ok(rowRenderer.includes('"查看易考信息"'));
+  assert.ok(html.includes("function renderProjectSessionSyncReadback"));
+  assert.ok(html.includes("科目信息"));
+  assert.ok(html.includes("已绑定试卷"));
+  assert.ok(html.includes("配置项 ${Number(summary.configurationCount || 0)}"));
+  assert.ok(rowRenderer.includes("data-project-session-change-task-id"));
+  assert.ok(rowRenderer.includes(">修改场次</button>"));
+  assert.ok(previewHandler.includes("/sessions/sync-preview"));
+  assert.ok(previewHandler.includes("method: \"POST\"") === false);
+  assert.ok(applyHandler.includes("/sync-from-yikao"));
+  assert.ok(applyHandler.includes("JSON.stringify({ confirm: true })"));
+  assert.ok(clickHandler.includes('action === "later"'));
+  assert.ok(clickHandler.includes('action === "apply"'));
+  assert.ok(historyCard.includes('record.action === "sync_from_yikao"'));
+  assert.ok(historyCard.includes('"同步完成"'));
+});
+
+test("exam detail aggregates EasyExam course changes into the session-change dialog", () => {
+  const taskRenderer = sourceBetween(
+    "      function renderTaskDetail(task, options = {}) {",
+    "\n      function downloadFileNameFromDisposition",
+  );
+  const sessionOpener = sourceBetween(
+    "      async function openSessionChange(taskId, sessionId, trigger = null) {",
+    "\n      async function submitSessionChange() {",
+  );
+  const sessionSubmitter = sourceBetween(
+    "      async function submitSessionChange() {",
+    "\n      function formatSessionTime(session) {",
+  );
+  const courseEntries = compileInlineFunction(
+    "      function sessionChangeCourseEntries() {",
+    "\n      function sessionChangeDisplayTimeValue(value) {",
+    {
+      sessionChangeCourseNamesValid: () => true,
+      sessionChangeCourseSection: { hidden: false },
+      taskViewState: { sessionChange: { courses: [{ code: "20260803-01-01", name: "原科目" }] } },
+      sessionChangeCourseInputNames: () => ["新科目"],
+    },
+  );
+
+  assert.ok(html.includes('id="sessionChangeCourseSection"'));
+  assert.ok(html.includes('id="sessionChangeCourseFields"'));
+  assert.equal(html.includes('id="courseChangePanel"'), false);
+  assert.equal(html.includes(">修改科目</button>"), false);
+  assert.equal(taskRenderer.includes("data-course-change-task-id"), false);
+  assert.ok(sessionOpener.includes("/courses/change-preview?requirementIndex="));
+  assert.ok(sessionOpener.includes("courseRequirementChange.pending && courses.length"));
+  assert.ok(sessionOpener.includes("sessionChangeCourseSection.hidden = false"));
+  assert.match(html, /data-course-change-name="\$\{index\}"[^>]*readonly/);
+  assert.ok(sessionSubmitter.includes("/courses/change"));
+  assert.ok(sessionSubmitter.includes("names: sessionChangeCourseInputNames()"));
+  assert.ok(sessionSubmitter.includes("keepSessionChangePanel: true"));
+  assert.deepEqual(courseEntries(), [{
+    label: "科目信息",
+    before: "原科目",
+    after: "新科目",
+    beforeCaption: "当前科目",
+  }]);
+  assert.ok(html.includes("科目信息") && html.includes("修改记录已写入下方执行日志。"));
+  assert.ok(taskRenderer.includes("(task.steps || []).flatMap((step) => (step.logs || [])"));
+  assert.ok(sessionSubmitter.includes("/sessions/${encodeURIComponent(sessionId)}/change"));
 });
 
 test("long confirmation copy starts collapsed in the generated requirement card", () => {
@@ -2678,4 +4109,123 @@ test("auto configuration restores the persisted EasyExam requirement by project 
   assert.ok(html.includes("AutoConfigPage({ documentObject: document, loadProject: loadAutoConfigProject })"));
   assert.ok(html.includes("requirementIndex: uiState.autoConfigRequirementIndex"));
   assert.ok(html.includes("startAutoConfigRequirement(nextIndex)"));
+});
+
+test("project personnel workflow exposes a protected preview and recheck flow", () => {
+  assert.ok(html.includes('id="operationPersonnelTaskActionBtn"'));
+  assert.ok(html.includes('id="operationPersonnelTaskEditBtn" type="button">编辑</button>'));
+  assert.ok(html.includes('id="operationPersonnelTaskSaveBtn" type="button" hidden>保存</button>'));
+  assert.ok(html.includes('id="operationPersonnelTaskCancelEditBtn" type="button" hidden>取消</button>'));
+  assert.ok(html.includes('method: "PATCH"'));
+  assert.ok(html.includes("data-operation-personnel-edit"));
+  assert.ok(html.includes("/operation-personnel-task`"));
+  assert.ok(html.includes('id="operationPersonnelTaskRecheckBtn"'));
+  assert.ok(html.includes('id="operationPersonnelTaskState"'));
+  assert.equal(html.includes("人员任务接口待接入"), false);
+  assert.ok(html.includes("function renderOperationPersonnelDraft(draft = {}, editing = false)"));
+  assert.equal(html.includes("人员服务字段来自泛微，批次代码来自建批次结果。"), false);
+  assert.equal(html.includes('<div class="operation-task-section-head"><span class="workflow-source-badge fanwei">泛微</span></div>'), false);
+  assert.ok(html.includes("operation-personnel-schedule-list"));
+  assert.ok(html.includes("function renderOperationPersonnelSchedule(item = {}, index = 0)"));
+  assert.ok(html.includes("function operationPersonnelRequirementComparison(draft = {})"));
+  assert.ok(html.includes("function operationPersonnelPendingWritePlan(draft = {})"));
+  assert.ok(html.includes("function renderOperationPersonnelRequirements(draft = {}, editing = false)"));
+  const personnelRequirementsRenderer = sourceBetween(
+    "      function renderOperationPersonnelRequirements(draft = {}, editing = false) {",
+    "\n      function renderOperationPersonnelDraft",
+  );
+  assert.ok(personnelRequirementsRenderer.includes('.filter((item) => item.name !== "正式考试-监考登录监控")'));
+  assert.ok(personnelRequirementsRenderer.includes("data-operation-personnel-requirement"));
+  assert.ok(personnelRequirementsRenderer.includes("可编辑"));
+  assert.ok(personnelRequirementsRenderer.includes('item.synced ? "已同步" : "待写入"'));
+  assert.equal(personnelRequirementsRenderer.includes('"待核对"'), false);
+  const personnelDraftRenderer = sourceBetween(
+    "      function renderOperationPersonnelDraft(draft = {}, editing = false) {",
+    "\n      function renderOperationPersonnelTaskState",
+  );
+  assert.equal(personnelDraftRenderer.includes('renderOperationPersonnelParam("监考登录监控"'), false);
+  assert.equal(personnelDraftRenderer.includes('renderOperationPersonnelParam("最早登录系统时间"'), false);
+  assert.ok(personnelDraftRenderer.includes('renderOperationPersonnelParam("监考类型", "分散监考"'));
+  assert.equal(personnelDraftRenderer.includes('renderOperationPersonnelParam("监考比例"'), false);
+  assert.equal(personnelDraftRenderer.includes('renderOperationPersonnelParam("监考人数"'), false);
+  assert.equal(personnelDraftRenderer.includes('renderOperationPersonnelParam("人员服务"'), false);
+  assert.ok(html.includes('const edits = { dates: {}, personnel: {}, requirements: {} };'));
+  assert.ok(html.includes("edits.requirements[name] = input.value"));
+  assert.ok(html.includes('data-personnel-section="configuration"'));
+  assert.ok(html.includes('data-personnel-section="requirements"'));
+  assert.equal(personnelDraftRenderer.includes('data-personnel-section="task"'), false);
+  assert.equal(personnelDraftRenderer.includes("<h4>任务信息</h4>"), false);
+  assert.ok(html.includes('data-personnel-section="recipients"'));
+  assert.ok(html.includes("operation-personnel-field-grid"));
+  assert.ok(html.includes("operation-personnel-requirement-list"));
+  assert.ok(html.includes('renderOperationPersonnelParam("人员落实日期", `${dates.start || "待补充"} ~ ${dates.end || "待补充"}`'));
+  assert.ok(html.includes("function renderOperationPersonnelEditDateRange(dates = {}, warning = false)"));
+  assert.ok(html.includes('data-operation-personnel-edit="dates.start"'));
+  assert.ok(html.includes('data-operation-personnel-edit="dates.end"'));
+  assert.ok(html.includes("待写入"));
+  assert.ok(html.includes("补全人员信息并发送"));
+  assert.ok(html.includes("operation-personnel-schedule-list .content-exam-header"));
+  assert.ok(html.includes("content-exam-card operation-personnel-schedule-card"));
+  assert.ok(html.includes("<span>序号</span><span>考试名称</span><span>考试时间</span>"));
+  assert.ok(html.includes("schedules.map((item, index) => renderOperationPersonnelSchedule(item, index))"));
+  assert.ok(html.includes("/operation-personnel-task/preview"));
+  assert.ok(html.includes("/operation-personnel-task/send"));
+  assert.ok(html.includes("/operation-personnel-task/recheck"));
+  const handler = sourceBetween(
+    "      async function previewAndSendOperationPersonnelTask() {",
+    "\n      async function recheckOperationPersonnelTask() {",
+  );
+  assert.ok(handler.includes("await showConfirmDialog"));
+  assert.ok(handler.includes('title: "填写变更内容"'));
+  assert.ok(handler.includes('label: "变更内容"'));
+  assert.ok(handler.includes('value: resendPreview.suggestedChangeSummary || ""'));
+  assert.ok(handler.includes('placeholder: "系统已列出本次与上次发送任务的全部差异，可补充说明"'));
+  assert.ok(handler.includes("required: true"));
+  assert.ok(handler.includes("operationPersonnelTaskHasSent"));
+  assert.ok(html.includes("Array.isArray(state.sendHistory) && state.sendHistory.length > 0"));
+  assert.ok(handler.includes("previewDraftFingerprint: resendPreview.currentFingerprint"));
+  assert.ok(handler.includes("previewBaselineFingerprint: resendPreview.baselineFingerprint"));
+  assert.ok(handler.includes("await ensureScoreStampLocalHelper()"));
+  assert.ok(handler.includes("正在连接已开启的运控页面"));
+  assert.ok(handler.includes("正在自动补全人员信息、选择收件人与抄送人并发送任务单"));
+  assert.ok(handler.includes("changeSummary"));
+  assert.ok(handler.includes("previewToken: preview.previewToken"));
+  assert.ok(handler.includes("await pollOperationPersonnelAttempt"));
+  assert.ok(html.includes("function operationPersonnelExpiredDateLabels(draft = {})"));
+  assert.ok(html.includes('recipients.ccGroups || [recipients.ccGroup]'));
+  assert.ok(html.includes('join("、")'));
+  assert.ok(html.includes("expiredDateLabels.length > 0"));
+  assert.ok(html.includes('operationPersonnelTaskActionBtn.title = expiredDateLabels.length'));
+});
+
+test("personnel task layout keeps the shared card styling", () => {
+  const layoutCss = sourceBetween(
+    "      .operation-personnel-layout {",
+    "\n      .operation-param-item {",
+  );
+  assert.ok(layoutCss.includes("grid-template-columns: repeat(2, minmax(0, 1fr));"));
+  assert.ok(html.includes(".operation-personnel-field-grid,\n        .operation-personnel-requirement-list { grid-template-columns: 1fr; }"));
+  assert.equal(layoutCss.includes("background:"), false);
+  assert.equal(layoutCss.includes("border-radius:"), false);
+  assert.equal(layoutCss.includes("box-shadow:"), false);
+});
+
+test("personnel task save shows only a concise success message", () => {
+  const saveHandler = sourceBetween(
+    "      async function saveOperationPersonnelTaskEdit() {",
+    "\n      async function pollOperationPersonnelAttempt",
+  );
+  assert.ok(saveHandler.includes('operationPersonnelTaskState.textContent = "人员任务草稿已保存。";'));
+  assert.equal(saveHandler.includes("result.changeSummary"), false);
+});
+
+test("project personnel workflow keeps a fallback draft for local editing", () => {
+  const workflowRenderer = sourceBetween(
+    "      function renderProjectWorkflow(task = {}, workflow = {}, batchDraft = {}) {",
+    "\n      function projectRequirementFormalTime",
+  );
+  assert.ok(workflowRenderer.includes("const workflowPersonnelDraft = workflow.personnelDraft || {};"));
+  assert.ok(workflowRenderer.includes("taskViewState.operationPersonnelTask = {"));
+  assert.ok(workflowRenderer.includes("draft: workflowPersonnelDraft"));
+  assert.ok(workflowRenderer.includes("if (!taskViewState.operationPersonnelEditing)"));
 });

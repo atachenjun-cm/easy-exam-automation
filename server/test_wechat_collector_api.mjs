@@ -1319,6 +1319,34 @@ test("wechat collector API can install and uninstall easy exam service by explic
   assert.deepEqual(calls, ["install-service", "uninstall-service"]);
 });
 
+test("wechat collector API reuses an already loaded local service", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "wechat-api-"));
+  const calls = [];
+  const service = {
+    label: "com.example.easy-exam-web",
+    canonicalLabel: "com.ata.easy-exam-service",
+    plistPath: path.join(dir, "com.example.easy-exam-web.plist"),
+    installed: true,
+    loaded: true,
+  };
+  const handler = createWechatCollectorHandler({
+    configPath: path.join(dir, "wechat-requirement-groups.json"),
+    statusPath: path.join(dir, "wechat-last-run.json"),
+    serviceStatus: () => service,
+    installService: () => {
+      calls.push("install-service");
+      return service;
+    },
+  });
+
+  const installed = await call(handler, "POST", "/api/wechat-collector/service/install");
+
+  assert.equal(installed.statusCode, 200);
+  assert.equal(installed.body.service.label, service.label);
+  assert.equal(installed.body.service.reused, true);
+  assert.deepEqual(calls, []);
+});
+
 test("wechat collector API can install and uninstall the whole automation stack", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "wechat-api-"));
   const configPath = path.join(dir, "wechat-requirement-groups.json");
@@ -1429,6 +1457,64 @@ test("wechat collector API rolls back service install when automation scheduler 
   assert.match(result.body.error, /scheduler install failed/);
   assert.equal(result.body.rollback.service.loaded, false);
   assert.deepEqual(calls, ["install-service", "install-scheduler", "uninstall-service"]);
+});
+
+test("wechat collector API keeps a reused local service when scheduler install fails", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "wechat-api-"));
+  const configPath = path.join(dir, "wechat-requirement-groups.json");
+  const statusPath = path.join(dir, "wechat-last-run.json");
+  const pipelineSmokeStatusPath = path.join(dir, "wechat-pipeline-smoke.json");
+  const calls = [];
+  const service = {
+    label: "com.example.easy-exam-web",
+    canonicalLabel: "com.ata.easy-exam-service",
+    installed: true,
+    loaded: true,
+  };
+  writeFileSync(configPath, JSON.stringify({
+    groups: [{
+      group_name: "AI赋能运营自动化小组",
+      enabled: true,
+      interval_minutes: 15,
+    }],
+  }));
+  writeFileSync(pipelineSmokeStatusPath, JSON.stringify({
+    ok: true,
+    requestId: "wechat-smoke-test",
+    finishedAt: "2026-06-25T07:30:00.000Z",
+  }));
+  writeFileSync(statusPath, JSON.stringify({
+    startedAt: "2026-06-25T07:45:00.000Z",
+    finishedAt: "2026-06-25T07:46:00.000Z",
+    groups: [{ groupName: "AI赋能运营自动化小组", status: "pushed" }],
+  }));
+  const handler = createWechatCollectorHandler({
+    configPath,
+    statusPath,
+    pipelineSmokeStatusPath,
+    now: () => new Date("2026-06-25T08:00:00.000Z"),
+    serviceStatus: () => service,
+    installService: () => {
+      calls.push("install-service");
+      return service;
+    },
+    installScheduler: () => {
+      calls.push("install-scheduler");
+      throw new Error("scheduler install failed");
+    },
+    uninstallService: () => {
+      calls.push("uninstall-service");
+      return { ...service, loaded: false };
+    },
+  });
+
+  const result = await call(handler, "POST", "/api/wechat-collector/automation/install");
+
+  assert.equal(result.statusCode, 500);
+  assert.equal(result.body.service.reused, true);
+  assert.equal(result.body.rollback.service, undefined);
+  assert.equal(result.body.rollback.skipped, true);
+  assert.deepEqual(calls, ["install-scheduler"]);
 });
 
 test("wechat collector API rejects automation install until pipeline smoke test has passed", async () => {
@@ -2657,6 +2743,69 @@ test("wechat collector API saves project scoped groups without front-end global 
   assert.equal(saved.groups[0].group_name, "其它项目群");
   assert.equal(saved.groups[1].task_id, "project-1");
   assert.equal(saved.llm_parse.api_key, "saved-key");
+});
+
+test("project binding resolver canonicalizes identity and commits only after config validation", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "wechat-api-"));
+  const configPath = path.join(dir, "wechat-requirement-groups.json");
+  const commits = [];
+  const handler = createWechatCollectorHandler({
+    configPath,
+    resolveProjectBinding: async ({ taskId, payload }) => ({
+      ok: true,
+      payload: {
+        ...payload,
+        project: { taskId, projectName: "服务端项目", requirementRequestId: "req-server" },
+        groups: payload.groups.map((group) => ({
+          ...group,
+          taskId,
+          projectName: "服务端项目",
+          requirementRequestId: "req-server",
+        })),
+      },
+      commit: async () => {
+        commits.push(taskId);
+        return { task: { taskId, config: { requirementRequestId: "req-server" } }, requirementRequestId: "req-server" };
+      },
+    }),
+  });
+
+  const invalid = await call(handler, "PUT", "/api/projects/project-1/wechat-groups", {
+    groups: [{ groupName: "项目群", projectName: "伪造项目", intervalMinutes: 1 }],
+  });
+  assert.equal(invalid.statusCode, 400);
+  assert.deepEqual(commits, []);
+
+  const saved = await call(handler, "PUT", "/api/projects/project-1/wechat-groups", {
+    groups: [{ groupName: "项目群", projectName: "伪造项目", intervalMinutes: 15 }],
+  });
+  assert.equal(saved.statusCode, 200);
+  assert.deepEqual(commits, ["project-1"]);
+  assert.equal(saved.body.config.groups[0].project_name, "服务端项目");
+  assert.equal(saved.body.config.groups[0].requirement_request_id, "req-server");
+  assert.equal(saved.body.requirementRequestId, "req-server");
+});
+
+test("simultaneous project group saves retain both project bindings", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "wechat-api-"));
+  const configPath = path.join(dir, "wechat-requirement-groups.json");
+  const handler = createWechatCollectorHandler({ configPath });
+
+  const [first, second] = await Promise.all([
+    call(handler, "PUT", "/api/projects/project-1/wechat-groups", {
+      project: { taskId: "project-1", projectName: "项目一", requirementRequestId: "req-1" },
+      groups: [{ taskId: "project-1", groupName: "项目一群", projectName: "项目一", requirementRequestId: "req-1", intervalMinutes: 15 }],
+    }),
+    call(handler, "PUT", "/api/projects/project-2/wechat-groups", {
+      project: { taskId: "project-2", projectName: "项目二", requirementRequestId: "req-2" },
+      groups: [{ taskId: "project-2", groupName: "项目二群", projectName: "项目二", requirementRequestId: "req-2", intervalMinutes: 15 }],
+    }),
+  ]);
+
+  assert.equal(first.statusCode, 200);
+  assert.equal(second.statusCode, 200);
+  const saved = JSON.parse(readFileSync(configPath, "utf8"));
+  assert.deepEqual(saved.groups.map((group) => group.task_id).sort(), ["project-1", "project-2"]);
 });
 
 test("wechat collector API does not silently claim a legacy unbound group with the same name", async () => {
