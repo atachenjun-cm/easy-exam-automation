@@ -1,5 +1,10 @@
 import path from "node:path";
 
+import {
+  assertOperationBatchDetailIdentityResult,
+  openOperationBatchIdentityByCode,
+} from "./operation_batch_update_runner.mjs";
+
 function text(value) {
   return String(value ?? "").trim();
 }
@@ -289,7 +294,7 @@ async function ensureBatchListReady(page, batchListUrl, options = {}) {
   const waitMs = Math.max(1, loginWaitMinutes) * 60 * 1000;
   const createButton = page.getByRole("button", { name: /创建批次/ });
   try {
-    await createButton.waitFor({ state: "visible", timeout: 10000 });
+    await createButton.waitFor({ state: "visible", timeout: 30000 });
     return;
   } catch {}
 
@@ -305,14 +310,72 @@ async function ensureBatchListReady(page, batchListUrl, options = {}) {
   await createButton.waitFor({ state: "visible", timeout: 30000 });
 }
 
-async function operationConsolePage(context, batchListUrl) {
+function operationConsolePageIsUsable(page) {
+  if (!page) return false;
+  try {
+    if (typeof page.isClosed === "function" && page.isClosed()) return false;
+    const mainFrame = typeof page.mainFrame === "function" ? page.mainFrame() : null;
+    if (typeof mainFrame?.isDetached === "function" && mainFrame.isDetached()) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function operationConsoleUrlsMatch(actual, expected) {
+  try {
+    return new URL(text(actual)).href === new URL(text(expected)).href;
+  } catch {
+    return false;
+  }
+}
+
+function operationConsolePageUrl(page) {
+  try {
+    return text(page?.url?.());
+  } catch {
+    return "";
+  }
+}
+
+export function operationConsoleNavigationCanRetry(error) {
+  return /No frame with given id found|Frame has been detached|Target page, context or browser has been closed|Target closed/i
+    .test(error?.message || String(error || ""));
+}
+
+export async function navigateOperationConsolePage(context, page, targetUrl) {
+  let candidate = operationConsolePageIsUsable(page) ? page : await context.newPage();
+  if (operationConsoleUrlsMatch(operationConsolePageUrl(candidate), targetUrl)) {
+    try {
+      if (typeof candidate.title === "function") await candidate.title();
+      return candidate;
+    } catch (error) {
+      if (!operationConsoleNavigationCanRetry(error)) throw error;
+    }
+    candidate = await context.newPage();
+    await candidate.goto(targetUrl, { waitUntil: "domcontentloaded" });
+    return candidate;
+  }
+  try {
+    await candidate.goto(targetUrl, { waitUntil: "domcontentloaded" });
+    return candidate;
+  } catch (error) {
+    if (!operationConsoleNavigationCanRetry(error)) throw error;
+  }
+
+  candidate = await context.newPage();
+  await candidate.goto(targetUrl, { waitUntil: "domcontentloaded" });
+  return candidate;
+}
+
+export async function operationConsolePage(context, batchListUrl) {
   const pages = typeof context?.pages === "function" ? context.pages() : [];
   let expectedOrigin = "";
   try {
     expectedOrigin = new URL(batchListUrl).origin;
   } catch {}
   const isExpectedConsolePage = (candidate) => {
-    const currentUrl = text(candidate?.url?.());
+    const currentUrl = operationConsolePageUrl(candidate);
     if (!currentUrl) return false;
     try {
       return new URL(currentUrl).origin === expectedOrigin;
@@ -320,9 +383,10 @@ async function operationConsolePage(context, batchListUrl) {
       return false;
     }
   };
-  const consolePage = pages.find(isExpectedConsolePage)
-    || pages.find((candidate) => operationConsoleNeedsLogin(text(candidate?.url?.())));
-  return consolePage || pages[0] || await context.newPage();
+  const consolePage = pages
+    .filter(operationConsolePageIsUsable)
+    .find(isExpectedConsolePage);
+  return consolePage || await context.newPage();
 }
 
 async function uniqueOperationBatchResult(page, batchName, batchCode = "") {
@@ -375,12 +439,19 @@ async function findCreatedBatchFromList(page, batchListUrl, batchName, options =
   const bodyText = await page.locator("body").innerText();
   const code = operationBatchCodeFromText(targetText) || operationBatchCodeFromText(bodyText);
   if (!code) return null;
+  const identity = await openOperationBatchIdentityByCode(page, {
+    batchCode: code,
+    batchName: normalizedName,
+    batchListUrl,
+    options,
+  });
   return {
     operationBatchCode: code,
-    batchName: normalizedName,
-    batchGuid: "",
-    detailUrl: page.url(),
+    batchName: identity.batchName,
+    batchGuid: new URL(identity.detailUrl).searchParams.get("batch_guid") || "",
+    detailUrl: identity.detailUrl,
     status: "created_unpublished",
+    identityVerified: true,
   };
 }
 
@@ -490,11 +561,18 @@ export async function clickOperationBatchComplete(page, options = {}) {
     outcome = await Promise.any([
       page.waitForURL(/batchDetail/, { timeout: waitMs }).then(() => "detail"),
       projectGroupModal.waitFor({ state: "visible", timeout: waitMs }).then(() => "project_group"),
+      completeButton.waitFor({ state: "hidden", timeout: waitMs }).then(async () => {
+        await page.waitForTimeout(Number(options.projectGroupGraceWaitMs ?? 500));
+        if (await projectGroupModal.count() === 1) return "project_group";
+        if (/batchDetail/.test(page.url())) return "detail";
+        if (/\/batch\/batchList(?:[?#]|$)/.test(page.url())) return "list";
+        throw new Error("完成按钮消失后未回到批次列表");
+      }),
     ]);
   } catch {
-    throw new Error("点击“完成”后既未进入批次详情页，也未出现“新项目指定项目组”弹窗");
+    throw new Error("点击“完成”后既未回到批次列表，也未进入批次详情页或出现“新项目指定项目组”弹窗");
   }
-  if (outcome === "detail") return { projectGroupAssigned: false };
+  if (outcome === "detail" || outcome === "list") return { projectGroupAssigned: false };
   return await assignFirstOperationProjectGroup(page, options);
 }
 
@@ -554,11 +632,31 @@ export async function runOperationBatchReconciliation(draft, options = {}) {
     });
   }
   const batchListUrl = operationConsoleBatchListUrl({ baseUrl: options.baseUrl });
-  const page = await operationConsolePage(context, batchListUrl);
+  let page = options.page || await operationConsolePage(context, batchListUrl);
   try {
-    await page.goto(batchListUrl, { waitUntil: "domcontentloaded" });
+    page = await navigateOperationConsolePage(context, page, batchListUrl);
     await ensureBatchListReady(page, batchListUrl, options);
     const batchName = draftValue(draft, "batchName");
+    const operationBatchCode = text(options.operationBatchCode);
+    if (operationBatchCode) {
+      const identity = await openOperationBatchIdentityByCode(page, {
+        batchCode: operationBatchCode,
+        batchName,
+        batchListUrl,
+        options,
+      });
+      const publishState = options.publishAfterCreate === false
+        ? await waitForOperationBatchPublishState(page, options)
+        : (await clickOperationBatchPublish(page, options)).status;
+      return {
+        operationBatchCode,
+        batchName: identity.batchName,
+        batchGuid: new URL(page.url()).searchParams.get("batch_guid") || "",
+        detailUrl: identity.detailUrl,
+        status: publishState === "published" ? "published" : "created_unpublished",
+        identityVerified: true,
+      };
+    }
     if (options.publishAfterCreate === false) {
       return await findCreatedBatchFromList(page, batchListUrl, batchName, options);
     }
@@ -620,16 +718,20 @@ export async function publishOperationBatchFromList(page, batchListUrl, batchNam
   const code = operationBatchCodeFromText(targetText)
     || operationBatchCodeFromText(await page.locator("body").innerText());
   if (!code) throw new Error(`按批次名称未找到批次代码：${normalizedName}`);
-  const detailWait = page.waitForURL(/batchDetail/, { timeout: 30000 });
-  await target.click();
-  await detailWait;
+  const identity = await openOperationBatchIdentityByCode(page, {
+    batchCode: code,
+    batchName: normalizedName,
+    batchListUrl,
+    options,
+  });
   const published = await clickOperationBatchPublish(page, options);
   return {
     operationBatchCode: code,
-    batchName: normalizedName,
+    batchName: identity.batchName,
     batchGuid: new URL(page.url()).searchParams.get("batch_guid") || "",
-    detailUrl: published.detailUrl,
+    detailUrl: identity.detailUrl || published.detailUrl,
     status: published.status,
+    identityVerified: true,
   };
 }
 
@@ -650,9 +752,9 @@ export async function runOperationBatchCreation(draft, options = {}) {
     });
   }
   const batchListUrl = operationConsoleBatchListUrl({ baseUrl: options.baseUrl });
-  const page = await operationConsolePage(context, batchListUrl);
+  let page = options.page || await operationConsolePage(context, batchListUrl);
   try {
-    await page.goto(batchListUrl, { waitUntil: "domcontentloaded" });
+    page = await navigateOperationConsolePage(context, page, batchListUrl);
     await ensureBatchListReady(page, batchListUrl, options);
     await page.getByRole("button", { name: /创建批次/ }).click();
     await page.getByRole("button", { name: /选\s*择/ }).click();
@@ -683,33 +785,40 @@ export async function runOperationBatchCreation(draft, options = {}) {
     await chooseDropdownValue(page, "结算依据", draftValue(draft, "billingBasis"));
     await fillInputNearLabel(page, "备注", draftValue(draft, "remark"));
     await page.getByRole("button", { name: /下一步/ }).click();
+    const batchName = draftValue(draft, "batchName");
     try {
       await clickOperationBatchComplete(page, options);
     } catch (error) {
       throw reconciliationRequiredError(error);
     }
-    const batchName = draftValue(draft, "batchName");
     let created;
-    const detailOpened = /batchDetail/.test(page.url())
-      || await page.waitForURL(/batchDetail/, { timeout: 60000 })
-        .then(() => true)
-        .catch(() => false);
-    if (detailOpened) {
+    if (/batchDetail/.test(page.url())) {
       const bodyText = await page.locator("body").innerText();
       const code = operationBatchCodeFromText(bodyText);
       if (!code) throw reconciliationRequiredError(new Error("创建完成，但未能从详情页读取批次代码"));
-      const detailUrl = page.url();
+      await assertOperationBatchDetailIdentityResult(page, {
+        batchCode: code,
+        batchName,
+        batchListUrl,
+      });
+      const identity = await openOperationBatchIdentityByCode(page, {
+        batchCode: code,
+        batchName,
+        batchListUrl,
+        options,
+      });
       created = {
         operationBatchCode: code,
-        batchName,
-        batchGuid: new URL(detailUrl).searchParams.get("batch_guid") || "",
-        detailUrl,
+        batchName: identity.batchName,
+        batchGuid: new URL(identity.detailUrl).searchParams.get("batch_guid") || "",
+        detailUrl: identity.detailUrl,
         status: "created_unpublished",
+        identityVerified: true,
       };
     } else {
       created = await findCreatedBatchFromList(page, batchListUrl, batchName, options);
       if (!created) {
-        throw reconciliationRequiredError(new Error("创建已提交，但未跳转详情页，也未能在批次列表按批次名称找到新批次"));
+        throw reconciliationRequiredError(new Error("创建已提交，但未能在批次列表定位并打开新批次"));
       }
     }
     if (options.publishAfterCreate === false) return created;

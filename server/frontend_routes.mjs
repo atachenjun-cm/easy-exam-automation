@@ -8,6 +8,7 @@ const FRONTEND_ROUTE_PATTERNS = [
   /^\/auto-config\/?$/,
   /^\/exams\/?$/,
   /^\/exams\/[^/]+\/?$/,
+  /^\/candidate-changes\/?$/,
   /^\/candidate-import\/?$/,
   /^\/requirements\/?$/,
   /^\/requirements\/[^/]+\/?$/,

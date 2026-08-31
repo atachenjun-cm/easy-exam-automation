@@ -209,6 +209,16 @@ test("人员任务生成完整的五项正式考试考务需求", () => {
   assert.deepEqual(operationPersonnelInformationMissing(draft), []);
 });
 
+test("人员任务缺少结算组时阻止发送", () => {
+  const draft = buildOperationPersonnelTaskDraft(baseTask(), {
+    environment: "test",
+    now: "2026-08-05T02:00:00.000Z",
+  });
+  draft.recipients.ccGroups = ["考站管理&质量控制部"];
+
+  assert.ok(operationPersonnelInformationMissing(draft).includes("固定抄送部门"));
+});
+
 test("人员任务刷新时沿用已完成考务需求检查点的真实回读", async () => {
   const task = baseTask();
   const readback = [
@@ -284,7 +294,7 @@ test("批次缺少受管快照时从当前人员草稿建立严格日程基线",
 
   assert.deepEqual(operationPersonnelManagedSchedules(draft, []), [{
     requirementIndex: 0,
-    name: "综合能力",
+    name: "示例考试",
     start: "2026/08/20 09:00",
     end: "2026/08/20 11:00",
   }]);
@@ -314,7 +324,7 @@ test("首次预览可用草稿日程核对已有运控日程", async () => {
       },
       schedules: [{
         scheduleCode: 1,
-        subjectName: "综合能力",
+        subjectName: "示例考试",
         start: "2026-08-20 09:00",
         end: "2026-08-20 11:00",
       }],
@@ -334,13 +344,13 @@ test("首次预览可用草稿日程核对已有运控日程", async () => {
 
   assert.deepEqual(result.state.draft.managedSchedules, [{
     requirementIndex: 0,
-    name: "综合能力",
+    name: "示例考试",
     start: "2026/08/20 09:00",
     end: "2026/08/20 11:00",
   }]);
   assert.deepEqual(result.state.draft.displaySchedules, [{
     scheduleCode: 1,
-    name: "综合能力",
+    name: "示例考试",
     start: "2026/08/20 09:00",
     end: "2026/08/20 11:00",
   }]);
@@ -364,7 +374,7 @@ test("发送排队复核在无受管快照时继续使用草稿日程", async ()
     },
     schedules: [{
       scheduleCode: 1,
-      subjectName: "综合能力",
+      subjectName: "示例考试",
       start: "2026-08-20 09:00",
       end: "2026-08-20 11:00",
     }],
@@ -413,7 +423,7 @@ test("发送排队复核在无受管快照时继续使用草稿日程", async ()
 
   assert.deepEqual(attemptInstruction.managedSchedules, [{
     requirementIndex: 0,
-    name: "综合能力",
+    name: "示例考试",
     start: "2026/08/20 09:00",
     end: "2026/08/20 11:00",
   }]);
@@ -434,7 +444,7 @@ test("失败流程沿用上次真实基线，允许确认已知日期变更", as
     },
     schedules: [{
       scheduleCode: 1,
-      subjectName: "综合能力",
+      subjectName: "示例考试",
       start: "2026-08-20 09:00",
       end: "2026-08-20 11:00",
     }],

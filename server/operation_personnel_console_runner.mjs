@@ -447,23 +447,22 @@ export async function operationBatchTableRows(page) {
 async function operationBatchCardEntries(page) {
   const cards = await page.locator(".ant-list:has(.same-batch-title) .ant-list-item").all();
   return Promise.all(cards.map(async (card) => {
-    const code = card.locator(":scope > div:first-child > div:first-child > span:first-child");
     const name = card.locator(".same-batch-title");
-    const codeCount = await code.count();
     const nameCount = await name.count();
-    if (codeCount !== 1 || nameCount !== 1) {
+    const code = operationBatchCodeFromText(await card.innerText());
+    if (!code || nameCount !== 1) {
       throw reconciliationRequiredError(new Error(
-        `批次卡片必须有唯一代码和名称节点，实际代码 ${codeCount} 个、名称 ${nameCount} 个`,
+        `批次卡片必须有可识别代码和唯一名称，实际代码 ${code || "未识别"}、名称 ${nameCount} 个`,
       ));
     }
     return {
       locator: card,
-      cells: [text(await code.innerText()), text(await name.innerText())],
+      cells: [code, text(await name.innerText())],
     };
   }));
 }
 
-export async function openExactOperationBatchCard(page, batchCode) {
+export async function openExactOperationBatchCard(page, batchCode, options = {}) {
   const normalizedCode = text(batchCode);
   const matches = (await operationBatchCardEntries(page))
     .filter((card) => card.cells[0] === normalizedCode);
@@ -483,6 +482,7 @@ export async function openExactOperationBatchCard(page, batchCode) {
   try {
     await matches[0].locator.click();
     await detailWait;
+    if (options.verifyDetailIdentity === false) return;
     await page.waitForFunction((expectedCode) => {
       const visible = (node) => Boolean(
         node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length),
@@ -904,10 +904,12 @@ export async function runWithOperationBatchContext(context, operation, options =
     primaryError = error;
   }
   let closeError;
-  try {
-    await context.close();
-  } catch (error) {
-    closeError = error;
+  if (options.closeContext !== false) {
+    try {
+      await context.close();
+    } catch (error) {
+      closeError = error;
+    }
   }
   if (primaryError) throw primaryError;
   if (closeError) {

@@ -20,6 +20,14 @@ export function hasOperationBatchTextReplacementCharacter(value = "") {
   return text(value).includes("\uFFFD");
 }
 
+function firstUsableOperationBatchName(...values) {
+  for (const value of values) {
+    const normalized = text(value);
+    if (normalized && !hasOperationBatchTextReplacementCharacter(normalized)) return normalized;
+  }
+  return "";
+}
+
 export const OPERATION_PROJECT_DEPARTMENTS = Object.freeze([
   "项目实施一部",
   "项目实施二部",
@@ -78,6 +86,26 @@ function scheduleDates(business = {}) {
   return { start: matches[0] || "", end: matches[matches.length - 1] || matches[0] || "" };
 }
 
+function requirementScheduleDates(task = {}) {
+  const config = task.config || {};
+  const requirements = Array.isArray(config.examRequirements) && config.examRequirements.length
+    ? config.examRequirements
+    : (config.examRequirement?.fields ? [config.examRequirement] : []);
+  const dates = [];
+  for (const requirement of requirements) {
+    const range = firstNonEmpty(
+      requirement?.fields?.["考试日期时间"],
+      [requirement?.config?.startTimeDisplay, requirement?.config?.endTimeDisplay].filter(Boolean).join(" - "),
+    );
+    for (const match of range.matchAll(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/g)) {
+      dates.push(`${match[1]}-${String(Number(match[2])).padStart(2, "0")}-${String(Number(match[3])).padStart(2, "0")}`);
+    }
+  }
+  if (!dates.length) return { start: "", end: "" };
+  dates.sort();
+  return { start: dates[0], end: dates.at(-1) };
+}
+
 function normalizedBatchProjectName(value = "") {
   return text(value)
     .replace(/有限责任公司|股份有限公司|有限公司/g, "")
@@ -96,15 +124,15 @@ function stripBatchDateSuffix(value = "") {
 export function operationBatchNameForTask(task = {}, business = task.config?.businessRequirement || {}) {
   const savedBatch = task.config?.operationBatch || {};
   const confirmedCode = firstNonEmpty(task.config?.operationBatchCode, savedBatch.code);
+  const confirmedName = firstUsableOperationBatchName(savedBatch.batchName, savedBatch.name);
   if (operationBatchCodeIsValid(confirmedCode)) {
-    const confirmedName = firstNonEmpty(savedBatch.batchName, savedBatch.name);
     if (confirmedName) return confirmedName;
   }
   const batchNameMode = firstNonEmpty(
     task.config?.fanweiSource?.batchNameMode,
     business.batch_name_mode,
   );
-  const sourceBatchName = firstNonEmpty(
+  const sourceBatchName = firstUsableOperationBatchName(
     task.config?.fanweiSource?.raw?.fields?.["批次名称"],
     business.batch_name,
   );
@@ -116,8 +144,7 @@ export function operationBatchNameForTask(task = {}, business = task.config?.bus
     task.projectName,
     business.project_name,
     sourceBatchName,
-    savedBatch.batchName,
-    savedBatch.name,
+    confirmedName,
   )));
   const { start } = scheduleDates(business);
   if (!projectName) return "";
@@ -179,7 +206,9 @@ export function buildOperationBatchDraft(task = {}, overrides = {}) {
     business.batch_name_mode,
   );
   const estimatedCount = numberText(business.estimated_subject_count);
-  const dates = scheduleDates(business);
+  const requirementDates = requirementScheduleDates(task);
+  const dates = requirementDates.start ? requirementDates : scheduleDates(business);
+  const dateSource = requirementDates.start ? "exam_requirement" : "business_requirement";
   const systemType = defaultSystemType(business.system_type);
   const noCentralVenue = centralVenueNotRequired(business.ata_central_venue_required);
   const businessDepartment = operationBusinessDepartment(business.applicant_department);
@@ -211,8 +240,8 @@ export function buildOperationBatchDraft(task = {}, overrides = {}) {
       "批次名称",
     ),
     projectDepartment: field(projectDepartment, "default_rule", "项目部归属"),
-    examStartDate: field(dates.start, "business_requirement", "考试开始日期"),
-    examEndDate: field(dates.end, "business_requirement", "考试结束日期"),
+    examStartDate: field(dates.start, dateSource, "考试开始日期"),
+    examEndDate: field(dates.end, dateSource, "考试结束日期"),
     serviceExam: field(systemType === "易考" ? "易考" : systemType, "default_rule", "考试服务"),
     servicePersonnel: field(servicePersonnel.value, servicePersonnel.source, "人员服务"),
     contentParticipation: field(business.ata_content_participation, "business_requirement", "内容制题参与方式"),
@@ -228,8 +257,8 @@ export function buildOperationBatchDraft(task = {}, overrides = {}) {
     remark: field("", "manual", "备注"),
   };
   for (const [key, value] of Object.entries(overrides.fields || {})) {
-    // Source-owned names and dates must win over stale persisted draft values.
-    if (["projectName", "batchName", "examStartDate", "examEndDate"].includes(key) || !fields[key]) continue;
+    // Source-owned fields must win over stale persisted draft values.
+    if (["projectName", "batchName", "examStartDate", "examEndDate", "servicePersonnel"].includes(key) || !fields[key]) continue;
     // A failed clipboard/encoding path can persist replacement characters in a manual override.
     // Keep the source value so the corrupted text cannot reach the operation console.
     if (hasOperationBatchTextReplacementCharacter(value)) continue;
@@ -269,13 +298,22 @@ export function applyOperationBatchResult(task = {}, result = {}) {
   const code = text(result.operationBatchCode || result.code);
   if (!code) throw new Error("缺少运营批次代码");
   const current = task.config?.operationBatch || {};
-  const batchName = firstNonEmpty(
+  const returnedBatchName = firstNonEmpty(
     result.operationBatchName,
     result.batchName,
     result.batch_name,
-    current.batchName,
-    current.draft?.fields?.batchName?.value,
   );
+  const batchName = returnedBatchName
+    ? firstUsableOperationBatchName(
+      returnedBatchName,
+      current.managedSnapshot?.batchName,
+      current.batchName,
+      current.name,
+      current.draft?.fields?.batchName?.value,
+      task.config?.fanweiSource?.raw?.fields?.["批次名称"],
+      task.config?.businessRequirement?.batch_name,
+    )
+    : firstUsableOperationBatchName(current.batchName, current.name);
   const events = Array.isArray(current.events) ? current.events.slice() : [];
   events.push({
     type: "operation_batch_created",
@@ -283,21 +321,25 @@ export function applyOperationBatchResult(task = {}, result = {}) {
     status: text(result.status || "created_unpublished"),
     at: new Date().toISOString(),
   });
+  const operationBatch = {
+    ...current,
+    code,
+    ...(batchName ? { batchName } : {}),
+    batchGuid: text(result.batchGuid),
+    detailUrl: text(result.detailUrl),
+    status: text(result.status || "created_unpublished"),
+    errorCode: text(result.errorCode),
+    errorMessage: text(result.errorMessage),
+    updatedAt: new Date().toISOString(),
+    events,
+  };
+  if (!batchName && hasOperationBatchTextReplacementCharacter(operationBatch.batchName)) {
+    delete operationBatch.batchName;
+  }
   return {
     operationBatchCode: code,
-    operationBatch: {
-      ...current,
-      code,
-      ...(batchName ? { batchName } : {}),
-      batchGuid: text(result.batchGuid),
-      detailUrl: text(result.detailUrl),
-      status: text(result.status || "created_unpublished"),
-      errorCode: text(result.errorCode),
-      errorMessage: text(result.errorMessage),
-      updatedAt: new Date().toISOString(),
-      events,
-    },
-    scoreStampBatchName: firstNonEmpty(task.config?.scoreStampBatchName, batchName),
+    operationBatch,
+    scoreStampBatchName: firstUsableOperationBatchName(task.config?.scoreStampBatchName, batchName),
   };
 }
 

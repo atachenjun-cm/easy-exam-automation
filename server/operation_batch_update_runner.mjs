@@ -86,7 +86,7 @@ function visibleDateValues(value) {
     .filter(Boolean);
 }
 
-function visibleDateTimeValues(value) {
+function visibleDateTimeValues(value, compactEndDate = "") {
   const source = text(value);
   const matches = [...source.matchAll(
     /\d{4}[/-]\d{1,2}[/-]\d{1,2}[T ]\d{1,2}:\d{2}(?::\d{2})?/g,
@@ -101,7 +101,8 @@ function visibleDateTimeValues(value) {
   );
   if (!compactEnd) return values;
   const startParts = dateTimeParts(values[0]);
-  const endParts = dateTimeParts(`${dateString(startParts)} ${compactEnd[1]}`);
+  const endDate = dateString(dateParts(compactEndDate)) || dateString(startParts);
+  const endParts = dateTimeParts(`${endDate} ${compactEnd[1]}`);
   const end = visibleDateTime(dateTimeString(endParts));
   return end ? [...values, end] : values;
 }
@@ -136,6 +137,51 @@ export function operationBatchVisibleOverviewFromRaw(raw = {}) {
     examStartDate: dates[0],
     examEndDate: dates[1] || dates[0],
   };
+}
+
+export async function waitForOperationBatchVisibleOverview(readRaw, options = {}) {
+  const timeoutMs = Math.max(0, Number(options.timeoutMs ?? 10000));
+  const pollMs = Math.max(0, Number(options.pollMs ?? 100));
+  const now = options.now || Date.now;
+  const wait = options.wait || ((delay) => new Promise((resolve) => setTimeout(resolve, delay)));
+  const deadline = now() + timeoutMs;
+  let lastError;
+  while (true) {
+    try {
+      return operationBatchVisibleOverviewFromRaw(await readRaw());
+    } catch (error) {
+      if (error?.code !== "OPERATION_BATCH_INSPECTION_BLOCKED") throw error;
+      lastError = error;
+    }
+    if (now() >= deadline) throw lastError;
+    await wait(pollMs);
+  }
+}
+
+export async function waitForOperationBatchOverviewScheduleAlignment(
+  readOverview,
+  schedules,
+  options = {},
+) {
+  const timeoutMs = Math.max(0, Number(options.timeoutMs ?? 10000));
+  const pollMs = Math.max(0, Number(options.pollMs ?? 100));
+  const now = options.now || Date.now;
+  const wait = options.wait || ((delay) => new Promise((resolve) => setTimeout(resolve, delay)));
+  const startDate = [...schedules].sort((left, right) => left.start.localeCompare(right.start))[0]?.start.slice(0, 10);
+  const endDate = [...schedules].sort((left, right) => left.end.localeCompare(right.end)).at(-1)?.end.slice(0, 10);
+  const deadline = now() + timeoutMs;
+  let overview = options.initialOverview;
+  while (true) {
+    if (overview?.examStartDate === startDate && overview?.examEndDate === endDate) return overview;
+    if (now() >= deadline) {
+      throw errorWithCode(
+        `运营批次概况日期 ${overview?.examStartDate || "--"}~${overview?.examEndDate || "--"} 与日程范围 ${startDate || "--"}~${endDate || "--"} 不一致`,
+        "OPERATION_BATCH_INSPECTION_BLOCKED",
+      );
+    }
+    await wait(pollMs);
+    overview = await readOverview();
+  }
 }
 
 export function operationBatchVisibleSchedulesFromRaw(raw = {}) {
@@ -179,15 +225,14 @@ export function operationBatchVisibleSchedulesFromRaw(raw = {}) {
     && !row.every((cell) => !text(cell))
   ));
   return rows.map((row, index) => {
-    const values = visibleDateTimeValues(row[dateIndex]);
+    const values = visibleDateTimeValues(row[dateIndex], raw.examEndDate);
     const name = text(row[nameIndex]);
     const expectedDuration = values.length === 2
       ? elapsedMinutes(dateTimeParts(values[0]), dateTimeParts(values[1]))
       : "";
-    const visibleDuration = numberText(row[durationIndex]);
     if (values.length !== 2 || !name || !text(row[sceneIndex]) || !text(row[codeIndex])
       || !text(row[timezoneIndex]) || !numberText(row[earlyLoginIndex]) && numberText(row[earlyLoginIndex]) !== "0"
-      || (visibleDuration && visibleDuration !== expectedDuration)) {
+    ) {
       throw errorWithCode(
         `运控批次可见日程 ${index + 1} 缺少考试名称或完整起止时间`,
         "OPERATION_BATCH_INSPECTION_BLOCKED",
@@ -208,6 +253,38 @@ export function operationBatchVisibleSchedulesFromRaw(raw = {}) {
   });
 }
 
+export async function waitForOperationBatchVisibleSchedules(readRaw, options = {}) {
+  const timeoutMs = Math.max(0, Number(options.timeoutMs ?? 10000));
+  const pollMs = Math.max(0, Number(options.pollMs ?? 100));
+  const now = options.now || Date.now;
+  const wait = options.wait || ((delay) => new Promise((resolve) => setTimeout(resolve, delay)));
+  const deadline = now() + timeoutMs;
+  let lastError;
+  while (true) {
+    try {
+      return operationBatchVisibleSchedulesFromRaw(await readRaw());
+    } catch (error) {
+      if (error?.code !== "OPERATION_BATCH_INSPECTION_BLOCKED") throw error;
+      lastError = error;
+    }
+    if (now() >= deadline) throw lastError;
+    await wait(pollMs);
+  }
+}
+
+export function operationBatchVisiblePersonnelServiceFromRaw(raw = {}) {
+  const personnelItems = (raw.items || []).filter((item) => (
+    text(item?.title).replace(/\s+/g, "") === "人员："
+  ));
+  if (!personnelItems.length) return "不需要";
+  const tags = personnelItems.flatMap((item) => (item.tags || []).map(text).filter(Boolean));
+  if (personnelItems.length === 1 && tags.length === 1) {
+    if (["在线监考", "支持"].includes(tags[0])) return "在线监考";
+    if (["不支持", "不需要", "无需"].includes(tags[0])) return "不需要";
+  }
+  return "";
+}
+
 function batchCode(instruction = {}) {
   const code = text(instruction.batch?.code);
   if (!/^[A-Z]{3}\d{6}$/.test(code)) {
@@ -224,8 +301,13 @@ function normalizeSnapshot(raw = {}, {
   const examStartParts = dateParts(raw.examStartDate);
   const examEndParts = dateParts(raw.examEndDate);
   const rawSchedules = Array.isArray(raw.schedules) ? raw.schedules : null;
+  const hasServicePersonnel = Object.hasOwn(raw, "servicePersonnel");
+  const servicePersonnel = text(raw.servicePersonnel);
   if (!batchName || !examStartParts || !examEndParts || !rawSchedules) {
     throw errorWithCode("运营批次受管字段不完整或格式不合法", code);
+  }
+  if (hasServicePersonnel && !["不需要", "在线监考"].includes(servicePersonnel)) {
+    throw errorWithCode("运营批次人员服务不完整或格式不合法", code);
   }
   if (requireSchedules && !rawSchedules.length) {
     throw errorWithCode("运营批次初始化必须包含至少一条完整日程", code);
@@ -289,19 +371,27 @@ function normalizeSnapshot(raw = {}, {
     const scheduleEndDate = [...schedules]
       .sort((left, right) => left.end.localeCompare(right.end)).at(-1).end.slice(0, 10);
     if (examStartDate !== scheduleStartDate || examEndDate !== scheduleEndDate) {
-      throw errorWithCode("运营批次概况日期与日程范围不一致", code);
+      throw errorWithCode(
+        `运营批次概况日期 ${examStartDate}~${examEndDate} 与日程范围 ${scheduleStartDate}~${scheduleEndDate} 不一致`,
+        code,
+      );
     }
   }
   return {
     batchName,
     examStartDate,
     examEndDate,
+    ...(hasServicePersonnel ? { servicePersonnel } : {}),
     schedules,
   };
 }
 
-function snapshotsEqual(left, right) {
-  return JSON.stringify(left) === JSON.stringify(right);
+function snapshotsEqual(actual, expected) {
+  const comparableActual = { ...actual };
+  if (!Object.hasOwn(expected, "servicePersonnel")) {
+    delete comparableActual.servicePersonnel;
+  }
+  return JSON.stringify(comparableActual) === JSON.stringify(expected);
 }
 
 function batchListUrl(options = {}) {
@@ -309,9 +399,38 @@ function batchListUrl(options = {}) {
   return `${baseUrl.replace(/\/$/, "")}/batch/batchList`;
 }
 
-export async function openOperationBatchByCode(
+function operationBatchListIdentity(result, location, code, expectedName = "") {
+  const nameColumns = (result.headers || [])
+    .map((header, index) => ({ header: text(header), index }))
+    .filter((item) => item.header === "批次名称");
+  if (nameColumns.length !== 1) {
+    throw errorWithCode(
+      `批次列表必须有唯一“批次名称”列，实际 ${nameColumns.length} 列`,
+      "OPERATION_BATCH_UPDATE_CONFLICT",
+    );
+  }
+  const row = result.pages?.[location.pageNumber - 1]?.[location.rowNumber - 1] || [];
+  const actualCode = text(row[location.codeColumn]);
+  const actualName = text(row[nameColumns[0].index]);
+  if (actualCode !== text(code) || !actualName) {
+    throw errorWithCode(
+      `批次列表未取得批次代码 ${text(code)} 对应的完整身份`,
+      "OPERATION_BATCH_UPDATE_CONFLICT",
+    );
+  }
+  if (text(expectedName) && actualName !== text(expectedName)) {
+    throw errorWithCode(
+      `批次名称不一致：期望 ${text(expectedName)}，实际 ${actualName}`,
+      "OPERATION_ARCHIVE_BATCH_IDENTITY_MISMATCH",
+      { expectedBatchName: text(expectedName), actualBatchName: actualName },
+    );
+  }
+  return { batchCode: actualCode, batchName: actualName };
+}
+
+export async function openOperationBatchIdentityByCode(
   page,
-  { batchCode: code, batchListUrl: listUrl, options = {} },
+  { batchCode: code, batchName: expectedName = "", batchListUrl: listUrl, options = {} },
 ) {
   const searchPages = options.searchBatchListPages || searchOperationBatchListPages;
   const startSearch = options.startBatchListSearch || startOperationBatchListSearch;
@@ -319,24 +438,34 @@ export async function openOperationBatchByCode(
   const openCard = options.openExactBatchCard || openExactOperationBatchCard;
   const searchResult = await searchPages(page, listUrl, code, options);
   const location = operationBatchExactCodeLocation(searchResult, code);
-  let {
-    headers,
-    layout,
-    rows,
-  } = await startSearch(page, listUrl, code, options);
-  for (let pageNumber = 1; pageNumber < location.pageNumber; pageNumber += 1) {
-    rows = await advancePage(
-      page,
-      pageNumber,
-      rows,
-      listUrl,
-      options,
-    );
-    if (!rows) {
-      throw errorWithCode(
-        `未能重新定位批次代码 ${code} 所在的第 ${location.pageNumber} 页`,
-        "OPERATION_BATCH_UPDATE_CONFLICT",
+  const searchedIdentity = operationBatchListIdentity(
+    searchResult,
+    location,
+    code,
+    expectedName,
+  );
+  const searchedPages = searchResult.pages || [];
+  let headers = searchResult.headers || [];
+  let rows = searchedPages.at(-1) || [];
+  let layout = await page.locator(".ant-list:has(.same-batch-title)").count()
+    ? "cards"
+    : "table";
+  if (location.pageNumber !== searchedPages.length) {
+    ({ headers, layout, rows } = await startSearch(page, listUrl, code, options));
+    for (let pageNumber = 1; pageNumber < location.pageNumber; pageNumber += 1) {
+      rows = await advancePage(
+        page,
+        pageNumber,
+        rows,
+        listUrl,
+        options,
       );
+      if (!rows) {
+        throw errorWithCode(
+          `未能重新定位批次代码 ${code} 所在的第 ${location.pageNumber} 页`,
+          "OPERATION_BATCH_UPDATE_CONFLICT",
+        );
+      }
     }
   }
   const reopenedLocation = operationBatchExactCodeLocation({ headers, pages: [rows] }, code);
@@ -346,9 +475,15 @@ export async function openOperationBatchByCode(
       "OPERATION_BATCH_UPDATE_CONFLICT",
     );
   }
+  operationBatchListIdentity(
+    { headers, pages: [rows] },
+    reopenedLocation,
+    code,
+    searchedIdentity.batchName,
+  );
 
   if (layout === "cards") {
-    await openCard(page, code);
+    await openCard(page, code, { verifyDetailIdentity: false });
   } else {
     const rowLocators = await page.locator("tbody tr").all();
     const matchingRows = [];
@@ -380,6 +515,21 @@ export async function openOperationBatchByCode(
     await link.click();
     await detailWait;
   }
+  const detail = operationBatchDetailIdentity(page.url(), listUrl);
+  if (!detail) {
+    throw errorWithCode("打开批次后未进入有效详情地址", "OPERATION_BATCH_UPDATE_CONFLICT");
+  }
+  return { detailUrl: detail.detailUrl, batchName: searchedIdentity.batchName };
+}
+
+export async function openOperationBatchByCode(page, input) {
+  return (await openOperationBatchIdentityByCode(page, input)).detailUrl;
+}
+
+export async function assertOperationBatchDetailIdentityResult(
+  page,
+  { batchCode: code, batchName: expectedName = "", batchListUrl: listUrl },
+) {
   if (typeof page.waitForLoadState === "function") {
     await page.waitForLoadState("domcontentloaded");
   }
@@ -387,22 +537,72 @@ export async function openOperationBatchByCode(
   if (!detail) {
     throw errorWithCode("批次详情地址与批次列表不一致", "OPERATION_BATCH_UPDATE_CONFLICT");
   }
-  const titles = page.locator(".header-title");
-  if (await titles.count() !== 1) {
+  const deadline = Date.now() + 10000;
+  let stableCodeMatches = 0;
+  let actualCode = "";
+  let actualName = "";
+  while (true) {
+    const titles = page.locator(".header-title:visible");
+    if (await titles.count() === 1) {
+      const title = titles.first();
+      const codeNodes = title.locator(":scope > span");
+      const nameNodes = title.locator(":scope > label");
+      actualCode = await codeNodes.count() === 1 ? text(await codeNodes.innerText()) : "";
+      actualName = await nameNodes.count() === 1 ? text(await nameNodes.innerText()) : "";
+    } else {
+      actualCode = "";
+      actualName = "";
+    }
+    stableCodeMatches = actualCode === code ? stableCodeMatches + 1 : 0;
+    if (stableCodeMatches >= 2) break;
+    if (Date.now() >= deadline) {
+      throw errorWithCode(
+        `批次详情页身份与批次代码 ${code} 不一致`,
+        "OPERATION_BATCH_UPDATE_CONFLICT",
+      );
+    }
+    await pageWait(page)(100);
+  }
+  if (!actualName) {
     throw errorWithCode(
-      `批次详情页身份与批次代码 ${code} 不一致`,
+      `批次详情页未取得实际批次名：${code}`,
+      "OPERATION_BATCH_ACTUAL_NAME_MISSING",
+    );
+  }
+  if (text(expectedName) && actualName !== text(expectedName)) {
+    throw errorWithCode(
+      `批次详情页名称不一致：期望 ${text(expectedName)}，实际 ${actualName || "--"}`,
+      "OPERATION_ARCHIVE_BATCH_IDENTITY_MISMATCH",
+      { expectedBatchName: text(expectedName), actualBatchName: actualName },
+    );
+  }
+  return { detailUrl: detail.detailUrl, batchName: actualName };
+}
+
+export async function assertOperationBatchDetailIdentity(page, input) {
+  return (await assertOperationBatchDetailIdentityResult(page, input)).detailUrl;
+}
+
+export async function openPersistedOperationBatchDetail(
+  page,
+  { detailUrl, batchCode: code, batchName: expectedName = "", batchListUrl: listUrl },
+) {
+  const expectedDetail = operationBatchDetailIdentity(detailUrl, listUrl);
+  if (!expectedDetail) {
+    throw errorWithCode(
+      "已保存的运营批次详情地址无效",
       "OPERATION_BATCH_UPDATE_CONFLICT",
     );
   }
-  const title = titles.first();
-  const codeNodes = title.locator(":scope > span");
-  if (await codeNodes.count() !== 1 || text(await codeNodes.innerText()) !== code) {
-    throw errorWithCode(
-      `批次详情页身份与批次代码 ${code} 不一致`,
-      "OPERATION_BATCH_UPDATE_CONFLICT",
-    );
+  const currentDetail = operationBatchDetailIdentity(page.url(), listUrl);
+  if (currentDetail?.batchGuid !== expectedDetail.batchGuid) {
+    await page.goto(expectedDetail.detailUrl, { waitUntil: "domcontentloaded" });
   }
-  return detail.detailUrl;
+  return assertOperationBatchDetailIdentity(page, {
+    batchCode: code,
+    batchName: expectedName,
+    batchListUrl: listUrl,
+  });
 }
 
 async function managedFormControl(page, label) {
@@ -474,6 +674,45 @@ function operationEztestScheduleResponseMatches(response) {
   }
 }
 
+export function operationBatchSaveResponseMatches(response, pathname) {
+  try {
+    return new URL(response.url()).pathname === pathname
+      && response.request().method() === "POST";
+  } catch {
+    return false;
+  }
+}
+
+export async function saveOperationBatchModalAndWait({
+  page,
+  modal,
+  button,
+  pathname,
+  label,
+}) {
+  let responsePromise;
+  if (typeof page.waitForResponse === "function") {
+    responsePromise = page.waitForResponse(
+      (response) => operationBatchSaveResponseMatches(response, pathname),
+      { timeout: 30000 },
+    );
+    responsePromise.catch(() => {});
+  }
+  await button.click();
+  if (responsePromise) {
+    const response = await responsePromise;
+    await response.finished();
+    const payload = await response.json().catch(() => null);
+    if (!response.ok() || Number(payload?.code) !== 10) {
+      throw errorWithCode(
+        `${label}保存失败：HTTP ${response.status?.() || "?"}，code ${payload?.code ?? "?"}`,
+        "OPERATION_BATCH_UPDATE_CONFLICT",
+      );
+    }
+  }
+  await modal.waitFor({ state: "hidden", timeout: 10000 });
+}
+
 export async function openVisibleEztestSchedulePage(page) {
   const examTab = await uniqueControl(
     page.getByRole("tab", { name: "考试", exact: true }),
@@ -528,6 +767,18 @@ async function visibleSection(page, title, code = "OPERATION_BATCH_UPDATE_CONFLI
     `${title}区块`,
     code,
   );
+}
+
+async function expandVisibleSection(section) {
+  const header = await uniqueControl(
+    section.locator(".ant-collapse-header:visible"),
+    "折叠区块标题",
+    "OPERATION_BATCH_INSPECTION_BLOCKED",
+  );
+  if (text(await header.getAttribute("aria-expanded")) !== "true") {
+    await header.click();
+    await section.locator(".ant-collapse-content:visible").waitFor({ state: "visible", timeout: 10000 });
+  }
 }
 
 async function clickSectionEdit(page, title) {
@@ -678,6 +929,80 @@ async function visibleScheduleRows(table) {
   return visible;
 }
 
+export async function waitForVisibleScheduleRows(
+  readRows,
+  minimumCount,
+  {
+    timeoutMs = 10000,
+    pollMs = 100,
+    now = Date.now,
+    wait = (delay) => new Promise((resolve) => setTimeout(resolve, delay)),
+  } = {},
+) {
+  const expected = Math.max(0, Number(minimumCount) || 0);
+  const deadline = now() + timeoutMs;
+  let rows = [];
+  while (true) {
+    rows = await readRows();
+    if (rows.length >= expected) return rows;
+    if (now() >= deadline) {
+      throw errorWithCode(
+        `等待日程编辑行超时：期望至少 ${expected} 行，实际 ${rows.length} 行`,
+        "OPERATION_BATCH_UPDATE_CONFLICT",
+      );
+    }
+    await wait(pollMs);
+  }
+}
+
+export async function clickScheduleAddButtonAndWait({
+  button,
+  reacquireButton = async () => button,
+  readRows,
+  beforeCount,
+  primaryTimeoutMs = 1500,
+  finalTimeoutMs = 10000,
+  pollMs = 100,
+  now = Date.now,
+  wait = (delay) => new Promise((resolve) => setTimeout(resolve, delay)),
+}) {
+  const before = Math.max(0, Number(beforeCount) || 0);
+  const expected = before + 1;
+  if (typeof button.scrollIntoViewIfNeeded === "function") {
+    await button.scrollIntoViewIfNeeded();
+  }
+  await button.click({ force: true });
+  try {
+    return await waitForVisibleScheduleRows(readRows, expected, {
+      timeoutMs: primaryTimeoutMs,
+      pollMs,
+      now,
+      wait,
+    });
+  } catch (error) {
+    if (error?.code !== "OPERATION_BATCH_UPDATE_CONFLICT") throw error;
+    const rows = await readRows();
+    if (rows.length >= expected) return rows;
+    if (rows.length !== before) throw error;
+  }
+
+  // ATA occasionally consumes the trusted click without updating the React row list.
+  const retryButton = await reacquireButton();
+  await retryButton.evaluate((element) => element.click());
+  return waitForVisibleScheduleRows(readRows, expected, {
+    timeoutMs: finalTimeoutMs,
+    pollMs,
+    now,
+    wait,
+  });
+}
+
+function pageWait(page) {
+  return typeof page.waitForTimeout === "function"
+    ? (delay) => page.waitForTimeout(delay)
+    : (delay) => new Promise((resolve) => setTimeout(resolve, delay));
+}
+
 async function fillSingleScheduleCell(row, column, value, label) {
   const inputs = row.locator("td").nth(column).locator("input:visible,textarea:visible");
   const count = await inputs.count();
@@ -778,8 +1103,12 @@ async function writeVisibleScheduleFields(
   changed,
   { appended = false } = {},
 ) {
-  const { table, columns } = await editScheduleTable(page);
-  const rows = await visibleScheduleRows(table);
+  let currentTable = await editScheduleTable(page);
+  const rows = await waitForVisibleScheduleRows(async () => {
+    currentTable = await editScheduleTable(page);
+    return visibleScheduleRows(currentTable.table);
+  }, requirementIndex + 1, { wait: pageWait(page) });
+  const { columns } = currentTable;
   const row = rows[requirementIndex];
   if (!row) {
     throw errorWithCode(
@@ -848,57 +1177,102 @@ export async function visibleButtonByExactText(root, exactText, errorLabel) {
   return button.first();
 }
 
+export async function reloadOperationBatchDetailForInspection(page) {
+  await page.reload({ waitUntil: "domcontentloaded" });
+}
+
+async function visibleButtonByCompactText(root, compactLabel, errorLabel) {
+  const matches = [];
+  for (const button of await root.locator("button:visible").all()) {
+    if (text(await button.innerText()).replace(/\s+/g, "") === compactLabel) {
+      matches.push(button);
+    }
+  }
+  if (matches.length !== 1) {
+    throw errorWithCode(
+      `${errorLabel}按钮必须唯一，实际 ${matches.length} 个`,
+      "OPERATION_BATCH_UPDATE_CONFLICT",
+    );
+  }
+  return matches[0];
+}
+
+async function selectedServiceButton(button) {
+  return text(await button.getAttribute("class")).split(/\s+/).includes("ant-btn-primary");
+}
+
 const visiblePageAdapter = {
   openBatchByCode: openOperationBatchByCode,
+  refreshDetail: reloadOperationBatchDetailForInspection,
   async readOverview(page) {
-    const raw = await page.evaluate(() => {
-      const visible = (node) => Boolean(
-        node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length),
-      );
-      const titles = [...document.querySelectorAll(".header-title")].filter(visible);
-      const infos = [...document.querySelectorAll(".header-info")].filter(visible);
-      return {
-        titleCount: titles.length,
-        headerInfoCount: infos.length,
-        batchName: titles[0]?.querySelector(":scope > label")?.textContent || "",
-        headerInfo: infos[0]?.innerText || "",
-      };
-    });
-    return operationBatchVisibleOverviewFromRaw(raw);
+    return waitForOperationBatchVisibleOverview(() => page.evaluate(() => {
+        const visible = (node) => Boolean(
+          node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length),
+        );
+        const titles = [...document.querySelectorAll(".header-title")].filter(visible);
+        const infos = [...document.querySelectorAll(".header-info")].filter(visible);
+        return {
+          titleCount: titles.length,
+          headerInfoCount: infos.length,
+          batchName: titles[0]?.querySelector(":scope > label")?.textContent || "",
+          headerInfo: infos[0]?.innerText || "",
+        };
+      }), {
+        wait: pageWait(page),
+      });
   },
-  async readSchedules(page) {
+  async readSchedules(page, overview = {}) {
     await openVisibleEztestSchedulePage(page);
     const scheduleSection = await visibleSection(
       page,
       "考试日程",
       "OPERATION_BATCH_INSPECTION_BLOCKED",
     );
-    const emptyScheduleVisible = text(await scheduleSection.innerText()).includes("暂无数据");
-    const raw = await page.evaluate(() => {
-      const clean = (value) => String(value ?? "").trim().replace(/\s+/g, " ");
-      const visible = (node) => Boolean(
-        node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length),
-      );
-      return {
-        tables: [...document.querySelectorAll("table")].filter(visible).map((table) => {
-          const panel = table.closest(".ant-collapse-item") || table.parentElement;
-          const next = panel?.querySelector(".ant-pagination-next");
-          return {
-            headers: [...table.querySelectorAll("thead th")].map((cell) => clean(cell.textContent)),
-            rows: [...table.querySelectorAll("tbody tr")].filter(visible).map((row) => (
-              [...row.querySelectorAll("td")].map((cell) => clean(cell.textContent))
-            )),
-            hasMore: Boolean(
-              next
-              && visible(next)
-              && !next.classList.contains("ant-pagination-disabled")
-              && next.getAttribute("aria-disabled") !== "true"
-            ),
-          };
-        }),
-      };
-    });
-    return operationBatchVisibleSchedulesFromRaw({ ...raw, emptyScheduleVisible });
+    return waitForOperationBatchVisibleSchedules(async () => {
+      const emptyScheduleVisible = text(await scheduleSection.innerText()).includes("暂无数据");
+      const raw = await page.evaluate(() => {
+        const clean = (value) => String(value ?? "").trim().replace(/\s+/g, " ");
+        const visible = (node) => Boolean(
+          node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length),
+        );
+        return {
+          tables: [...document.querySelectorAll("table")].filter(visible).map((table) => {
+            const panel = table.closest(".ant-collapse-item") || table.parentElement;
+            const next = panel?.querySelector(".ant-pagination-next");
+            return {
+              headers: [...table.querySelectorAll("thead th")].map((cell) => clean(cell.textContent)),
+              rows: [...table.querySelectorAll("tbody tr")].filter(visible).map((row) => (
+                [...row.querySelectorAll("td")].map((cell) => clean(cell.textContent))
+              )),
+              hasMore: Boolean(
+                next
+                && visible(next)
+                && !next.classList.contains("ant-pagination-disabled")
+                && next.getAttribute("aria-disabled") !== "true"
+              ),
+            };
+          }),
+        };
+      });
+      return { ...raw, emptyScheduleVisible, examEndDate: overview.examEndDate };
+    }, { wait: pageWait(page) });
+  },
+  async readServices(page) {
+    await selectVisibleTab(page, "概况");
+    const section = await visibleSection(
+      page,
+      "配置服务",
+      "OPERATION_BATCH_INSPECTION_BLOCKED",
+    );
+    await expandVisibleSection(section);
+    const raw = await section.evaluate((node) => ({
+      items: [...node.querySelectorAll(".service-detail-item")].map((item) => ({
+        title: item.querySelector(".basic-title-1")?.textContent || "",
+        tags: [...item.querySelectorAll(".service-detail-tag")].map((tag) => tag.textContent || ""),
+      })),
+    }));
+    const servicePersonnel = operationBatchVisiblePersonnelServiceFromRaw(raw);
+    return servicePersonnel ? { servicePersonnel } : {};
   },
   async beginOverviewEdit(page) {
     await selectVisibleTab(page, "概况");
@@ -919,8 +1293,46 @@ const visiblePageAdapter = {
   },
   async saveOverview(page) {
     const modal = await visibleModal(page, "基本信息");
-    await (await uniqueButton(modal, /^确\s*定$/, "基本信息确定")).click();
-    await modal.waitFor({ state: "hidden", timeout: 10000 });
+    await saveOperationBatchModalAndWait({
+      page,
+      modal,
+      button: await uniqueButton(modal, /^确\s*定$/, "基本信息确定"),
+      pathname: "/api/batch/save_batch_basic",
+      label: "批次基本信息",
+    });
+  },
+  async beginServiceEdit(page) {
+    await selectVisibleTab(page, "概况");
+    await clickSectionEdit(page, "配置服务");
+    await visibleModal(page, "配置服务");
+  },
+  async writeServiceFields(page, desired, changed) {
+    if (!changed.has("servicePersonnel")) return;
+    const modal = await visibleModal(page, "配置服务");
+    const personnelButton = await visibleButtonByCompactText(modal, "人员", "人员服务类别");
+    const needsPersonnel = desired.servicePersonnel === "在线监考";
+    if (await selectedServiceButton(personnelButton) !== needsPersonnel) {
+      await personnelButton.click();
+    }
+    if (needsPersonnel) {
+      const onlineButton = await visibleButtonByCompactText(modal, "在线监考", "在线监考服务");
+      if (!await selectedServiceButton(onlineButton)) await onlineButton.click();
+      if (!await selectedServiceButton(personnelButton) || !await selectedServiceButton(onlineButton)) {
+        throw errorWithCode("未能选中运控批次在线监考服务", "OPERATION_BATCH_UPDATE_CONFLICT");
+      }
+    } else if (await selectedServiceButton(personnelButton)) {
+      throw errorWithCode("未能取消运控批次人员服务", "OPERATION_BATCH_UPDATE_CONFLICT");
+    }
+  },
+  async saveServices(page) {
+    const modal = await visibleModal(page, "配置服务");
+    await saveOperationBatchModalAndWait({
+      page,
+      modal,
+      button: await uniqueButton(modal, /^确\s*定$/, "配置服务确定"),
+      pathname: "/api/batch/save_batch_service",
+      label: "批次配置服务",
+    });
   },
   async beginScheduleEdit(page) {
     await openVisibleEztestSchedulePage(page);
@@ -931,11 +1343,24 @@ const visiblePageAdapter = {
     const modal = await visibleModal(page, "易考——考试日程");
     const { table } = await editScheduleTable(page);
     const before = (await visibleScheduleRows(table)).length;
-    await (await visibleButtonByExactText(modal, "新增", "新增日程")).click();
-    const after = (await visibleScheduleRows(table)).length;
-    if (after !== before + 1) {
+    const readRows = async () => {
+      const current = await editScheduleTable(page);
+      return visibleScheduleRows(current.table);
+    };
+    const rows = await clickScheduleAddButtonAndWait({
+      button: await visibleButtonByExactText(modal, "新增", "新增日程"),
+      reacquireButton: async () => visibleButtonByExactText(
+        await visibleModal(page, "易考——考试日程"),
+        "新增",
+        "新增日程",
+      ),
+      readRows,
+      beforeCount: before,
+      wait: pageWait(page),
+    });
+    if (rows.length !== before + 1) {
       throw errorWithCode(
-        `新增日程后可见行数未增加：${before} → ${after}`,
+        `新增日程后可见行数异常：${before} → ${rows.length}`,
         "OPERATION_BATCH_UPDATE_CONFLICT",
       );
     }
@@ -943,8 +1368,13 @@ const visiblePageAdapter = {
   writeScheduleFields: writeVisibleScheduleFields,
   async saveSchedules(page) {
     const modal = await visibleModal(page, "易考——考试日程");
-    await (await uniqueButton(modal, /^确\s*定$/, "易考考试日程确定")).click();
-    await modal.waitFor({ state: "hidden", timeout: 10000 });
+    await saveOperationBatchModalAndWait({
+      page,
+      modal,
+      button: await uniqueButton(modal, /^确\s*定$/, "易考考试日程确定"),
+      pathname: "/api/batch/save_schedule_list",
+      label: "易考考试日程",
+    });
   },
 };
 
@@ -952,13 +1382,27 @@ function adapter(options = {}) {
   return options.adapter || visiblePageAdapter;
 }
 
-async function readManagedSnapshot(page, pageAdapter) {
-  const overview = await pageAdapter.readOverview(page);
-  const schedules = await pageAdapter.readSchedules(page);
+async function readManagedSnapshot(page, pageAdapter, options = {}) {
+  let overview = await pageAdapter.readOverview(page);
+  const schedules = await pageAdapter.readSchedules(page, overview);
+  if (schedules.length) {
+    overview = await waitForOperationBatchOverviewScheduleAlignment(
+      () => pageAdapter.readOverview(page),
+      schedules,
+      { initialOverview: overview, wait: pageWait(page) },
+    );
+  }
+  const services = options.includeServicePersonnel !== false
+    && typeof pageAdapter.readServices === "function"
+    ? await pageAdapter.readServices(page)
+    : {};
   return normalizeSnapshot({
     batchName: overview?.batchName,
     examStartDate: overview?.examStartDate,
     examEndDate: overview?.examEndDate,
+    ...(Object.hasOwn(services || {}, "servicePersonnel")
+      ? { servicePersonnel: services.servicePersonnel }
+      : {}),
     schedules: schedules.map((schedule, requirementIndex) => ({
       requirementIndex,
       scene: schedule?.scene,
@@ -979,13 +1423,39 @@ async function inspectOnPage(page, instruction, options = {}) {
   const code = batchCode(instruction);
   const pageAdapter = adapter(options);
   const listUrl = batchListUrl(options);
-  const detailUrl = await pageAdapter.openBatchByCode(page, {
-    batchCode: code,
-    batchListUrl: listUrl,
-    options,
-  });
+  const expectedName = text(instruction.batch?.name || instruction.desiredSnapshot?.batchName);
+  const persistedDetailUrl = text(instruction.batch?.detailUrl);
+  const detailUrl = options.searchByBatchCode
+    ? await pageAdapter.openBatchByCode(page, {
+      batchCode: code,
+      batchName: expectedName,
+      batchListUrl: listUrl,
+      options,
+    })
+    : persistedDetailUrl
+    ? await openPersistedOperationBatchDetail(page, {
+      detailUrl: persistedDetailUrl,
+      batchCode: code,
+      batchName: expectedName,
+      batchListUrl: listUrl,
+    })
+    : options.reuseVerifiedDetail
+    ? await assertOperationBatchDetailIdentity(page, {
+      batchCode: code,
+      batchName: expectedName,
+      batchListUrl: listUrl,
+    })
+    : await pageAdapter.openBatchByCode(page, {
+      batchCode: code,
+      batchName: expectedName,
+      batchListUrl: listUrl,
+      options,
+    });
+  if (typeof pageAdapter.refreshDetail === "function") {
+    await pageAdapter.refreshDetail(page);
+  }
   return {
-    snapshot: await readManagedSnapshot(page, pageAdapter),
+    snapshot: await readManagedSnapshot(page, pageAdapter, options),
     detailUrl: text(detailUrl),
     pageAdapter,
     listUrl,
@@ -1002,7 +1472,43 @@ async function withPage(options, operation) {
   const context = options.context
     || await launchOperationBatchContext(userDataDir, false, options);
   if (options.context || options.closeContext === false) {
-    const page = context.pages()[0] || await context.newPage();
+    const baseUrl = operationConsoleBaseUrl(options);
+    const pages = context.pages();
+    if (options.reuseVerifiedDetail) {
+      const listUrl = batchListUrl(options);
+      const verifiedDetail = operationBatchDetailIdentity(options.verifiedDetailUrl, listUrl);
+      if (!verifiedDetail) {
+        throw errorWithCode(
+          "缺少刚核验的运营批次详情地址，已停止复用详情页",
+          "OPERATION_BATCH_UPDATE_CONFLICT",
+        );
+      }
+      const verifiedPage = pages.find((candidate) => {
+        const candidateDetail = operationBatchDetailIdentity(candidate.url(), listUrl);
+        return candidateDetail?.batchGuid === verifiedDetail.batchGuid;
+      });
+      if (!verifiedPage) {
+        throw errorWithCode(
+          "刚核验的运营批次详情页已不存在，已停止后续操作",
+          "OPERATION_BATCH_UPDATE_CONFLICT",
+        );
+      }
+      return operation(verifiedPage);
+    }
+    const page = pages.find((candidate) => {
+      try {
+        const value = new URL(candidate.url());
+        return value.origin === new URL(baseUrl).origin && value.pathname === "/batch/batchDetail";
+      } catch {
+        return false;
+      }
+    }) || pages.find((candidate) => {
+      try {
+        return new URL(candidate.url()).origin === new URL(baseUrl).origin;
+      } catch {
+        return false;
+      }
+    }) || pages[0] || await context.newPage();
     return operation(page);
   }
   return runWithOperationBatchContext(context, operation);
@@ -1062,6 +1568,7 @@ function validatedManagedFields(changes, current, desired) {
 
   const fields = {
     overview: new Set(),
+    services: new Set(),
     schedules: new Map(),
     appended: new Set(),
   };
@@ -1077,6 +1584,22 @@ function validatedManagedFields(changes, current, desired) {
         after: desired[field],
       });
       fields.overview.add(field);
+      changesByPath.delete(field);
+    }
+  }
+
+  for (const [field] of serviceFields) {
+    if (!Object.hasOwn(desired, field)) continue;
+    const change = changesByPath.get(field);
+    if (current[field] === desired[field]) {
+      if (change) invalidChanges(`运营批次修改清单包含未变化字段：${field}`);
+    } else {
+      if (!change) invalidChanges(`运营批次修改清单缺少字段：${field}`);
+      assertExactChange(change, {
+        before: current[field],
+        after: desired[field],
+      });
+      fields.services.add(field);
       changesByPath.delete(field);
     }
   }
@@ -1125,15 +1648,18 @@ function validatedManagedFields(changes, current, desired) {
       });
       changesByPath.delete(wholePath);
     } else {
-      if (fieldCount !== scheduleFields.length) {
-        invalidChanges(`新增运营批次日程缺少完整字段声明：${wholePath}`);
-      }
       const changed = new Set();
       for (const [field] of scheduleFields) {
         const changePath = `${wholePath}.${field}`;
         const change = fieldChanges.get(field);
+        const emptyValue = field === "trial" ? false : "";
+        if (desired.schedules[index][field] === emptyValue) {
+          if (change) invalidChanges(`运营批次修改清单包含未变化字段：${changePath}`);
+          continue;
+        }
+        if (!change) invalidChanges(`运营批次修改清单缺少字段：${changePath}`);
         assertExactChange(change, {
-          before: "",
+          before: emptyValue,
           after: desired.schedules[index][field],
           requirementIndex: index,
         });
@@ -1157,6 +1683,10 @@ const overviewFields = [
   ["batchName", "批次名称"],
   ["examStartDate", "考试开始日期"],
   ["examEndDate", "考试结束日期"],
+];
+
+const serviceFields = [
+  ["servicePersonnel", "人员服务"],
 ];
 
 const scheduleFields = [
@@ -1202,6 +1732,19 @@ async function writeManagedChanges(
     }
     const saveOverview = pageAdapter.saveOverview || pageAdapter.save;
     await saveOverview(page);
+  }
+
+  if (fields.services?.size) {
+    if (typeof pageAdapter.beginServiceEdit === "function") {
+      await pageAdapter.beginServiceEdit(page);
+    }
+    if (typeof pageAdapter.writeServiceFields !== "function") {
+      throw errorWithCode("运营批次页面不支持修改人员服务", "OPERATION_BATCH_UPDATE_CONFLICT");
+    }
+    await pageAdapter.writeServiceFields(page, desired, fields.services);
+    writeCount += fields.services.size;
+    const saveServices = pageAdapter.saveServices || pageAdapter.save;
+    await saveServices(page);
   }
 
   const scheduleChanged = initialize
@@ -1254,12 +1797,25 @@ async function writeManagedChanges(
 async function verifyReadback(page, instruction, options, expected) {
   const code = batchCode(instruction);
   const pageAdapter = adapter(options);
-  const detailUrl = await pageAdapter.openBatchByCode(page, {
-    batchCode: code,
-    batchListUrl: batchListUrl(options),
-    options,
-  });
-  const actual = await readManagedSnapshot(page, pageAdapter);
+  const listUrl = batchListUrl(options);
+  const expectedName = text(instruction.batch?.name || instruction.desiredSnapshot?.batchName);
+  let detailUrl;
+  if (options.reuseVerifiedDetail) {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    detailUrl = await assertOperationBatchDetailIdentity(page, {
+      batchCode: code,
+      batchName: expectedName,
+      batchListUrl: listUrl,
+    });
+  } else {
+    detailUrl = await pageAdapter.openBatchByCode(page, {
+      batchCode: code,
+      batchName: expectedName,
+      batchListUrl: listUrl,
+      options,
+    });
+  }
+  const actual = await readManagedSnapshot(page, pageAdapter, options);
   if (!snapshotsEqual(actual, expected)) {
     throw errorWithCode(
       "运营批次保存后回读与期望快照不一致",
@@ -1273,7 +1829,10 @@ async function verifyReadback(page, instruction, options, expected) {
 export async function inspectOperationBatchManagedSnapshot(instruction, options = {}) {
   batchCode(instruction);
   return withPage(options, async (page) => (
-    await inspectOnPage(page, instruction, options)
+    await inspectOnPage(page, instruction, {
+      ...options,
+      includeServicePersonnel: instruction?.includeServicePersonnel !== false,
+    })
   ).snapshot);
 }
 
@@ -1281,7 +1840,14 @@ export async function runOperationBatchManagedUpdate(instruction, options = {}) 
   const code = batchCode(instruction);
   const desired = completeDesiredSnapshot(instruction);
   return withPage(options, async (page) => {
-    const inspected = await inspectOnPage(page, instruction, options);
+    const includesServiceChange = Array.isArray(instruction.changes)
+      && instruction.changes.some((change) => change?.path === "servicePersonnel");
+    const updateOptions = {
+      ...options,
+      searchByBatchCode: true,
+      includeServicePersonnel: includesServiceChange,
+    };
+    const inspected = await inspectOnPage(page, instruction, updateOptions);
     const current = inspected.snapshot;
     if (desired.schedules.length < current.schedules.length) {
       throw errorWithCode(
@@ -1289,6 +1855,27 @@ export async function runOperationBatchManagedUpdate(instruction, options = {}) 
         "OPERATION_BATCH_SCHEDULE_COUNT_DECREASE",
         { currentCount: current.schedules.length, desiredCount: desired.schedules.length },
       );
+    }
+    const comparableDesired = structuredClone(desired);
+    if (!includesServiceChange) delete comparableDesired.servicePersonnel;
+    if (snapshotsEqual(current, comparableDesired)) {
+      const verified = await verifyReadback(
+        page,
+        instruction,
+        updateOptions,
+        comparableDesired,
+      );
+      return {
+        verified: true,
+        snapshot: verified.snapshot,
+        detailUrl: verified.detailUrl,
+        checkpoints: [
+          "opened_exact_batch",
+          "desired_snapshot_already_present",
+          "reentered_exact_batch",
+          "exact_readback_verified",
+        ],
+      };
     }
     let expected;
     try {
@@ -1301,14 +1888,18 @@ export async function runOperationBatchManagedUpdate(instruction, options = {}) 
       }
       throw error;
     }
-    if (!snapshotsEqual(current, expected)) {
+    const comparableExpected = structuredClone(expected);
+    if (!includesServiceChange) {
+      delete comparableExpected.servicePersonnel;
+    }
+    if (!snapshotsEqual(current, comparableExpected)) {
       throw errorWithCode(
         `运控批次 ${code} 当前受管字段与已应用快照不一致`,
         "OPERATION_BATCH_UPDATE_CONFLICT",
-        { expected, actual: current },
+        { expected: comparableExpected, actual: current },
       );
     }
-    const fields = validatedManagedFields(instruction.changes, current, desired);
+    const fields = validatedManagedFields(instruction.changes, current, comparableDesired);
     const writeCount = await writeManagedChanges(
       page,
       inspected.pageAdapter,
@@ -1316,7 +1907,12 @@ export async function runOperationBatchManagedUpdate(instruction, options = {}) 
       desired,
       fields,
     );
-    const verified = await verifyReadback(page, instruction, options, desired);
+    const verified = await verifyReadback(
+      page,
+      instruction,
+      updateOptions,
+      comparableDesired,
+    );
     return {
       verified: true,
       snapshot: verified.snapshot,
@@ -1344,13 +1940,28 @@ export async function runOperationBatchScheduleInitialization(instruction, optio
         { actual: inspected.snapshot },
       );
     }
+    if (inspected.snapshot.batchName !== desired.batchName) {
+      throw errorWithCode(
+        `运营批次名称不一致：期望 ${desired.batchName}，实际 ${inspected.snapshot.batchName}`,
+        "OPERATION_ARCHIVE_BATCH_IDENTITY_MISMATCH",
+        { expectedBatchName: desired.batchName, actualBatchName: inspected.snapshot.batchName },
+      );
+    }
+    const fields = {
+      overview: new Set(
+        overviewFields
+          .filter(([field]) => field !== "batchName" && inspected.snapshot[field] !== desired[field])
+          .map(([field]) => field),
+      ),
+      schedules: new Map(),
+      appended: new Set(desired.schedules.map((_, index) => index)),
+    };
     await writeManagedChanges(
       page,
       inspected.pageAdapter,
       inspected.snapshot,
       desired,
-      { overview: new Set(), schedules: new Map(), appended: new Set() },
-      { initialize: true },
+      fields,
     );
     const verified = await verifyReadback(page, instruction, options, desired);
     return {

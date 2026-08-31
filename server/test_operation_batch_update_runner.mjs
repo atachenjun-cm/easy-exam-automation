@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assertOperationBatchDetailIdentity,
   operationBatchVisibleSchedulesFromRaw,
   runOperationBatchManagedUpdate,
   synchronizeOperationBatchScheduleForArchive,
+  waitForVisibleScheduleRows,
 } from "./operation_batch_update_runner.mjs";
 
 const desiredSnapshot = {
@@ -25,6 +27,101 @@ const desiredSnapshot = {
     remark: "",
   }],
 };
+
+test("新增日程后等待重绘完成再读取可见行", async () => {
+  let clock = 0;
+  let reads = 0;
+  const rows = await waitForVisibleScheduleRows(async () => {
+    reads += 1;
+    return reads >= 3 ? [{ id: "schedule-1" }] : [];
+  }, 1, {
+    timeoutMs: 1000,
+    pollMs: 100,
+    now: () => clock,
+    wait: async (delay) => { clock += delay; },
+  });
+
+  assert.deepEqual(rows, [{ id: "schedule-1" }]);
+  assert.equal(reads, 3);
+});
+
+test("新增日程行持续未出现时返回明确冲突", async () => {
+  let clock = 0;
+  await assert.rejects(
+    waitForVisibleScheduleRows(async () => [], 1, {
+      timeoutMs: 200,
+      pollMs: 100,
+      now: () => clock,
+      wait: async (delay) => { clock += delay; },
+    }),
+    (error) => error?.code === "OPERATION_BATCH_UPDATE_CONFLICT"
+      && /期望至少 1 行，实际 0 行/.test(error.message),
+  );
+});
+
+function batchDetailPage({ code = "EZT261018", name = "正式批次", guid = "target" } = {}) {
+  const title = {
+    locator(selector) {
+      if (selector === ":scope > span") return { count: async () => 1, innerText: async () => code };
+      if (selector === ":scope > label") return { count: async () => 1, innerText: async () => name };
+      throw new Error(`unexpected title selector: ${selector}`);
+    },
+  };
+  return {
+    url: () => `https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=${guid}`,
+    locator(selector) {
+      if (selector === ".header-title:visible") return { count: async () => 1, first: () => title };
+      throw new Error(`unexpected page selector: ${selector}`);
+    },
+  };
+}
+
+test("批次详情标题重绘后再核验目标批次代码", async () => {
+  const codes = ["EZT261030", "EZT261048", "EZT261048"];
+  let codeReadCount = 0;
+  const title = {
+    locator(selector) {
+      if (selector === ":scope > span") {
+        return {
+          count: async () => 1,
+          innerText: async () => codes[Math.min(codeReadCount++, codes.length - 1)],
+        };
+      }
+      if (selector === ":scope > label") {
+        return { count: async () => 1, innerText: async () => "目标批次" };
+      }
+      throw new Error(`unexpected title selector: ${selector}`);
+    },
+  };
+  const page = {
+    url: () => "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=target",
+    waitForTimeout: async () => {},
+    locator(selector) {
+      if (selector === ".header-title:visible") {
+        return { count: async () => 1, first: () => title };
+      }
+      throw new Error(`unexpected page selector: ${selector}`);
+    },
+  };
+
+  const detailUrl = await assertOperationBatchDetailIdentity(page, {
+    batchCode: "EZT261048",
+    batchName: "目标批次",
+    batchListUrl: "https://dashboard.ata.net.cn/batch/batchList",
+  });
+
+  assert.equal(detailUrl, "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=target");
+});
+
+test("批次详情未读到实际批次名时停止", async () => {
+  await assert.rejects(
+    assertOperationBatchDetailIdentity(batchDetailPage({ name: "" }), {
+      batchCode: "EZT261018",
+      batchListUrl: "https://dashboard.ata.net.cn/batch/batchList",
+    }),
+    { code: "OPERATION_BATCH_ACTUAL_NAME_MISSING" },
+  );
+});
 
 test("visible schedule inspection accepts an explicit empty state", () => {
   assert.deepEqual(operationBatchVisibleSchedulesFromRaw({
@@ -117,6 +214,41 @@ test("archive schedule synchronization preserves a provided browser context", as
   assert.equal(result.action, "none");
   assert.equal(result.verified, true);
   assert.equal(closeCalls, 0);
+});
+
+test("archive schedule synchronization reuses the verified batch when multiple detail pages are open", async () => {
+  const wrongPage = batchDetailPage({ code: "EZT261030", name: "其他批次", guid: "wrong" });
+  const targetPage = batchDetailPage();
+  const targetDetailUrl = targetPage.url();
+  const selectedPages = [];
+  const context = { pages: () => [wrongPage, targetPage] };
+  const adapter = {
+    async readOverview(page) {
+      selectedPages.push(page);
+      return {
+        batchName: desiredSnapshot.batchName,
+        examStartDate: desiredSnapshot.examStartDate,
+        examEndDate: desiredSnapshot.examEndDate,
+      };
+    },
+    async readSchedules() {
+      return desiredSnapshot.schedules.map((schedule) => ({ ...schedule }));
+    },
+  };
+
+  const result = await synchronizeOperationBatchScheduleForArchive({
+    batch: { code: "EZT261018", name: "正式批次" },
+    desiredSnapshot,
+  }, {
+    context,
+    adapter,
+    closeContext: false,
+    reuseVerifiedDetail: true,
+    verifiedDetailUrl: targetDetailUrl,
+  });
+
+  assert.equal(result.action, "none");
+  assert.deepEqual(selectedPages, [targetPage]);
 });
 
 test("archive schedule synchronization initializes an empty operation-console schedule and verifies readback", async () => {

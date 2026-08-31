@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   buildBatchUpdateRequests,
   buildTencentDocRows,
+  projectManagerFromPlatformAccount,
   syncExamConfigToTencentDocs,
+  tencentDocsSettingsFromEnv,
 } from "./tencent_docs_sync.mjs";
 
 const config = {
@@ -38,6 +40,31 @@ const created = [
   { kind: "main", id: "428572", name: "项目招聘考试", start: "2026-07-01 09:00", end: "2026-07-01 11:00", candidate_count: 81, url: "https://eztest.cn/exam/107910/uniform/login/" },
   { kind: "mock", id: "428573", name: "项目招聘考试-试考", start: "2026-06-30 15:00", end: "2026-06-30 17:00", candidate_count: 62, url: "https://eztest.cn/exam/107910/uniform/login/" },
 ];
+
+test("defaults Tencent Docs sync to the current shared project sheet", () => {
+  const settings = tencentDocsSettingsFromEnv({
+    TENCENT_DOC_CLIENT_ID: "client",
+    TENCENT_DOC_ACCESS_TOKEN: "token",
+    TENCENT_DOC_OPEN_ID: "open",
+  });
+
+  assert.equal(settings.fileId, "DY1pQTURrc1BSSlND");
+  assert.equal(settings.sheetId, "gd4707");
+  assert.equal(settings.enabled, true);
+});
+
+test("maps the project owner platform account to the project manager column", () => {
+  assert.equal(projectManagerFromPlatformAccount("chenjun@ata.net.cn"), "陈军");
+  assert.equal(projectManagerFromPlatformAccount(" SIYUANYUAN@ATA.NET.CN "), "司园园");
+  assert.equal(projectManagerFromPlatformAccount("other@ata.net.cn"), "");
+
+  const [row] = buildTencentDocRows({
+    config,
+    created: [created[0]],
+    platformAccountEmail: "siyuanyuan@ata.net.cn",
+  });
+  assert.equal(row[2], "司园园");
+});
 
 test("builds Tencent Docs rows through AD with configured defaults", () => {
   const rows = buildTencentDocRows({ config, created });
@@ -386,6 +413,37 @@ test("trial R column follows the formal exam monitor rule", () => {
   assert.equal(rows[1][17], "双监控");
 });
 
+test("AB column selects ATA invigilation when Fanwei requests decentralized invigilation", () => {
+  const rows = buildTencentDocRows({
+    config: {
+      ...config,
+      businessRequirement: {
+        ...config.businessRequirement,
+        ata_invigilator_arrangement: "需要安排分散人工监考",
+      },
+    },
+    created,
+  });
+
+  assert.deepEqual(rows.map((row) => row[27]), ["ATA监考", "ATA监考"]);
+});
+
+test("AB column keeps the existing value when Fanwei does not request decentralized invigilation", () => {
+  const [row] = buildTencentDocRows({
+    config: {
+      ...config,
+      businessRequirement: {
+        ...config.businessRequirement,
+        ata_invigilator_arrangement: "不需要",
+      },
+      invigilatorText: "无监考",
+    },
+    created: [created[0]],
+  });
+
+  assert.equal(row[27], "无监考");
+});
+
 test("builds one Tencent Docs row for every formal and trial session", () => {
   const rows = buildTencentDocRows({
     config: { ...config, unifiedExamAddress: false, examAddress: "独立考试地址" },
@@ -507,19 +565,20 @@ test("F column stays blank when no candidates have been imported", () => {
   assert.equal(row[5], "");
 });
 
-test("appends to blank rows and writes font plus centered alignment", () => {
+test("appends below the last content row without filling interior blanks", () => {
   const requests = buildBatchUpdateRequests({
     sheetId: "BB08J2",
     remoteRows: [
       ["考试名称"],
       Array.from({ length: 30 }, (_, index) => index === 15 ? "428572" : index === 0 ? "已有考试" : ""),
       Array(30).fill(""),
+      Array.from({ length: 30 }, (_, index) => index === 0 ? "后续已有考试" : ""),
       Array(30).fill(""),
     ],
     rows: buildTencentDocRows({ config, created }),
   });
 
-  assert.deepEqual(requests.map((item) => item.updateRangeRequest.gridData.startRow), [2, 3]);
+  assert.deepEqual(requests.map((item) => item.updateRangeRequest.gridData.startRow), [4, 5]);
   assert.equal(requests[0].updateRangeRequest.sheetId, "BB08J2");
   assert.equal(requests[0].updateRangeRequest.gridData.rows[0].values[15].cellValue.text, "统一入口：E107910\n考试口令：428572");
   assert.equal(requests[1].updateRangeRequest.gridData.rows[0].values[15].cellValue.text, "统一入口：E107910\n考试口令：428573");
@@ -528,9 +587,11 @@ test("appends to blank rows and writes font plus centered alignment", () => {
     const rowValues = request.updateRangeRequest.gridData.rows[0].values;
     assert.equal(rowValues.length, 30);
     assert.equal(rowValues[15].cellFormat.textFormat.fontSize, 10);
+    assert.deepEqual(rowValues[15].cellFormat.textFormat.color, { red: 255, green: 0, blue: 0, alpha: 255 });
     assert.equal(rowValues[15].cellFormat.horizontalAlignment, "CENTER");
     assert.equal(rowValues[15].cellFormat.verticalAlignment, "MIDDLE");
     assert.equal(rowValues[29].cellFormat.textFormat.fontSize, 10);
+    assert.deepEqual(rowValues[29].cellFormat.textFormat.color, { red: 255, green: 0, blue: 0, alpha: 255 });
     assert.equal(rowValues[29].cellFormat.horizontalAlignment, "CENTER");
     assert.equal(rowValues[29].cellFormat.verticalAlignment, "MIDDLE");
   }
@@ -557,6 +618,12 @@ test("sync reads the sheet through AD before submitting a batch update", async (
           message: "invalid param error: 'range' invalid",
         }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
+      if (String(url).endsWith("/A3:AD3")) {
+        return new Response(JSON.stringify({ gridData: { rows: [] } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       throw new Error(`unexpected read range: ${url}`);
     }
     return new Response(JSON.stringify({ responses: [{ updateRangeResponse: {} }] }), {
@@ -579,10 +646,72 @@ test("sync reads the sheet through AD before submitting a batch update", async (
   });
 
   assert.equal(result.updatedRows, 1);
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   assert.equal(calls[0].options.headers["Access-Token"], "token");
   assert.ok(calls[0].url.endsWith("/A1:AD200"));
   assert.ok(calls[1].url.endsWith("/A201:AD400"));
-  assert.equal(calls[2].options.method, "POST");
-  assert.equal(JSON.parse(calls[2].options.body).requests.length, 1);
+  assert.ok(calls[2].url.endsWith("/A3:AD3"));
+  assert.equal(calls[3].options.method, "POST");
+  assert.equal(JSON.parse(calls[3].options.body).requests.length, 1);
+});
+
+test("rechecks the append range and moves below newly occupied rows", async () => {
+  const calls = [];
+  let fullReadCount = 0;
+  const fetchImpl = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    if (options.method === "POST") {
+      return new Response(JSON.stringify({ responses: [{ updateRangeResponse: {} }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (String(url).endsWith("/A1:AD200")) {
+      fullReadCount += 1;
+      const rows = [
+        { values: [{ cellValue: { text: "考试名称" } }] },
+        { values: [{ cellValue: { text: "已有考试" } }] },
+      ];
+      if (fullReadCount > 1) rows.push({ values: [{ cellValue: { text: "并发新增考试" } }] });
+      return new Response(JSON.stringify({ gridData: { rows } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (String(url).endsWith("/A201:AD400")) {
+      return new Response(JSON.stringify({ code: 400001, message: "invalid param error: 'range' invalid" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (String(url).endsWith("/A3:AD3")) {
+      return new Response(JSON.stringify({
+        gridData: { rows: [{ values: [{ cellValue: { text: "并发新增考试" } }] }] },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (String(url).endsWith("/A4:AD4")) {
+      return new Response(JSON.stringify({ gridData: { rows: [] } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  const result = await syncExamConfigToTencentDocs({
+    config,
+    created: [created[0]],
+    settings: {
+      clientId: "client",
+      accessToken: "token",
+      openId: "open",
+      fileId: "file",
+      sheetId: "gd4707",
+    },
+    fetchImpl,
+  });
+
+  assert.equal(result.updatedRows, 1);
+  assert.equal(result.requests[0].updateRangeRequest.gridData.startRow, 3);
+  assert.equal(calls.filter((call) => call.options.method === "POST").length, 1);
 });

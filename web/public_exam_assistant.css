@@ -184,7 +184,8 @@ button {
 }
 
 .suggestions,
-.choices {
+.choices,
+.downloads {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -192,7 +193,8 @@ button {
 }
 
 .suggestion-button,
-.choice-button {
+.choice-button,
+.download-button {
   min-height: 36px;
   padding: 8px 11px;
   border: 1px solid #cbd6df;
@@ -209,6 +211,23 @@ button {
 .choice-button:hover {
   border-color: #75a5c6;
   background: var(--blue-soft);
+}
+
+.download-button {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: #fff;
+  font-weight: 700;
+}
+
+.download-button:hover {
+  border-color: #115b96;
+  background: #115b96;
+}
+
+.download-button:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .typing-bubble {

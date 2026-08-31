@@ -95,6 +95,70 @@ function projectExamRequirements(config = {}) {
   return config.examRequirement?.fields ? [config.examRequirement] : [];
 }
 
+function operationArchiveDraftForChangeNotice(task = {}, fallbackDraft = {}) {
+  const submitted = task.config?.operationArchive?.lastSubmission?.formSnapshot;
+  if (!submitted || typeof submitted !== "object" || Array.isArray(submitted)) return fallbackDraft;
+  const actuals = {};
+  if (text(submitted.registrationSubjects)) actuals.candidateSubjects = submitted.registrationSubjects;
+  if (text(submitted.attendedSubjects)) actuals.completedSubjects = submitted.attendedSubjects;
+  if (text(submitted.personalityAssessment)) {
+    actuals.assessment = {
+      complete: true,
+      personalityAssessment: submitted.personalityAssessment,
+      personalityAssessmentScope: submitted.personalityAssessmentScope,
+    };
+  }
+  return buildOperationArchiveDraft(task, { actuals });
+}
+
+function operationContentHasSent(operationContent = {}) {
+  return Boolean(
+    (Array.isArray(operationContent.dispatchHistory) && operationContent.dispatchHistory.length)
+    || operationContent.initialSendVerification?.status === "verified"
+    || text(operationContent.dispatchStatus) === "sent"
+    || text(operationContent.lastDispatchedAt),
+  );
+}
+
+function cloneRequirementConfigSelection(selection = {}) {
+  return {
+    explicit: selection?.explicit === true,
+    selectedIds: Array.isArray(selection?.selectedIds) ? [...selection.selectedIds] : [],
+    values: selection?.values && typeof selection.values === "object" && !Array.isArray(selection.values)
+      ? { ...selection.values }
+      : {},
+  };
+}
+
+export function appendProjectExamRequirement(config = {}, requirement = {}, now = new Date().toISOString()) {
+  const requirements = projectExamRequirements(config);
+  const requirementIndex = requirements.length;
+  const baseFilename = text(requirements[0]?.filename || requirement.filename || "易考需求单.xlsx");
+  const appendedRequirement = {
+    id: text(requirement.id || `requirement-${requirementIndex + 1}`),
+    order: requirementIndex + 1,
+    version: 1,
+    confirmedAt: now,
+    modifiedAt: now,
+    fields: { ...(requirement.fields || {}) },
+    configSelection: cloneRequirementConfigSelection(requirement.configSelection),
+    config: { ...(requirement.config || {}) },
+    previewRows: Array.isArray(requirement.previewRows) ? requirement.previewRows.map((row) => Array.isArray(row) ? [...row] : row) : [],
+    warnings: Array.isArray(requirement.warnings) ? [...requirement.warnings] : [],
+    metrics: requirement.metrics && typeof requirement.metrics === "object" ? { ...requirement.metrics } : {},
+    filename: indexedRequirementFilename(baseFilename, requirementIndex),
+    uploadId: "",
+    supplements: {},
+  };
+  const examRequirements = [...requirements, appendedRequirement];
+  return {
+    examRequirements,
+    examRequirement: examRequirements[0],
+    appendedRequirement,
+    requirementIndex,
+  };
+}
+
 export function removeProjectExamRequirement(config = {}, requirementIndex = 0) {
   const requirements = projectExamRequirements(config);
   const normalizedIndex = Number(requirementIndex);
@@ -135,6 +199,7 @@ export function buildFanweiProjectConfig({ fanwei = {}, model = {}, parsed = {},
       version: Number(requirement.version || 0) + 1,
       confirmedAt: now,
       fields: { ...(requirement.fields || {}) },
+      configSelection: cloneRequirementConfigSelection(requirement.configSelection),
       config: { ...(requirement.config || {}) },
       previewRows: Array.isArray(requirement.previewRows) ? requirement.previewRows : [],
       warnings: Array.isArray(requirement.warnings) ? requirement.warnings : [],
@@ -240,6 +305,7 @@ export function buildProjectWorkflow(task = {}, batchDraft = null) {
   }
   const personnelStatus = buildOperationPersonnelTaskStatus(task, personnelDraft);
   const personnelNotRequired = text(business.ata_invigilator_arrangement).includes("不需要");
+  const contentNotRequired = text(business.ata_content_participation).includes("不需要");
   const archiveDraft = buildOperationArchiveDraft(task);
   const contentReady = examRequirements.length > 0 && examRequirements.every((requirement) => Boolean(requirement.fields?.["考试名称"] && requirement.fields?.["考试日期时间"]));
   const hasActualSession = (task.sessions || []).some((session) => (
@@ -251,14 +317,17 @@ export function buildProjectWorkflow(task = {}, batchDraft = null) {
     ? persistedBatchStatus
     : batchUpdate.status;
   const contentEmail = task.config?.contentRequirementEmail || {};
+  const operationContent = task.config?.operationContentSync || {};
+  const contentSent = operationContentHasSent(operationContent);
   const contentChanged = Boolean(
     text(contentEmail.lastSourceFingerprint)
     && text(contentEmail.lastSourceFingerprint) !== contentRequirementEmailFingerprint({ task }),
   );
   const archive = task.config?.operationArchive || {};
+  const archiveComparisonDraft = operationArchiveDraftForChangeNotice(task, archiveDraft);
   const archiveChanged = Boolean(
     text(archive.lastSubmittedFingerprint)
-    && text(archive.lastSubmittedFingerprint) !== operationArchiveFingerprint(archiveDraft),
+    && text(archive.lastSubmittedFingerprint) !== operationArchiveFingerprint(archiveComparisonDraft),
   );
   return {
     sources: {
@@ -285,11 +354,17 @@ export function buildProjectWorkflow(task = {}, batchDraft = null) {
             status: personnelStatus.status,
             actions: personnelStatus.actions,
             changeNotice: personnelStatus.status === "changes_pending" ? "有变更请确认" : "",
-          },
-      content: {
-        status: hasBatchCode ? (contentReady ? "ready" : "needs_review") : "waiting_batch",
-        changeNotice: contentChanged ? "有变更请确认" : "",
       },
+      content: contentNotRequired
+        ? { status: "skipped", changeNotice: "" }
+        : {
+            status: contentSent
+              ? "sent"
+              : hasBatchCode
+                ? (contentReady ? "ready" : "needs_review")
+                : "waiting_batch",
+            changeNotice: contentChanged ? "有变更请确认" : "",
+        },
       archive: {
         status: ["submitted", "already_archived"].includes(text(task.config?.operationArchive?.status))
           ? "success"

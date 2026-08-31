@@ -154,6 +154,9 @@ function differingManagedFields(expected = {}, actual = {}) {
   for (const field of ["batchName", "examStartDate", "examEndDate"]) {
     add(field, expected?.[field], actual?.[field]);
   }
+  if (Object.hasOwn(expected || {}, "servicePersonnel")) {
+    add("servicePersonnel", expected?.servicePersonnel, actual?.servicePersonnel);
+  }
   const expectedSchedules = Array.isArray(expected?.schedules) ? expected.schedules : [];
   const actualSchedules = Array.isArray(actual?.schedules) ? actual.schedules : [];
   const count = Math.max(expectedSchedules.length, actualSchedules.length);

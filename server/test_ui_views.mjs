@@ -41,6 +41,13 @@ test("navigation orders project management, exam list, then auto configuration",
   assert.ok(projectIndex < examIndex && examIndex < autoIndex);
 });
 
+test("requirements and template pages remain routable without sidebar entries", () => {
+  assert.ok(html.includes('id="requirementsNavBtn" data-route-menu="requirements" type="button" hidden'));
+  assert.ok(html.includes('id="templatesNavBtn" data-route-menu="templates" type="button" hidden'));
+  assert.ok(html.includes('RequirementListPage({ root: requirementsView, loadRequirements })'));
+  assert.ok(html.includes('staticPage("templates", templatesView)'));
+});
+
 test("exam list room count uses the confirmed class icon asset", () => {
   assert.ok(html.includes("class-count-icon"));
   assert.ok(html.includes("class-icon-exact-person-blue"));
@@ -554,6 +561,8 @@ test("exam list is task-aggregated and exam detail owns dual session cards", () 
   assert.ok(html.includes('id="examFilterTabs"'));
   assert.ok(html.includes('id="examQueryBtn"'));
   assert.ok(html.includes('id="examStatusFilterBtn"'));
+  assert.ok(html.includes('examStatusFilterLabel.textContent = statusCountText(EXAM_LIST_MODE_LABELS[selectedMode], examStatusCounts[selectedMode])'));
+  assert.ok(html.includes('button.textContent = statusCountText(EXAM_STATUS_FILTER_OPTION_LABELS[mode], examStatusCounts[mode])'));
   assert.ok(html.includes('id="examTimeFilterBtn"'));
   assert.equal(html.includes('id="refreshExamsBtn"'), false);
   assert.ok(html.includes('class="panel task-detail-overview exam-log-panel is-collapsed" id="examExecutionPanel"'));
@@ -660,7 +669,7 @@ test("project and system views expose the selective PR 5 collaboration controls"
   assert.ok(html.includes('id="contentRequirementEmailCc"'));
   assert.ok(html.includes('id="operationContentSyncBtn"'));
   assert.ok(html.includes('id="operationContentSyncState"'));
-  assert.ok(html.includes('id="contentRequirementEmailSendBtn"'));
+  assert.equal(html.includes('id="contentRequirementEmailSendBtn"'), false);
   assert.ok(html.includes('id="emailSettingsPanel"'));
   assert.ok(html.includes('id="saveEmailSettingsBtn"'));
   assert.ok(html.includes('id="sendEmailTestBtn"'));
@@ -922,7 +931,6 @@ test("project navigation clears stale state and disables actions until current r
     "operationBatchCreateBtn",
     "operationBatchRecordBtn",
     "operationContentSyncBtn",
-    "contentRequirementEmailSendBtn",
     "projectWechatBindingRefreshBtn",
     "projectWechatBindingSaveBtn",
   ]) {
@@ -1057,18 +1065,76 @@ test("operation batch create calls automation and exposes progress in the dialog
   assert.ok(html.includes("setOperationBatchActionState(message, true)"));
   assert.ok(html.includes('id="operationBatchSyncBtn"'));
   assert.ok(html.includes("/operation-batch/reconcile"));
-  assert.ok(html.includes('publishPending ? "继续发布" : "同步批次信息"'));
-  assert.ok(html.includes('const publishPending = Boolean(code && status === "created_unpublished")'));
-  assert.ok(handler.includes('currentBatch.status !== "created_unpublished"'));
-  assert.ok(handler.includes("正在按批次名称和代码回查并继续发布"));
-  assert.ok(handler.includes("批次已同步并发布"));
-  assert.ok(html.includes("批次代码已同步到平台"));
+  assert.ok(html.includes('id="operationBatchSyncBtn" type="button">添加日程</button>'));
+  assert.ok(html.includes('operationBatchSyncBtn.textContent = "添加日程"'));
+  assert.ok(handler.includes("正在按批次代码定位，并核对批次代码和批次名称"));
+  assert.ok(handler.includes("批次日程已添加，发布状态和批次信息已同步"));
+  assert.ok(html.includes("批次已发布；日程仍待添加"));
   assert.ok(html.includes('id="operationBatchHelperUpdateBtn"'));
   assert.ok(html.includes("helper_update_required"));
-  assert.ok(html.includes("operationBatchCreate: 7"));
+  assert.ok(html.includes("operationBatchCreate: 19"));
+  assert.ok(html.includes("operationBatchReconcile: 16"));
+  assert.ok(html.includes("operationBatchUpdate: 16"));
   assert.ok(html.includes("Number(health.helperVersion || 0) < minimumVersion"));
+  assert.ok(html.includes("health.capabilities?.selfUpdate === true"));
+  assert.ok(html.includes("/api/fanwei/helper-update-manifest"));
+  assert.ok(html.includes('fetchFanweiHelper("/update"'));
+  assert.ok(html.includes("waitForUpdatedFanweiHelper"));
+  assert.ok(html.includes("本机助手已更新完成"));
+  assert.ok(html.includes("本机助手已是最新版本"));
   assert.ok(html.includes("operation_batch_playwright_missing"));
   assert.ok(html.includes("downloadFanweiHelperInstaller"));
+});
+
+test("automatic helper updates are opt-in by helper capability so legacy v8 stays untouched", () => {
+  const updater = sourceBetween(
+    "      async function maybeAutoUpdateFanweiHelper(health, { onStatus } = {}) {",
+    "\n      async function updateFanweiLocalHelper()",
+  );
+  const helperGate = sourceBetween(
+    "      async function ensureScoreStampLocalHelper(requiredCapability = \"\", { onUpdateStatus } = {}) {",
+    "\n      async function submitScoreStampApplicationResult",
+  );
+  assert.ok(updater.includes("health?.capabilities?.selfUpdate !== true) return health"));
+  assert.ok(updater.includes("/api/fanwei/helper-update-manifest"));
+  assert.ok(updater.includes('fetchFanweiHelper("/update"'));
+  assert.ok(helperGate.includes("health.capabilities?.selfUpdate === true"));
+  assert.ok(helperGate.includes("currentVersionUsable"));
+  assert.ok(helperGate.includes("onUpdateStatus"));
+  assert.ok(html.includes('confirmText: isContentSync ? "继续同步运控" : "继续添加日程"'));
+});
+
+test("Fanwei read stays available without a forced helper update and exposes stuck-update recovery", () => {
+  const statusLoader = sourceBetween(
+    "      async function loadFanweiAutoReadStatus() {",
+    "\n      async function createFanweiRequirementImport()",
+  );
+  const reader = sourceBetween(
+    "      async function copyFanweiReaderScript() {",
+    "\n      async function loadFanweiAutoReadStatus()",
+  );
+  assert.ok(statusLoader.includes("health.capabilities?.fanweiRead !== true && health.capabilities?.selfUpdate === true"));
+  assert.ok(statusLoader.includes("当前助手不支持泛微读取"));
+  assert.ok(statusLoader.includes('error.code === "helper_update_in_progress"'));
+  assert.ok(statusLoader.includes("showFanweiHelperUpdateRecovery()"));
+  assert.ok(reader.includes('error.code === "helper_update_in_progress"'));
+  assert.ok(reader.includes("showFanweiHelperUpdateRecovery()"));
+  assert.ok(html.includes("请先重启电脑"));
+  assert.ok(html.includes("fanweiInstallHelperBtn.hidden = false"));
+});
+
+test("manual helper update reports both completed and already-current outcomes", () => {
+  const updater = sourceBetween(
+    "      async function maybeAutoUpdateFanweiHelper(health, { onStatus } = {}) {",
+    "\n      async function updateFanweiLocalHelper()",
+  );
+
+  assert.ok(updater.includes("本机助手已更新完成"));
+  assert.ok(updater.includes("本机助手已是最新版本"));
+  assert.ok(updater.includes("waitForUpdatedFanweiHelper"));
+  assert.ok(updater.includes("可以重新添加日程"));
+  assert.ok(html.includes('helperUpdateStatus: "updated"'));
+  assert.ok(html.includes('title: "本机助手更新完成"'));
 });
 
 test("operation batch exposes a confirmation-gated recovery action after an uncertain create", () => {
@@ -1671,6 +1737,10 @@ test("project management supports deleting projects", () => {
   assert.ok(html.includes('id="projectSearchBtn" type="button">查询</button>'));
   assert.ok(html.includes('id="projectSearchInput" aria-label="搜索项目"'));
   assert.ok(html.includes('id="projectStatusFilter" aria-label="项目状态"'));
+  assert.ok(html.includes('"": visibleTasks.filter((task) => !task.hiddenAt).length'));
+  assert.ok(html.includes('archived: visibleTasks.filter((task) => task.hiddenAt).length'));
+  assert.ok(html.includes('option.textContent = statusCountText(label, projectStatusCounts[option.value] || 0)'));
+  assert.ok(html.includes('projectStatusFilter.addEventListener("change", renderProjectList)'));
   assert.equal(html.includes('<span class="sr-only">搜索项目</span>'), false);
   assert.equal(html.includes('<span class="sr-only">项目状态</span>'), false);
   assert.ok(html.includes('id="projectStats" hidden'));
@@ -1701,7 +1771,7 @@ test("site errors use the centered application dialog", () => {
   assert.ok(html.includes('id="siteErrorConfirmBtn"'));
   assert.match(html, /\.account-editor-modal\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*0;[^}]*height:\s*fit-content;[^}]*margin:\s*auto;/s);
   assert.match(html, /\.session-time-picker\.account-editor-modal\s*\{[\s\S]*inset:\s*auto;[\s\S]*margin:\s*0;/s);
-  assert.ok(html.includes("function showErrorDialog(message)"));
+  assert.ok(html.includes("function showErrorDialog(message, options = {})"));
   assert.ok(html.includes("siteErrorModal.showModal()"));
   assert.ok(html.includes('siteErrorModal.addEventListener("cancel"'));
   assert.ok(html.includes('if (action === "edit") return showErrorDialog("项目编辑将在独立表单中接入，不会打开自动配置组件。");'));
@@ -1735,25 +1805,18 @@ test("project management archives cards and exposes an archived filter", () => {
   assert.ok(html.includes("Boolean(task.hiddenAt)"));
 });
 
-test("project management renders local cards before detail synchronization", () => {
-  assert.ok(html.includes('import { createStagedListLoader } from "/web/staged_list_loader.mjs"'));
+test("project management loads cards without per-project detail synchronization", () => {
   const source = sourceBetween(
-    "const runProjectListLoad = createStagedListLoader({",
+    "async function runProjectListLoad()",
     "async function deleteProjectCard",
   );
+  assert.ok(source.includes("Promise.all(["));
   assert.ok(source.includes("fetchJson(`/api/tasks?includeArchived=1&_=${Date.now()}`)"));
   assert.ok(source.includes("fetchJson(`/api/exams?_=${Date.now()}`)"));
-  assert.ok(source.includes('getDetailItems: ({ summaries }) => [...summaries, { type: "sessions" }]'));
-  assert.ok(source.includes("projectTasksWithSessions(summaries, sessions)"));
-  assert.ok(source.includes("applyInitial:"));
-  assert.ok(source.includes("if (taskViewState.tasks.length) return;"));
-  assert.ok(source.includes("sessions: []"));
-  assert.ok(source.includes('setProjectListRefreshState("正在刷新项目...")'));
+  assert.ok(source.includes("projectTasksWithSessions(taskData.tasks || [], sessions)"));
   assert.ok(source.includes("setProjectListRefreshState();"));
-  assert.ok(source.includes("loadDetail:"));
-  assert.ok(source.includes("applyDetails:"));
-  assert.ok(source.includes("fetchJson(`/api/tasks/${encodeURIComponent(item.taskId)}?_=${Date.now()}`)"));
-  assert.ok(source.includes('type: "task"'));
+  assert.equal(source.includes("fetchJson(`/api/tasks/${encodeURIComponent"), false);
+  assert.equal(source.includes("createStagedListLoader"), false);
 });
 
 test("project management renders projects as soon as auto config creates an exam", () => {
@@ -1817,10 +1880,13 @@ test("project list enters with a fresh load while retaining existing cards durin
   assert.ok(pageSource.includes("loadProjects({ forceRefresh: true })"));
   assert.ok(html.includes('id="projectListRefreshState" aria-live="polite" hidden'));
   assert.ok(html.includes("function setProjectListRefreshState(message = \"\")"));
+  const source = sourceBetween("async function loadProjects(", "let projectDeleteConfirmTrigger");
+  assert.ok(source.includes("setProjectListRefreshState();"));
+  assert.equal(source.includes("正在刷新项目"), false);
 });
 
 test("project cards sort by formal then trial exam start time descending", () => {
-  const source = sourceBetween("function projectExamStartTimestamp(task)", "const runProjectListLoad = createStagedListLoader({");
+  const source = sourceBetween("function projectExamStartTimestamp(task)", "async function runProjectListLoad()");
   assert.ok(source.includes('session.sessionType === "formal"'));
   assert.ok(source.includes('session.sessionType === "trial"'));
   assert.ok(source.includes("Number.NEGATIVE_INFINITY"));
@@ -1828,19 +1894,40 @@ test("project cards sort by formal then trial exam start time descending", () =>
   assert.ok(source.includes('Date.parse(right.updatedAt || "")'));
 });
 
-test("project card actions use a bounded two-column grid", () => {
+test("project card actions only expose archive and delete in a bounded grid", () => {
   assert.match(html, /\.project-card\s*\{[^}]*overflow:\s*hidden[^}]*box-sizing:\s*border-box/s);
-  assert.match(html, /\.card-actions\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*max-width:\s*100%/s);
+  assert.match(html, /\.card-actions\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*max-height:\s*0[^}]*visibility:\s*hidden[^}]*pointer-events:\s*none/s);
+  assert.match(html, /\.project-card\.is-actions-visible \.card-actions\s*\{[^}]*max-height:\s*140px[^}]*visibility:\s*visible[^}]*pointer-events:\s*auto/s);
   assert.match(html, /\.card-actions\s+button\s*\{[^}]*width:\s*100%[^}]*min-width:\s*0[^}]*text-overflow:\s*ellipsis/s);
-  assert.ok(html.includes('class="card-actions"'));
+  const renderFunction = sourceBetween("function renderProjectList()", "async function runProjectListLoad()");
+  assert.ok(renderFunction.includes('data-action="toggle-actions"'));
+  assert.ok(renderFunction.includes('aria-expanded="false"'));
+  assert.ok(renderFunction.includes('aria-label="展开项目操作"'));
+  assert.ok(renderFunction.includes('data-action="archive"'));
+  assert.ok(renderFunction.includes('data-action="delete"'));
+  assert.equal(renderFunction.includes('data-action="view"'), false);
+  assert.equal(renderFunction.includes('data-action="edit"'), false);
+  assert.equal(renderFunction.includes('data-action="auto"'), false);
 });
 
-test("project card actions reveal smoothly on hover focus or card click", () => {
-  assert.match(html, /\.card-actions\s*\{[^}]*max-height:\s*0[^}]*opacity:\s*0[^}]*visibility:\s*hidden[^}]*transition:\s*max-height 200ms ease-out/s);
-  assert.match(html, /\.project-card:hover \.card-actions,[\s\S]*\.project-card\.is-actions-visible \.card-actions\s*\{[^}]*max-height:\s*140px[^}]*opacity:\s*1[^}]*visibility:\s*visible/s);
-  assert.ok(html.includes('data-task-id="${safeText(task.taskId)}" tabindex="0"'));
-  assert.ok(html.includes('card.classList.add("is-actions-visible")'));
-  assert.ok(html.includes('projectGrid.addEventListener("keydown"'));
+test("project cards open details directly by click or keyboard", () => {
+  assert.ok(html.includes('data-task-id="${safeText(task.taskId)}" role="link" tabindex="0"'));
+  const clickHandler = sourceBetween(
+    'projectGrid.addEventListener("click", (event) => {',
+    'projectGrid.addEventListener("keydown", (event) => {',
+  );
+  assert.ok(clickHandler.includes('router.navigate(`/projects/${encodeURIComponent(card.dataset.taskId)}`)'));
+  assert.ok(clickHandler.includes('if (action === "toggle-actions")'));
+  assert.ok(clickHandler.includes('card.classList.add("is-actions-visible")'));
+  assert.ok(clickHandler.includes('actionButton.setAttribute("aria-expanded", "true")'));
+  assert.ok(clickHandler.includes('if (action === "archive")'));
+  assert.ok(clickHandler.includes('if (action === "delete")'));
+  const keyboardHandler = sourceBetween(
+    'projectGrid.addEventListener("keydown", (event) => {',
+    'requirementsList.addEventListener("click", (event) => {',
+  );
+  assert.ok(keyboardHandler.includes('event.key !== "Enter" && event.key !== " "'));
+  assert.ok(keyboardHandler.includes('router.navigate(`/projects/${encodeURIComponent(card.dataset.taskId)}`)'));
 });
 
 test("exam list renders session rows before detail synchronization", () => {
@@ -2327,7 +2414,10 @@ test("configuration progress comes from required progress cards", () => {
   assert.ok(html.includes('const failedStep = progressSteps.find((step) => step.status === "failed");'));
   assert.ok(html.includes("if (failedStep) return failedStep.stepName;"));
   assert.ok(html.includes('const currentStep = progressSteps.find((step) => step.status !== "success");'));
-  assert.ok(html.includes("const displayProgress = currentTaskProgress(task);"));
+  const projectListSource = sourceBetween("function renderProjectList()", "async function runProjectListLoad()");
+  assert.equal(projectListSource.includes("currentTaskProgress(task)"), false);
+  assert.equal(projectListSource.includes("当前进度"), false);
+  assert.equal(projectListSource.includes("mini-progress"), false);
   assert.ok(html.includes("const progressSteps = displaySteps.filter(isConfigurationProgressStep);"));
   assert.ok(html.includes("const displayProgress = taskConfigurationProgressFromSteps(progressSteps, task.progress);"));
   assert.ok(html.includes("currentTaskProgress(task)"));
@@ -2391,7 +2481,7 @@ test("exam detail shows project shared sheet before score processing with a manu
   assert.ok(html.includes("const trialNotice = hasTrial"));
   assert.ok(html.includes("data-shared-sheet-fill"));
   assert.ok(html.includes("打开在线表"));
-  assert.ok(html.includes("https://docs.qq.com/sheet/DR3NiT296WmtpWXVM?tab=BB08J2"));
+  assert.ok(html.includes("https://docs.qq.com/sheet/DY1pQTURrc1BSSlND?tab=gd4707"));
   assert.match(html, /\.task-step-action,\s*\.sms-platform-link,\s*\.sms-candidate-download\s*\{[\s\S]*min-height:\s*28px;[\s\S]*background:\s*var\(--blue\);[\s\S]*color:\s*#fff;[\s\S]*padding:\s*5px 10px;[\s\S]*font-size:\s*12px;/);
   assert.match(html, /\.task-step-action:disabled,\s*\.sms-candidate-download:disabled\s*\{[\s\S]*color:\s*var\(--muted\);[\s\S]*background:\s*#f4f7fb;[\s\S]*opacity:\s*1;[\s\S]*cursor:\s*not-allowed;/);
   assert.match(html, /\.sms-copy-button\s*\{[\s\S]*width:\s*28px;[\s\S]*background:\s*transparent;[\s\S]*color:\s*var\(--blue\);[\s\S]*padding:\s*0;/);
@@ -2662,6 +2752,8 @@ test("Fanwei local helper owns status, Chrome launch, and reads on the coworker'
   assert.equal(copyFunction.includes("applyImportResult"), false);
   assert.equal(copyFunction.includes("/api/fanwei/requirement-import"), false);
   assert.ok(copyFunction.includes('fanweiReadTransport === "server"'));
+  assert.ok(copyFunction.includes("virtualSerial || fanweiReadTransport"));
+  assert.ok(copyFunction.includes("正在生成全合成的虚拟泛微需求"));
   assert.ok(copyFunction.includes('`${runtime.apiBase}/api/fanwei/local-read`'));
   assert.equal(copyFunction.includes("/api/fanwei/auto-read"), false);
   assert.equal(copyFunction.includes("navigator.clipboard.writeText(script)"), false);
@@ -2799,6 +2891,225 @@ test("fanwei test page keeps field cards and requirement dropdowns", () => {
   assert.ok(renderValueFunction.includes("fanwei-select"));
 });
 
+test("fanwei requirement sheets expose a scoped three-stage 42-item configuration picker", () => {
+  const fanweiSection = sourceBetween(
+    '<section class="task-view" id="fanweiTestView"',
+    '<section class="task-view" id="projectDetailView"',
+  );
+  const catalogSource = sourceBetween("const fanweiConfigCatalog = {", "const fanweiConfigItems =");
+  const itemIds = [...catalogSource.matchAll(/id:\s*"([a-z0-9_]+)"/g)].map((match) => match[1]);
+
+  assert.ok(html.includes('id="fanweiConfigPickerModal"'));
+  assert.ok(html.includes('class="account-editor-modal fanwei-config-picker-modal"'));
+  assert.ok(html.includes('id="fanweiConfigPickerModal" aria-label="配置选择"'));
+  assert.equal(html.includes('id="fanweiConfigPickerTitle"'), false);
+  assert.ok(html.includes('id="fanweiConfigPickerOptions"'));
+  assert.ok(html.includes('id="fanweiConfigPickerSelected"'));
+  assert.ok(html.includes('data-fanwei-config-stage="before"'));
+  assert.ok(html.includes('data-fanwei-config-stage="during"'));
+  assert.ok(html.includes('data-fanwei-config-stage="after"'));
+  assert.ok(html.includes('aria-selected="true">开考前</button>'));
+  assert.ok(html.includes('aria-selected="false">考试中</button>'));
+  assert.ok(html.includes('aria-selected="false">考试后</button>'));
+  assert.equal(html.includes("开考前配置</button>"), false);
+  assert.equal(html.includes("考试中配置</button>"), false);
+  assert.equal(html.includes("考试后配置</button>"), false);
+  assert.equal(itemIds.length, 42);
+  assert.equal(new Set(itemIds).size, 42);
+
+  const pickerStyles = sourceBetween(
+    "      .fanwei-config-picker-modal {",
+    "      .exam-list-table th,",
+  );
+  assert.ok(pickerStyles.includes("--fanwei-picker-glass-surface:"));
+  assert.ok(pickerStyles.includes("background: var(--fanwei-picker-glass-surface);"));
+  assert.ok(pickerStyles.includes("background: var(--fanwei-picker-glass-raised);"));
+  assert.ok(pickerStyles.includes("border-bottom: 1px solid var(--fanwei-picker-glass-divider);"));
+  assert.equal(pickerStyles.includes(".fanwei-config-picker-modal::backdrop { background: rgba(15, 23, 42, 0.42); }"), false);
+
+  const baseRowIds = sourceBetween(
+    "const fanweiConfigBaseRowIds = new Set([",
+    "]);",
+  );
+  ["nda", "monitor", "save_video", "eagle_eye", "lock_screen", "manual_score"].forEach((id) => {
+    assert.ok(baseRowIds.includes(`"${id}"`));
+  });
+
+  const renderStackFunction = sourceBetween(
+    "function renderFanweiRequirementStack()",
+    "function activateFanweiRequirement",
+  );
+  assert.ok(renderStackFunction.includes('data-fanwei-config-open="${index}"'));
+  assert.ok(renderStackFunction.includes(">增加配置</button>"));
+  assert.ok(
+    renderStackFunction.indexOf('data-fanwei-requirement-delete="${index}"')
+      < renderStackFunction.indexOf("${configButton}"),
+  );
+  assert.ok(html.includes(".fanwei-requirement-config {\n        margin-left: auto;"));
+  assert.ok(html.includes(".fanwei-requirement-config,\n      .fanwei-requirement-copy {\n        width: 90px;\n        min-width: 90px;\n        min-height: 29px;\n        height: 29px;"));
+  assert.equal(html.includes(".fanwei-requirement-copy {\n        min-height: 29px;\n        height: 29px;\n        margin-left: auto;"), false);
+
+  const renderRowsFunction = sourceBetween(
+    "function renderFanweiRequirementRows(fields, requirementIndex)",
+    "function renderFanweiRequirementStack()",
+  );
+  assert.ok(renderRowsFunction.includes("!fanweiConfigBaseRowIds.has(item.id)"));
+
+  const saveFunction = sourceBetween(
+    "function saveFanweiConfigSelection()",
+    "function closeFanweiConfigPicker",
+  );
+  assert.ok(saveFunction.includes("uiState.fanweiRequirements[requirementIndex]"));
+  assert.ok(saveFunction.includes("explicit: true"));
+  assert.equal(saveFunction.includes("uiState.fanweiRequirements.map"), false);
+});
+
+test("fanwei config picker reflects the current requirement before opening", () => {
+  const catalogSource = sourceBetween("const fanweiConfigCatalog = {", "const fanweiConfigItems =");
+  const defaultSelection = compileInlineFunction(
+    "function defaultFanweiConfigSelection(fields = {})",
+    "\n\n      function cloneFanweiConfigSelection",
+    {
+      fanweiDefaultConfigIds: ["watermark", "copy_item_unable"],
+      fanweiConfigItems: [
+        "nda", "monitor", "save_video", "login_validation", "face_detection_dur", "ai_gaze",
+        "eagle_eye", "desktop_monitor", "desktop_monitor_video", "lock_screen", "client_required",
+        "exclusive_network", "watermark", "copy_item_unable", "show_point", "public_score", "manual_score",
+      ].map((id) => ({ id })),
+    },
+  );
+  const clientSelection = defaultSelection({
+    "考试类型": "客户端考试",
+    "登录验证": "自动验证；考后公安验证",
+    "登陆次数": "10",
+    "视频监控": "需要",
+    "视频录制": "开启录制",
+    "鹰眼监控": "需要",
+    "考试承诺书内容": "已填写",
+  });
+  const webSelection = defaultSelection({
+    "考试类型": "网页考试",
+    "登录验证方式": "人工审核",
+    "允许离开次数（网页考试时填写）": "3",
+  });
+  const recordingDisabledSelection = defaultSelection({
+    "视频监控": "需要",
+    "视频录制": "无需录制",
+  });
+  const openPicker = sourceBetween(
+    "function openFanweiConfigPicker(requirementIndex = uiState.activeFanweiRequirementIndex)",
+    "\n\n      function applyFanweiConfigSelectionToFields",
+  );
+  const platformRenderer = sourceBetween(
+    "function fanweiConfigPlatformOptionsHtml(selected)",
+    "\n\n      function renderFanweiConfigPicker",
+  );
+  const controlRenderer = sourceBetween(
+    "function fanweiConfigControlHtml(item)",
+    "\n\n      function fanweiConfigOptionHtml",
+  );
+
+  assert.equal(clientSelection.values.lockMode, "client");
+  assert.equal(clientSelection.values.loginMode, "auto");
+  assert.equal(clientSelection.values.loginMethod, "post_exam_public_security");
+  assert.equal(clientSelection.values.loginTimes, 10);
+  assert.ok(clientSelection.selectedIds.includes("client_required"));
+  assert.ok(clientSelection.selectedIds.includes("exclusive_network"));
+  assert.ok(clientSelection.selectedIds.includes("watermark"));
+  assert.ok(clientSelection.selectedIds.includes("copy_item_unable"));
+  assert.equal(clientSelection.selectedIds.includes("ai_gaze"), false);
+  assert.equal(clientSelection.selectedIds.includes("desktop_monitor"), false);
+  assert.equal(clientSelection.selectedIds.includes("show_point"), false);
+  assert.equal(clientSelection.selectedIds.includes("public_score"), false);
+  assert.equal(clientSelection.selectedIds.includes("app_required"), false);
+  assert.equal(webSelection.values.lockMode, "web");
+  assert.equal(webSelection.values.loginMode, "manual");
+  assert.equal(webSelection.values.webLeaveTimes, 3);
+  assert.equal(webSelection.selectedIds.includes("client_required"), false);
+  assert.ok(recordingDisabledSelection.selectedIds.includes("monitor"));
+  assert.equal(recordingDisabledSelection.selectedIds.includes("save_video"), false);
+  const explicitOptionalSelection = defaultSelection({
+    "视线追踪": "需要",
+    "桌面监控": "是",
+    "显示分值": "开启",
+    "查看成绩": "是",
+    "答题水印": "否",
+    "禁止复制": "关闭",
+  });
+  assert.ok(explicitOptionalSelection.selectedIds.includes("ai_gaze"));
+  assert.ok(explicitOptionalSelection.selectedIds.includes("desktop_monitor"));
+  assert.ok(explicitOptionalSelection.selectedIds.includes("show_point"));
+  assert.ok(explicitOptionalSelection.selectedIds.includes("public_score"));
+  assert.equal(explicitOptionalSelection.selectedIds.includes("watermark"), false);
+  assert.equal(explicitOptionalSelection.selectedIds.includes("copy_item_unable"), false);
+  assert.ok(openPicker.includes("collectFanweiRequirementFields(requirementIndex)"));
+  assert.ok(openPicker.includes("defaultFanweiConfigSelection(requirement.fields)"));
+  assert.ok(platformRenderer.includes('["client_required", "app_required"]'));
+  assert.ok(platformRenderer.includes("fanwei-config-platform-row"));
+  assert.ok(controlRenderer.includes('class="fanwei-config-lock-leave-controls"'));
+  assert.ok(html.includes(".fanwei-config-lock-leave-controls {\n        flex: 0 0 100%;"));
+  assert.match(catalogSource, /id: "client_required"[^\n]+mutexGroup: "client_platform"/);
+  assert.match(catalogSource, /id: "app_required"[^\n]+mutexGroup: "client_platform"/);
+  assert.match(catalogSource, /id: "save_video"[^\n]+inlineParent: "monitor"/);
+  const dependencySelector = sourceBetween(
+    "function fanweiConfigSelectWithDependencies(item, selected)",
+    "\n\n      function fanweiConfigRemoveWithDependents",
+  );
+  assert.ok(dependencySelector.includes("if (selected.has(item.id)) return;"));
+  assert.ok(dependencySelector.includes("fanweiConfigRemoveWithDependents(candidate.id, selected)"));
+  assert.ok(html.includes("需报备后人工开启"));
+  const pickerRenderer = sourceBetween(
+    "function renderFanweiConfigPicker()",
+    "\n\n      function openFanweiConfigPicker",
+  );
+  const pickerSummaryRenderer = sourceBetween(
+    "function renderFanweiConfigPickerSummary()",
+    "\n\n      function renderFanweiConfigPicker()",
+  );
+  const displayValue = sourceBetween(
+    "function fanweiConfigDisplayValue(item, selection = fanweiConfigPickerDraft)",
+    "\n\n      function fanweiConfigSegment",
+  );
+  assert.ok(pickerRenderer.includes("if (item.inlineParent) return \"\""));
+  assert.ok(pickerRenderer.includes("renderFanweiConfigPickerSummary()"));
+  assert.ok(pickerSummaryRenderer.includes("selected.has(item.id) && !item.inlineParent"));
+  assert.ok(displayValue.includes('item.id === "monitor" && selected.has("save_video")'));
+  assert.ok(displayValue.includes('return "是 · 开启录制"'));
+  const liveInputListener = sourceBetween(
+    'fanweiConfigPickerOptions.addEventListener("input", (event) => {',
+    'fanweiConfigPickerOptions.addEventListener("change", (event) => {',
+  );
+  assert.ok(liveInputListener.includes("updateFanweiConfigInputValue(input)"));
+  assert.ok(liveInputListener.includes("renderFanweiConfigPickerSummary()"));
+});
+
+test("desktop-only client options stay nested and hidden until desktop is selected", () => {
+  const visibility = sourceBetween(
+    "function fanweiConfigItemVisible(item, selected)",
+    "\n\n      function fanweiConfigSelectWithDependencies",
+  );
+  const catalogSource = sourceBetween("const fanweiConfigCatalog = {", "const fanweiConfigItems =");
+
+  ["exclusive_network", "check_bluetooth", "smart_input_disabled"].forEach((id) => {
+    assert.match(
+      catalogSource,
+      new RegExp(`id: "${id}"[^\\n]+parent: "client_required"[^\\n]+hideUntilParent: true`),
+    );
+  });
+  assert.ok(visibility.includes("!selected.has(item.parent)"));
+});
+
+test("fanwei requirement copies and submit payload keep independent configuration selections", () => {
+  const duplicateFunction = sourceBetween(
+    "function duplicateFanweiRequirement()",
+    "function renderFanweiModel(model = {})",
+  );
+  assert.ok(duplicateFunction.includes("cloneFanweiConfigSelection(sourceRequirement.configSelection)"));
+  assert.ok(html.includes("function collectAllFanweiRequirementConfigSelections()"));
+  assert.ok(html.includes("requirementConfigSelectionsList"));
+  assert.ok(html.includes("collectAllFanweiRequirementConfigSelections()"));
+});
+
 test("fanwei requirement copies keep independent fields and switch the active layer", () => {
   assert.ok(html.includes("fanweiRequirements: []"));
   assert.ok(html.includes("activeFanweiRequirementIndex: 0"));
@@ -2817,7 +3128,7 @@ test("fanwei requirement copies keep independent fields and switch the active la
     "function renderFanweiModel(model = {})",
   );
   assert.ok(duplicateFunction.includes("collectFanweiRequirementFields(uiState.activeFanweiRequirementIndex)"));
-  assert.ok(duplicateFunction.includes("uiState.fanweiRequirements.push({ fields: { ...sourceFields } })"));
+  assert.ok(duplicateFunction.includes("fields: { ...sourceFields }"));
   assert.ok(duplicateFunction.includes("uiState.activeFanweiRequirementIndex = uiState.fanweiRequirements.length - 1"));
   assert.equal(duplicateFunction.includes("当前编辑"), false);
 
@@ -3072,18 +3383,42 @@ test("project detail renders sourced operation workflow and keeps local archive 
     html.indexOf('data-operation-detail="archive"'),
     html.indexOf('id="operationDetailActions"'),
   );
-  assert.ok(archivePanel.indexOf('id="operationArchiveEditBtn"') < archivePanel.indexOf('id="projectOperationArchiveDraft"'));
+  assert.equal(archivePanel.includes("运控归档信息"), false);
+  assert.equal(archivePanel.includes("字段顺序与运营控制台归档弹窗一致"), false);
+  assert.equal(archivePanel.includes('class="workflow-source-badge actual_result"'), false);
+  assert.ok(archivePanel.indexOf('id="projectOperationArchiveDraft"') < archivePanel.indexOf('id="operationArchiveEditBtn"'));
+  assert.ok(archivePanel.indexOf('id="operationArchiveEditBtn"') < archivePanel.indexOf('id="operationArchiveSaveBtn"'));
+  assert.ok(archivePanel.indexOf('id="operationArchiveSaveBtn"') < archivePanel.indexOf('id="operationArchiveCancelEditBtn"'));
+  assert.ok(archivePanel.indexOf('id="operationArchiveCancelEditBtn"') < archivePanel.indexOf('id="operationArchiveRefreshEvidenceBtn"'));
+  assert.ok(archivePanel.indexOf('id="operationArchiveEditBtn"') < archivePanel.indexOf('id="operationArchiveRefreshEvidenceBtn"'));
   assert.ok(archivePanel.includes('id="operationArchiveSaveBtn"'));
   assert.ok(archivePanel.includes('id="operationArchiveCancelEditBtn"'));
   assert.ok(archivePanel.includes('id="operationArchiveRefreshEvidenceBtn"'));
-  assert.ok(archivePanel.includes("更新参考人数和截图"));
-  assert.ok(archivePanel.includes("其他归档信息不变"));
+  assert.ok(archivePanel.includes("更新易考数据"));
+  assert.equal(archivePanel.includes("更新参考人数和截图"), false);
+  assert.equal(archivePanel.includes("其他归档信息不变"), false);
+  assert.equal(archivePanel.includes("执行门槛"), false);
+  assert.equal(archivePanel.includes("字段缺失会停在待补充"), false);
+  assert.ok(archivePanel.includes('id="projectWorkflowGates" hidden'));
   assert.equal(archivePanel.includes('id="operationArchiveAttachments"'), false);
   assert.equal(html.includes("operationArchiveAttachmentPayload"), false);
   assert.ok(html.includes('class="operation-archive-field-grid"'));
   assert.ok(html.includes('class="operation-archive-screenshot"'));
   assert.ok(html.includes("function renderOperationArchiveScreenshot"));
   assert.ok(html.includes("易考正式考试截图"));
+  const renderArchiveScreenshot = compileInlineFunction(
+    "      function renderOperationArchiveScreenshot(screenshot = {}) {",
+    "\n      function renderOperationArchiveDraft",
+    { safeText: (value) => String(value ?? "") },
+  );
+  assert.equal(renderArchiveScreenshot({}), "");
+  assert.equal(renderArchiveScreenshot({ status: "capturing" }), "");
+  assert.equal(renderArchiveScreenshot({ status: "failed" }), "");
+  assert.equal(renderArchiveScreenshot({ status: "success", files: [] }), "");
+  assert.match(renderArchiveScreenshot({
+    status: "success",
+    files: [{ url: "/screenshots/formal.png", sessionName: "正式考试" }],
+  }), /易考正式考试截图[\s\S]*formal\.png/);
   assert.ok(html.includes("${warningRows}${renderOperationArchiveScreenshot(screenshot)}"));
   assert.ok(html.includes('state.screenshot?.status === "success"'));
   assert.ok(html.includes('["基础归档信息", entries.filter(([key]) => operationArchiveBaseFieldKeys.has(key))]'));
@@ -3109,12 +3444,20 @@ test("project detail renders sourced operation workflow and keeps local archive 
   assert.equal(contentPanel.includes("考试配置只读取"), false);
   assert.equal(contentPanel.includes("等待发送。"), false);
   assert.ok(contentPanel.includes('id="contentRequirementEmailState" style="margin-top:8px;" hidden'));
-  assert.ok(contentPanel.includes('<button class="btn" id="operationContentSyncBtn" type="button">同步运控</button>'));
+  assert.ok(contentPanel.includes('<button class="btn primary" id="operationContentSyncBtn" type="button">发送内容任务单</button>'));
+  assert.equal(contentPanel.includes("发送记录"), false);
+  assert.equal(contentPanel.includes("contentRequirementEmailHistory"), false);
+  assert.equal(html.includes("已按内容人员匹配"), false);
   assert.ok(contentPanel.includes('id="operationContentSyncState" style="margin-top:8px;" hidden'));
   assert.ok(html.includes('function projectContentActualCourseState(task = {})'));
   assert.ok(html.includes('function renderProjectContentExamList(requirements = [], sessions = [], remarks = {}, defaultRemark = "", actualCourseState = {})'));
   assert.ok(html.includes('task.config?.tenantId || ""'));
   assert.ok(html.includes('projectContentActualCourseState(task)'));
+  assert.ok(html.includes('renderOperationContentConfiguration(workflow.operationContentDraft?.configuration)'));
+  assert.ok(html.indexOf('renderOperationContentConfiguration(workflow.operationContentDraft?.configuration)') < html.indexOf('renderProjectContentExamList('));
+  assert.ok(html.includes('class="content-configuration-summary"'));
+  assert.ok(html.includes('<div class="content-configuration-block"><h4 class="content-configuration-title">配置项</h4><section class="content-configuration-summary">'));
+  assert.match(html, /\.content-configuration-summary\s*\{[^}]*border:\s*1px solid var\(--line\)[^}]*background:\s*var\(--panel\)/s);
   assert.ok(html.includes('const tenantRemark = tenantId ? `租户 ID：${tenantId}` : ""'));
   assert.ok(html.includes("return value === tenantId && tenantId ? tenantRemark : value"));
   assert.ok(html.includes("projectRequirementTrialTime(requirement, trialSession)"));
@@ -3136,11 +3479,31 @@ test("project detail renders sourced operation workflow and keeps local archive 
   assert.ok(contentSync.includes("/operation-content/sync"));
   assert.ok(contentSync.includes('ensureOperationBatchLocalHelper("operationContentSync")'));
   assert.ok(contentSync.includes("validateOperationContentPreparation(prepared)"));
-  assert.ok(contentSync.includes('timeoutMs: 180000'));
+  assert.ok(contentSync.includes("保存完成后将直接发送任务单"));
+  assert.ok(contentSync.includes('title: isResend ? "填写变更内容" : "确认同步运控并发送任务单"'));
+  assert.ok(contentSync.includes('label: "变更内容"'));
+  assert.ok(contentSync.includes('value: dispatchPreview.suggestedChangeSummary || ""'));
+  assert.ok(contentSync.includes('placeholder: "系统已列出本次与上次发送任务的全部差异，可补充说明"'));
+  assert.ok(contentSync.includes("required: true"));
+  assert.ok(contentSync.includes("previewDraftFingerprint: dispatchPreview.currentFingerprint"));
+  assert.ok(contentSync.includes("previewBaselineFingerprint: dispatchPreview.baselineFingerprint"));
+  assert.ok(contentSync.includes('timeoutMs: 240000'));
   assert.ok(contentSync.includes("changed.configuration"));
   assert.ok(contentSync.includes("changed.subjects"));
+  assert.ok(contentSync.includes('!["sent", "already_sent"].includes(dispatch.status)'));
+  assert.ok(contentSync.includes('dispatch.status === "already_sent"'));
   assert.ok(html.includes('localHelper.path !== "/operation-content/sync"'));
-  assert.ok(html.includes("operationContentSync: 8"));
+  assert.ok(html.includes("operationContentSync: 26"));
+  assert.ok(html.includes('confirmText: isContentSync ? "继续同步并发送" : "继续添加日程"'));
+  assert.ok(html.includes('id="operationContentSyncBtn" type="button">发送内容任务单</button>'));
+  assert.ok(html.includes("function operationContentTaskHasSent(task = {})"));
+  assert.ok(html.includes('contentSync.initialSendVerification?.status === "verified"'));
+  assert.ok(html.includes('contentSync.dispatchStatus === "sent"'));
+  assert.ok(html.includes('Boolean(String(contentSync.lastDispatchedAt || "").trim())'));
+  assert.ok(html.includes("operationContentSyncBtn.textContent = operationContentTaskHasSent(task)"));
+  assert.ok(html.includes('? "重新发送内容任务单"'));
+  assert.equal(html.includes('operationContentSyncBtn.textContent = "同步运控并发送任务单"'), false);
+  assert.equal(html.includes('operationContentSyncBtn.textContent = "重新同步并发送任务单"'), false);
   assert.ok(html.includes('operationContentSyncBtn.addEventListener("click"'));
   const contentExamRenderer = sourceBetween(
     '      function renderProjectContentExamList(requirements = [], sessions = [], remarks = {}, defaultRemark = "", actualCourseState = {}) {',
@@ -3149,8 +3512,40 @@ test("project detail renders sourced operation workflow and keeps local archive 
   assert.equal(contentExamRenderer.includes("考试 ${index + 1}"), false);
   assert.equal(contentExamRenderer.includes("<span>来源</span>"), false);
   assert.equal(contentExamRenderer.includes("workflow-source-badge easy_exam_requirement"), false);
-  assert.ok(html.includes("项目列表中的“归档”仅隐藏本地项目卡，两者互不替代"));
+  assert.equal(html.includes("项目列表中的“归档”仅隐藏本地项目卡，两者互不替代"), false);
   assert.ok(html.includes("/operation-workflow?_=${Date.now()}"));
+});
+
+test("content task detail prepends the operation configuration summary", () => {
+  const renderOperationContentConfiguration = compileInlineFunction(
+    '      function renderOperationContentConfiguration(configuration = {}) {',
+    "\n      function renderProjectContentExamList",
+    { safeText: (value) => String(value ?? "") },
+  );
+  const rendered = renderOperationContentConfiguration({
+    background: "ATA通用模板",
+    loginMode: "准考证号",
+    itemTypes: ["客观题"],
+    contentSources: ["ATA现有内容"],
+    closePaper: "否",
+    reviewPaper: "否",
+    singleMaxSubjects: "24",
+    paperLanguages: ["简体中文"],
+    osLanguages: ["简体中文"],
+    closureStart: "2026-08-19 10:00",
+    closureEnd: "2026-08-19 17:00",
+  });
+
+  for (const value of [
+    "配置项",
+    "ATA通用模板",
+    "准考证号",
+    "客观题",
+    "ATA现有内容",
+    "单科最大科次",
+    "24",
+    "2026-08-19 10:00 ~ 2026-08-19 17:00",
+  ]) assert.ok(rendered.includes(value));
 });
 
 test("content task remarks retain formal and trial course codes", () => {
@@ -3259,7 +3654,7 @@ test("operation workflow and source cards open account-style editable dialogs", 
   assert.ok(workflowRenderer.includes("workflow.contentEmailDefaults || {}"));
   assert.ok(workflowRenderer.includes("contentRequirementEmailRecipients.value"));
   assert.ok(workflowRenderer.includes("contentRequirementEmailCc.value"));
-  assert.ok(workflowRenderer.includes("contentEmailDefaults.matched"));
+  assert.equal(workflowRenderer.includes("contentEmailDefaults.matched"), false);
   const sendContentEmail = sourceBetween(
     "      async function sendContentRequirementEmailFromProject() {",
     "\n      async function saveContentTaskRemark(input) {",
@@ -3605,6 +4000,11 @@ test("project session sync previews current EasyExam differences and only update
   assert.match(html, /\.project-session-sync-button\s*\{[^}]*min-height:\s*28px;[^}]*font-size:\s*12px;/s);
   assert.ok(rowRenderer.includes('"有差异"'));
   assert.ok(rowRenderer.includes('"查看差异"'));
+  assert.ok(rowRenderer.includes('"查看易考信息"'));
+  assert.ok(html.includes("function renderProjectSessionSyncReadback"));
+  assert.ok(html.includes("科目信息"));
+  assert.ok(html.includes("已绑定试卷"));
+  assert.ok(html.includes("配置项 ${Number(summary.configurationCount || 0)}"));
   assert.ok(rowRenderer.includes("data-project-session-change-task-id"));
   assert.ok(rowRenderer.includes(">修改场次</button>"));
   assert.ok(previewHandler.includes("/sessions/sync-preview"));
@@ -3713,8 +4113,9 @@ test("auto configuration restores the persisted EasyExam requirement by project 
 
 test("project personnel workflow exposes a protected preview and recheck flow", () => {
   assert.ok(html.includes('id="operationPersonnelTaskActionBtn"'));
-  assert.ok(html.includes('id="operationPersonnelTaskEditBtn"'));
-  assert.ok(html.includes('id="operationPersonnelTaskSaveBtn"'));
+  assert.ok(html.includes('id="operationPersonnelTaskEditBtn" type="button">编辑</button>'));
+  assert.ok(html.includes('id="operationPersonnelTaskSaveBtn" type="button" hidden>保存</button>'));
+  assert.ok(html.includes('id="operationPersonnelTaskCancelEditBtn" type="button" hidden>取消</button>'));
   assert.ok(html.includes('method: "PATCH"'));
   assert.ok(html.includes("data-operation-personnel-edit"));
   assert.ok(html.includes("/operation-personnel-task`"));
@@ -3774,12 +4175,25 @@ test("project personnel workflow exposes a protected preview and recheck flow", 
     "      async function previewAndSendOperationPersonnelTask() {",
     "\n      async function recheckOperationPersonnelTask() {",
   );
-  assert.equal(handler.includes("await showConfirmDialog"), false);
+  assert.ok(handler.includes("await showConfirmDialog"));
+  assert.ok(handler.includes('title: "填写变更内容"'));
+  assert.ok(handler.includes('label: "变更内容"'));
+  assert.ok(handler.includes('value: resendPreview.suggestedChangeSummary || ""'));
+  assert.ok(handler.includes('placeholder: "系统已列出本次与上次发送任务的全部差异，可补充说明"'));
+  assert.ok(handler.includes("required: true"));
+  assert.ok(handler.includes("operationPersonnelTaskHasSent"));
+  assert.ok(html.includes("Array.isArray(state.sendHistory) && state.sendHistory.length > 0"));
+  assert.ok(handler.includes("previewDraftFingerprint: resendPreview.currentFingerprint"));
+  assert.ok(handler.includes("previewBaselineFingerprint: resendPreview.baselineFingerprint"));
+  assert.ok(handler.includes("await ensureScoreStampLocalHelper()"));
+  assert.ok(handler.includes("正在连接已开启的运控页面"));
   assert.ok(handler.includes("正在自动补全人员信息、选择收件人与抄送人并发送任务单"));
   assert.ok(handler.includes("changeSummary"));
   assert.ok(handler.includes("previewToken: preview.previewToken"));
   assert.ok(handler.includes("await pollOperationPersonnelAttempt"));
   assert.ok(html.includes("function operationPersonnelExpiredDateLabels(draft = {})"));
+  assert.ok(html.includes('recipients.ccGroups || [recipients.ccGroup]'));
+  assert.ok(html.includes('join("、")'));
   assert.ok(html.includes("expiredDateLabels.length > 0"));
   assert.ok(html.includes('operationPersonnelTaskActionBtn.title = expiredDateLabels.length'));
 });

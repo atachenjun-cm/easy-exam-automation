@@ -32,6 +32,19 @@ test("server wires operation collaboration and content email endpoints", () => {
   assert.ok(serverSource.includes("lastCc: result.cc"));
 });
 
+test("project workflow exposes the operation content configuration draft", () => {
+  assert.match(serverSource, /import\s*\{[^}]*buildOperationContentDraft[^}]*\}\s*from "\.\/operation_content\.mjs";/);
+  assert.ok(serverSource.includes("workflow.operationContentDraft = buildOperationContentDraft(task)"));
+  assert.ok(serverSource.includes("workflow.operationContentDispatchPreview = operationContentDispatchPreview(task)"));
+});
+
+test("Fanwei helper downloads include the shared task-send evidence module", () => {
+  assert.ok(
+    serverSource.includes('"operation_task_send_record.mjs"'),
+    "operation_task_send_record.mjs is not included in helper downloads",
+  );
+});
+
 test("server wires read-only EasyExam session sync preview and confirmed local apply", () => {
   assert.match(serverSource, /from "\.\/session_sync\.mjs"/);
   assert.match(serverSource, /sessions\\\/sync-preview/);
@@ -44,11 +57,29 @@ test("server wires read-only EasyExam session sync preview and confirmed local a
     serverSource.indexOf("async function handleSessionSyncApply"),
     serverSource.indexOf("async function handleSessionChangePreview"),
   );
-  assert.ok(previewHandler.includes("fetchTenantSessionDetailWithListFallback"));
+  assert.ok(serverSource.includes("async function buildTenantSessionSyncPreview"));
+  assert.ok(serverSource.includes("fetchTenantSessionDetailWithListFallback"));
+  assert.ok(serverSource.includes("fetchSessionSubjectPaperSnapshot"));
+  assert.ok(previewHandler.includes("buildTenantSessionSyncPreview"));
   assert.equal(previewHandler.includes("putTenantSessionDetail"), false);
   assert.ok(applyHandler.includes('runTaskState("sync_session"'));
   assert.ok(applyHandler.includes("payload?.confirm"));
   assert.equal(applyHandler.includes("putTenantSessionDetail"), false);
+});
+
+test("requirement change previews recalculate against current tenant values", () => {
+  const sessionPreviewHandler = serverSource.slice(
+    serverSource.indexOf("async function handleSessionChangePreview"),
+    serverSource.indexOf("async function handleSessionChange(taskId"),
+  );
+  assert.ok(sessionPreviewHandler.includes("const current = editableSessionFieldsFromDetail(detail)"));
+  assert.ok(sessionPreviewHandler.includes("sessionRequirementChangeForTaskSession(task, { ...session, ...current })"));
+
+  const coursePreviewHandler = serverSource.slice(
+    serverSource.indexOf("async function handleCourseChangePreview"),
+    serverSource.indexOf("async function handleCourseChange(taskId"),
+  );
+  assert.ok(coursePreviewHandler.includes("courseRequirementChangeForTaskSession(task, formalSession, current)"));
 });
 
 test("task detail syncs the bound account tenant ID into project config", () => {
@@ -104,22 +135,23 @@ test("operation batch creation is prepared for the local helper and deduplicated
   assert.ok(serverSource.includes('path: "/operation-batch/create"'));
   assert.ok(serverSource.includes("requestId: preparationId"));
   assert.ok(serverSource.includes("publishAfterCreate: false"));
-  assert.ok(handler.includes("buildFormalOperationBatchSnapshot(task)"));
+  assert.ok(handler.includes("buildDesiredOperationBatchSnapshot(task)"));
   assert.ok(handler.includes("applyCompletedOperationBatchResult(freshTask, helperResult)"));
   assert.ok(handler.includes("payload.helperResult?.operationBatch || payload.helperResult"));
   assert.equal(handler.includes("runOperationBatchCreation("), false);
 });
 
-test("operation batch reconciliation completes schedules before publishing a uniquely matched batch", () => {
+test("operation batch reconciliation independently recovers publication and schedules", () => {
   const handler = serverSource.slice(
     serverSource.indexOf("async function handleOperationBatchReconciliation"),
     serverSource.indexOf("async function handleOperationBatchRetry"),
   );
   assert.ok(handler.includes('path: "/operation-batch/reconcile"'));
-  assert.ok(handler.includes('task.config?.operationBatch?.status === "created_unpublished"'));
-  assert.ok(handler.includes("existingOperationBatchCode && !publishPending"));
+  assert.ok(handler.includes('currentOperationBatch.scheduleStatus !== "synced"'));
+  assert.ok(handler.includes("if (!followUpNeeded)"));
+  assert.ok(handler.includes('code: "OPERATION_BATCH_ACTUAL_NAME_MISSING"'));
   assert.ok(handler.includes("operationBatchCode: existingOperationBatchCode"));
-  assert.ok(handler.includes("desired: buildFormalOperationBatchSnapshot(task)"));
+  assert.ok(handler.includes("desired: operationBatchDesiredForLocalHelper(preparation.desired)"));
   assert.ok(handler.includes("publishAfterCreate: false"));
   assert.ok(handler.includes("applyCompletedOperationBatchResult(freshTask, helperResult)"));
 });
@@ -177,7 +209,10 @@ test("server exposes authenticated prebuilt Fanwei helper installer downloads", 
     "operation_batch_update_runner.mjs",
     "operation_personnel_console_runner.mjs",
     "operation_archive_runner.mjs",
+    "content_email_directory.mjs",
+    "operation_batch.mjs",
     "operation_content.mjs",
+    "operation_task_send_record.mjs",
     "operation_content_runner.mjs",
   ]) {
     assert.ok(serverSource.includes(`"${helperFile}"`), `${helperFile} is not included in helper downloads`);
@@ -233,6 +268,8 @@ test("loopback Fanwei read fallback returns raw data without creating an import"
   );
   assert.ok(localReadBlock.includes("isLoopbackRequest(req)"));
   assert.ok(localReadBlock.includes("readFanweiFromLocalChrome(serialNo)"));
+  assert.ok(localReadBlock.includes("isVirtualFanweiSerial(serialNo)"));
+  assert.ok(localReadBlock.includes("buildVirtualFanweiReadPayload(serialNo)"));
   assert.ok(localReadBlock.includes("{ ok: true, data: fanwei }"));
   assert.equal(localReadBlock.includes("createFanweiRequirementImportFromPayload"), false);
   assert.equal(localReadBlock.includes("randomUUID"), false);
@@ -249,6 +286,7 @@ test("Fanwei preview route validates raw data and has no persistence side effect
   assert.ok(previewBlock.includes("validateFanweiReadPayload"));
   assert.ok(previewBlock.includes("buildFanweiRequirementModel"));
   assert.ok(previewBlock.includes("loadFanweiRequirementDefaults"));
+  assert.ok(previewBlock.includes("applyVirtualFanweiRequirementDefaults"));
   assert.ok(previewBlock.includes("return { fanwei: model }"));
   assert.equal(previewBlock.includes("randomUUID"), false);
   assert.equal(previewBlock.includes("fs.writeFile"), false);
@@ -270,6 +308,7 @@ test("Fanwei requirement import validates raw data before any file or task write
   assert.ok(importBlock.indexOf("validateFanweiReadPayload") < importBlock.indexOf("fs.writeFile"));
   assert.equal(importBlock.includes("sampleFanweiR0042182"), false);
   assert.equal(importBlock.includes('payload.serialNo === "R0042182"'), false);
+  assert.ok(importBlock.includes("applyVirtualFanweiRequirementDefaults"));
 });
 
 test("Fanwei project cards persist dual snapshots and reuse the same serial card", () => {
@@ -280,7 +319,7 @@ test("Fanwei project cards persist dual snapshots and reuse the same serial card
   assert.ok(serverSource.includes("projectReused: Boolean(existingTask)"));
   assert.ok(serverSource.includes("payload.requirementFieldsList"));
   assert.ok(serverSource.includes("appendedExamRequirements = requirementFieldsList.map"));
-  assert.ok(serverSource.includes("editableRequirementFieldsRecord(fields)"));
+  assert.ok(serverSource.includes("editableRequirementFieldsRecord(entry.fields)"));
   assert.ok(serverSource.includes("appendedRequirementStartIndex"));
   assert.ok(serverSource.includes("allExamRequirements"));
   assert.ok(serverSource.includes("previousConfig: existingTask?.config || {}"));
@@ -519,6 +558,30 @@ test("web exam session enables lock screen and forwards leave limit", () => {
   assert.ok(webTrialBlock.includes("lock_screen_time: positiveNumber(config.leaveLimit, 10)"));
 });
 
+test("Fanwei requirement import keeps per-sheet explicit configuration selections", () => {
+  const importBlock = serverSource.slice(
+    serverSource.indexOf("async function createFanweiRequirementImportFromPayload"),
+    serverSource.indexOf("async function handleFanweiRequirementImport"),
+  );
+  assert.ok(importBlock.includes("payload.requirementConfigSelectionsList"));
+  assert.ok(importBlock.includes("editableRequirementConfigSelection(entry.configSelection)"));
+  assert.ok(importBlock.includes("configSelection: requirementConfigSelectionsList[index]"));
+});
+
+test("session creation overlays explicit picker fields without changing the legacy default path", () => {
+  const buildPayloads = serverSource.slice(
+    serverSource.indexOf("function buildSessionPayloads"),
+    serverSource.indexOf("async function runYikaoApiCreationJob"),
+  );
+  assert.ok(buildPayloads.includes("config.sessionOptions?.explicit === true"));
+  assert.ok(buildPayloads.includes("value !== null && value !== undefined"));
+  assert.ok(buildPayloads.includes("Object.assign(common, sessionOptionsPublic)"));
+  assert.ok(buildPayloads.includes("if (!explicitSessionOptions)"));
+  assert.ok(buildPayloads.includes("explicitSessionOptions ? boolValue(sessionOptionsPublic.save_video)"));
+  assert.ok(serverSource.includes("[需报备后人工开启]"));
+  assert.ok(serverSource.includes("请先完成报备，再由人工在易考后台开启并回读核验"));
+});
+
 test("candidate import forwards optional course_code to EasyExam tenant API", () => {
   assert.ok(serverSource.includes("buildTenantCandidateEntries(candidates, customFieldMappings)"));
   assert.ok(serverSource.includes("candidate_tenant_payload.mjs"));
@@ -646,6 +709,11 @@ test("created courses and paper retry target the selected requirement", () => {
   assert.ok(retryHandler.includes("taskFormalSession(task, requirementIndex)"));
   assert.ok(retryHandler.includes("taskCoursesForChange(task, requirementIndex)"));
   assert.ok(retryHandler.includes("runPaperFormBindForTask(task, login, { requirementIndex })"));
+  const paperBindRunner = serverSource.slice(
+    serverSource.indexOf("async function runPaperFormBindForTask"),
+    serverSource.indexOf("async function runScheduledPaperBindingOnce"),
+  );
+  assert.ok(paperBindRunner.includes("examDate: formalSession?.start"));
 });
 
 test("monitor account export uses monitor session URL instead of exam URL", () => {
@@ -860,6 +928,8 @@ test("project shared sheet trigger persists status and syncs formal plus optiona
   assert.equal(handler.includes('(task.sessions || []).find((session) => session.sessionType === "trial")'), false);
   assert.ok(handler.includes('sessions.some((session) => session.sessionType === "formal")'));
   assert.ok(handler.includes("for (const session of sessions)"));
+  assert.ok(handler.includes("normalizeEmail(task.ownerEmail || requestUser?.email || \"\")"));
+  assert.ok(handler.includes("platformAccountEmail,"));
   assert.ok(handler.includes("sessionIds: sessions.map((session) => String(session.session_id))"));
   assert.ok(handler.includes("tencentDocsSettingsFromEnv(process.env)"));
   assert.ok(handler.includes("syncExamConfigToTencentDocs"));

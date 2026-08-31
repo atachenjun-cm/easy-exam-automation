@@ -1,4 +1,5 @@
 import {
+  normalizedOperationBatchInspectedSnapshot,
   normalizedOperationBatchManagedSnapshot,
 } from "./operation_batch_update.mjs";
 import { operationBatchCodeIsValid } from "./operation_batch.mjs";
@@ -37,7 +38,11 @@ export function operationPersonnelScheduleGate(task = {}) {
   }
 
   try {
-    const managedSnapshot = normalizedOperationBatchManagedSnapshot(rawManagedSnapshot);
+    const emptyScheduleBaseline = Array.isArray(rawManagedSnapshot.schedules)
+      && rawManagedSnapshot.schedules.length === 0;
+    const managedSnapshot = emptyScheduleBaseline
+      ? normalizedOperationBatchInspectedSnapshot(rawManagedSnapshot)
+      : normalizedOperationBatchManagedSnapshot(rawManagedSnapshot);
     return {
       ok: true,
       code: "",
