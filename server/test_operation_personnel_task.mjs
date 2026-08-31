@@ -10,29 +10,154 @@ import {
 import { operationPersonnelScheduleGate } from "./operation_personnel_schedule_gate.mjs";
 import {
   assertVisiblePersonnelDateInputs,
+  closeOperationPersonnelBrowserSession,
   fillVisiblePersonnelConfiguration,
+  fillVisiblePersonnelTaskChangeSummary,
   inspectOperationPersonnelTask,
   clickVisiblePersonnelPaginationNext,
   OPERATION_PERSONNEL_CHECKPOINTS,
   operationPersonnelCurrentPageFromVisibleRaw,
   operationPersonnelPageFromVisibleRaw,
   operationPersonnelConflicts,
+  operationPersonnelContextPage,
   operationPersonnelDisplaySchedules,
+  operationPersonnelMailSelectionTarget,
   operationPersonnelRecipientGroupMatches,
   operationPersonnelRecipientRule,
   operationPersonnelTaskListFilterSettled,
   operationPersonnelTaskListCanReuseFilter,
   operationPersonnelTaskListPageCount,
   operationPersonnelTaskSearchValue,
+  operationPersonnelTaskSheetFromVisibleRaw,
+  openVisibleBatchPersonnelTaskSheet,
   readVisiblePersonnelTaskResultSummary,
   matchOperationPersonnelRecipients,
   runOperationPersonnelAttempt,
+  selectVisiblePersonnelRecipients,
   selectVisiblePersonnelDate,
+  selectVisiblePersonnelDateRange,
   submitVisiblePersonnelTaskFilter,
   waitForVisiblePersonnelConfiguration,
   waitForVisiblePersonnelTaskInitialResults,
   waitForVisiblePersonnelTaskListFilter,
 } from "./operation_personnel_task_runner.mjs";
+
+test("人员任务重发精确填写并回读人工变更内容", async () => {
+  const events = [];
+  let inputValue = "";
+  const summary = {
+    count: async () => 1,
+    first: () => ({ waitFor: async ({ state }) => events.push(`wait:${state}`) }),
+    fill: async (value) => {
+      inputValue = value;
+      events.push(`fill:${value}`);
+    },
+    inputValue: async () => inputValue,
+  };
+  const next = {
+    count: async () => 1,
+    click: async () => events.push("next"),
+  };
+  const dialog = {
+    count: async () => 1,
+    first: () => ({ waitFor: async () => {} }),
+    getByRole: (role, options) => {
+      assert.equal(role, "button");
+      assert.deepEqual(options, { name: "下一步", exact: true });
+      return next;
+    },
+  };
+  const page = {
+    locator: (selector) => {
+      if (selector.includes("placeholder")) return summary;
+      assert.equal(selector, ".ant-modal:visible");
+      return {
+        filter: (options) => {
+          assert.deepEqual(options, { hasText: "填写变更内容" });
+          return dialog;
+        },
+      };
+    },
+  };
+
+  assert.equal(
+    await fillVisiblePersonnelTaskChangeSummary(page, " 调整人员落实日期 "),
+    "调整人员落实日期",
+  );
+  assert.deepEqual(events, [
+    "wait:visible",
+    "fill:调整人员落实日期",
+    "next",
+  ]);
+});
+
+test("人员任务重发拒绝空白、超长或回读不一致的变更内容", async () => {
+  await assert.rejects(
+    () => fillVisiblePersonnelTaskChangeSummary({}, "  "),
+    (error) => error?.code === "PERSONNEL_CHANGE_SUMMARY_REQUIRED",
+  );
+  await assert.rejects(
+    () => fillVisiblePersonnelTaskChangeSummary({}, "x".repeat(4001)),
+    (error) => error?.code === "PERSONNEL_CHANGE_SUMMARY_TOO_LONG",
+  );
+  await assert.rejects(
+    () => fillVisiblePersonnelTaskChangeSummary({
+      locator: () => ({
+        first: () => ({ waitFor: async () => { throw new Error("missing"); } }),
+      }),
+    }, "本次变更"),
+    (error) => error?.code === "PERSONNEL_CHANGE_SUMMARY_CONTROL_MISSING",
+  );
+  await assert.rejects(
+    () => fillVisiblePersonnelTaskChangeSummary({
+      locator: () => ({
+        count: async () => 1,
+        first: () => ({ waitFor: async () => {} }),
+        fill: async () => {},
+        inputValue: async () => "其他内容",
+      }),
+    }, "本次变更"),
+    (error) => error?.code === "PERSONNEL_CHANGE_SUMMARY_READBACK_MISMATCH",
+  );
+});
+
+test("人员任务优先复用当前已打开的目标批次详情页", async () => {
+  const unrelatedPage = { url: () => "https://oa.ata.net.cn/workflow/request/ViewRequest.jsp" };
+  const operationListPage = { url: () => "https://dashboard.ata.net.cn/batch/batchList" };
+  const targetPage = {
+    url: () => "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=target-guid",
+  };
+  let newPageCalls = 0;
+  const selected = await operationPersonnelContextPage({
+    pages: () => [unrelatedPage, operationListPage, targetPage],
+    newPage: async () => {
+      newPageCalls += 1;
+      return { url: () => "about:blank" };
+    },
+  }, {
+    detailUrl: "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=target-guid",
+  }, {
+    baseUrl: "https://dashboard.ata.net.cn/dashboard",
+  });
+
+  assert.equal(selected.page, targetPage);
+  assert.equal(selected.batchDetailLocated, true);
+  assert.equal(newPageCalls, 0);
+});
+
+test("人员任务结束不关闭本机助手共享的 Chrome 上下文", async () => {
+  let closeCalls = 0;
+  const session = {
+    context: { close: async () => { closeCalls += 1; } },
+    ownsContext: false,
+    closed: false,
+  };
+
+  await closeOperationPersonnelBrowserSession(session);
+
+  assert.equal(session.closed, true);
+  assert.equal(closeCalls, 0);
+});
 
 function baseTask() {
   return {
@@ -90,21 +215,65 @@ test("人员任务草稿保留日程编号并套用平台收件人规则", () =>
   });
 
   assert.equal(first.batch.batchName, "示例考试_2026年8月");
+  assert.equal(first.schedules.length, 1);
+  assert.equal(first.schedules[0].subjectName, "示例考试");
   assert.equal(first.schedules[0].scheduleCode, 1);
   assert.equal(second.schedules[0].scheduleCode, 1);
   assert.deepEqual(first.recipients, {
     toGroup: "项目实施一部",
     toNames: ["陈军"],
     ccGroup: "考站管理&质量控制部",
+    ccGroups: ["考站管理&质量控制部", "结算组"],
     ccCount: 0,
     ccGroupOnly: true,
-    ruleVersion: 3,
+    ruleVersion: 4,
   });
   assert.equal(first.personnel.candidateBasis, 27);
   assert.equal(first.personnel.monitorRatio, "1:27");
   assert.equal(first.personnel.monitorCount, 3);
   assert.equal(first.personnel.loginMonitoring, "否");
   assert.equal(first.warnings.length, 0);
+});
+
+test("人员任务按正式考试生成日程，不按科目拆行", () => {
+  const task = baseTask();
+  task.config.examRequirements[0].fields["考试名称"] = "正式考试名称";
+  task.config.examRequirements[0].config.courses = [
+    { name: "建设项目管理岗" },
+    { name: "电力交易员岗" },
+  ];
+
+  const draft = buildOperationPersonnelTaskDraft(task, {
+    environment: "test",
+    now: "2026-08-05T02:00:00.000Z",
+  });
+
+  assert.equal(draft.schedules.length, 1);
+  assert.equal(draft.schedules[0].subjectName, "正式考试名称");
+  assert.equal(draft.schedules[0].start, "2026/08/20 09:00");
+  assert.equal(draft.schedules[0].end, "2026/08/20 11:00");
+  assert.equal(draft.schedules[0].subjectCode, "");
+});
+
+test("人员任务优先使用已创建正式场次的名称和日程", () => {
+  const task = baseTask();
+  task.sessions[0] = {
+    ...task.sessions[0],
+    requirementIndex: 0,
+    name: "已创建正式场次",
+    start: "2026/08/20 09:30",
+    end: "2026/08/20 11:30",
+  };
+
+  const draft = buildOperationPersonnelTaskDraft(task, {
+    environment: "test",
+    now: "2026-08-05T02:00:00.000Z",
+  });
+
+  assert.equal(draft.schedules.length, 1);
+  assert.equal(draft.schedules[0].subjectName, "已创建正式场次");
+  assert.equal(draft.schedules[0].start, "2026/08/20 09:30");
+  assert.equal(draft.schedules[0].end, "2026/08/20 11:30");
 });
 
 test("人员任务按项目负责人匹配平台账号并兼容项目经理目录后缀", () => {
@@ -123,15 +292,104 @@ test("人员任务按项目负责人匹配平台账号并兼容项目经理目�
     }, {
       name: "考站管理&质量控制部",
       people: [],
+    }, {
+      name: "结算组",
+      people: [],
     }],
   });
 
   assert.equal(operationPersonnelRecipientGroupMatches("项目实施一部（项目经理）", "项目实施一部"), true);
   assert.equal(rule.toName, "司园园");
   assert.equal(rule.ccGroup, "考站管理&质量控制部");
+  assert.deepEqual(rule.ccGroups, ["考站管理&质量控制部", "结算组"]);
   assert.deepEqual(matched, {
     to: [{ id: "siyuanyuan@ata.net.cn", name: "司园园" }],
-    cc: [{ id: "group:考站管理&质量控制部", name: "考站管理&质量控制部", kind: "group" }],
+    cc: [
+      { id: "group:考站管理&质量控制部", name: "考站管理&质量控制部", kind: "group" },
+      { id: "group:结算组", name: "结算组", kind: "group" },
+    ],
+  });
+});
+
+test("人员任务复用内容任务单邮箱选择目标", () => {
+  const rule = operationPersonnelRecipientRule({
+    batch: { projectDepartment: "项目实施一部", projectManager: "陈军" },
+  });
+  const recipients = {
+    to: [{ id: "chenjun@ata.net.cn", name: "陈军" }],
+    cc: rule.ccGroups.map((name) => ({ id: `group:${name}`, name, kind: "group" })),
+  };
+  assert.deepEqual(operationPersonnelMailSelectionTarget(recipients, rule), {
+    recipients: ["chenjun@ata.net.cn"],
+    cc: [],
+    directoryGroups: {
+      recipients: [{
+        name: "项目实施一部(项目经理)",
+        emails: ["chenjun@ata.net.cn"],
+      }],
+      cc: [],
+    },
+    selectedGroups: {
+      recipients: [],
+      cc: ["考站管理&质量控制部", "结算组"],
+    },
+    recipientLabel: "人员任务单收件人",
+    ccLabel: "人员任务单抄送",
+    ccGroupLabel: "人员任务单抄送部门",
+  });
+});
+
+test("人员任务按内容任务单顺序清空、展开、选择并回读邮箱", async () => {
+  const rule = operationPersonnelRecipientRule({
+    batch: { projectDepartment: "项目实施一部", projectManager: "陈军" },
+  });
+  const state = new Map([
+    ["项目实施一部(项目经理)", false],
+    ["chenjun@ata.net.cn (陈军)", false],
+    ["考站管理&质量控制部", false],
+    ["结算组", false],
+  ]);
+  const metadata = [
+    { label: "项目实施一部(项目经理)", section: "recipients" },
+    { label: "chenjun@ata.net.cn (陈军)", section: "recipients", parent: "项目实施一部(项目经理)" },
+    { label: "考站管理&质量控制部", section: "cc" },
+    { label: "结算组", section: "cc" },
+  ];
+  const visibleMetadata = () => metadata.filter((item) => !item.parent || state.get(item.parent));
+  const control = (entry) => ({
+    evaluate: async () => ({ label: entry.label, section: entry.section }),
+    isChecked: async () => state.get(entry.label),
+    click: async () => { state.set(entry.label, !state.get(entry.label)); },
+    check: async () => { state.set(entry.label, true); },
+    uncheck: async () => { state.set(entry.label, false); },
+  });
+  const dialog = {
+    evaluate: async () => visibleMetadata().map((entry) => ({
+      label: entry.label,
+      section: entry.section,
+      checked: state.get(entry.label),
+    })),
+    locator(selector) {
+      assert.equal(selector, 'input[type="checkbox"]');
+      return { all: async () => visibleMetadata().map(control) };
+    },
+  };
+
+  assert.deepEqual(await selectVisiblePersonnelRecipients(
+    { waitForTimeout: async () => {} },
+    dialog,
+    {
+      to: [{ id: "chenjun@ata.net.cn", name: "陈军" }],
+      cc: rule.ccGroups.map((name) => ({ id: `group:${name}`, name, kind: "group" })),
+    },
+    rule,
+  ), {
+    recipients: ["chenjun@ata.net.cn"],
+    cc: [],
+    groups: {
+      recipients: ["项目实施一部(项目经理)"],
+      cc: ["考站管理&质量控制部", "结算组"],
+    },
   });
 });
 
@@ -154,6 +412,42 @@ test("已有批次代码时人员任务不要求先建立日程同步基线", ()
   assert.equal(result.ok, true);
   assert.deepEqual(result.schedules, []);
   assert.equal(result.managedSnapshot, null);
+});
+
+test("自动建批次后平台日程未同步到空快照时仍可实时核对", () => {
+  const task = baseTask();
+  task.config.operationBatch = {
+    ...task.config.operationBatch,
+    status: "published",
+    scheduleStatus: "failed",
+    managedSnapshot: {
+      batchName: "示例考试_2026年8月",
+      examStartDate: "2026-08-20",
+      examEndDate: "2026-08-20",
+      schedules: [],
+    },
+  };
+
+  const result = operationPersonnelScheduleGate(task);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.schedules, []);
+  assert.deepEqual(result.managedSnapshot, task.config.operationBatch.managedSnapshot);
+});
+
+test("空日程快照的批次概况字段无效时仍然阻断", () => {
+  const task = baseTask();
+  task.config.operationBatch.managedSnapshot = {
+    batchName: "示例考试_2026年8月",
+    examStartDate: "无效日期",
+    examEndDate: "2026-08-20",
+    schedules: [],
+  };
+
+  const result = operationPersonnelScheduleGate(task);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "PERSONNEL_BATCH_SCHEDULE_CONFLICT");
 });
 
 test("无受管基线时本地斜杠日期仍可严格匹配运控日程", () => {
@@ -192,10 +486,30 @@ test("人员任务指纹和变更摘要只包含可发送字段", () => {
   const beforeFingerprint = operationPersonnelTaskFingerprint(before);
   assert.match(beforeFingerprint, /^[a-f0-9]{64}$/);
   assert.notEqual(beforeFingerprint, operationPersonnelTaskFingerprint(after));
-  assert.equal(diffOperationPersonnelTaskDrafts(before, after).summary, "人员落实结束日期：2026-08-17 → 2026-08-19");
+  assert.equal(
+    diffOperationPersonnelTaskDrafts(before, after).summary,
+    "人员落实结束日期：由“2026-08-17”调整为“2026-08-19”",
+  );
 });
 
-test("人员执行先完成人员配置，再进入考试日程和任务单", () => {
+test("人员任务变更摘要覆盖批次、日程和收件规则", () => {
+  const before = buildOperationPersonnelTaskDraft(baseTask(), {
+    environment: "test",
+    now: "2026-08-05T02:00:00.000Z",
+    makeId: () => "stable-subject",
+  });
+  const after = structuredClone(before);
+  after.batch.name = "变更后的批次";
+  after.schedules[0].start = "2026-08-20 10:00";
+  after.recipients.toNames = ["另一位项目经理"];
+
+  const summary = diffOperationPersonnelTaskDrafts(before, after).summary;
+  assert.match(summary, /批次名称/);
+  assert.match(summary, /修改考试日程/);
+  assert.match(summary, /收件人/);
+});
+
+test("人员执行先核验考试日程，再同步人员配置并进入任务单", () => {
   const target = {
     batch: { code: "EZT260003", batchName: "示例考试_2026年8月", published: true },
     schedules: [{
@@ -234,8 +548,8 @@ test("人员执行先完成人员配置，再进入考试日程和任务单", ()
     [],
   );
   assert.ok(
-    OPERATION_PERSONNEL_CHECKPOINTS.indexOf("sync_personnel_config")
-      < OPERATION_PERSONNEL_CHECKPOINTS.indexOf("verify_exam_schedules"),
+    OPERATION_PERSONNEL_CHECKPOINTS.indexOf("verify_exam_schedules")
+      < OPERATION_PERSONNEL_CHECKPOINTS.indexOf("sync_personnel_config"),
   );
   assert.ok(
     OPERATION_PERSONNEL_CHECKPOINTS.indexOf("sync_exam_service_requirements")
@@ -292,7 +606,87 @@ test("运营人员页持续缺少监考类型时给出准确阻断字段", async
       waitForTimeout: async () => {},
     }, { maxChecks: 2, pollMs: 1 }),
     (error) => error.code === "PERSONNEL_OPERATION_CONFLICT"
+      && error.reasonCode === "PERSONNEL_CONFIGURATION_INCOMPLETE"
+      && error.missingFields.includes("监考类型")
       && error.message.includes("监考类型"),
+  );
+});
+
+test("人员配置和考务需求已完整回填时直接点击发送任务单", async () => {
+  const lines = [
+    "人员落实日期：", "2026-08-18 ~ 2026-08-19",
+    "人员落实平台：", "悦站",
+    "监考类型：", "分散监考",
+    "人员名单提交日期：", "2026-08-19",
+    "正式考试-最早登录系统时间：", "考生可于考试开始前30分钟登录",
+    "正式考试-监考人员安排：", "ATA监考-分散，已安排人员周玉衡",
+    "正式考试-监考人员数量：", "1",
+    "正式考试-监考人员比例：", "1:24",
+    "正式考试-监考登录监控：", "否",
+  ];
+  let sendClicks = 0;
+  const control = (selected = "true", onClick = () => {}) => ({
+    count: async () => 1,
+    waitFor: async () => {},
+    getAttribute: async () => selected,
+    click: async () => onClick(),
+  });
+  const taskSheet = {
+    count: async () => 1,
+    filter() { return this; },
+  };
+  const page = {
+    getByRole(_role, options = {}) {
+      if (options.name === "人员" || options.name === "在线监考") return control();
+      if (options.name === "发送任务单") return control("", () => { sendClicks += 1; });
+      throw new Error(`未预期的角色定位：${String(options.name)}`);
+    },
+    evaluate: async () => ({ lines }),
+    waitForTimeout: async () => {},
+    locator(selector) {
+      assert.equal(selector, ".ant-modal:visible");
+      return taskSheet;
+    },
+  };
+
+  assert.equal(await openVisibleBatchPersonnelTaskSheet(page), taskSheet);
+  assert.equal(sendClicks, 1);
+});
+
+test("发送前会阻止考务需求未完整的人员任务", async () => {
+  await assert.rejects(
+    waitForVisiblePersonnelConfiguration({
+      evaluate: async () => ({ lines: [
+        "人员落实日期：", "2026-08-18 ~ 2026-08-19",
+        "人员落实平台：", "悦站",
+        "监考类型：", "分散监考",
+        "人员名单提交日期：", "2026-08-19",
+      ] }),
+    }, { maxChecks: 1, requireRequirements: true }),
+    (error) => error.code === "PERSONNEL_OPERATION_CONFLICT"
+      && error.message.includes("正式考试-监考人员安排"),
+  );
+});
+
+test("任务单不再用监考人员安排的纯文本判断任务类型", () => {
+  const snapshot = operationPersonnelTaskSheetFromVisibleRaw({
+    keyValueRows: [
+      ["监考类型", "分散监考"],
+      ["正式考试-监考人员安排", "ATA监考-分散，已安排人员周玉衡zhouyuheng@ata.net.cn"],
+    ],
+    scheduleHeaders: [
+      "日程代码", "日程", "时长(分钟)", "考试名称", "考生提前登录(分钟)",
+    ],
+    scheduleRows: [[
+      "1", "2026-08-20 19:00~21:00", "120", "蜀能矿产2026年三季度社会招聘考试", "30",
+    ]],
+    sendRecordRows: [["发送时间", "变更内容"]],
+  });
+
+  assert.equal(snapshot.taskSheet.type, "分散在线监考");
+  assert.equal(
+    snapshot.requirements.find((item) => item.name === "正式考试-监考人员安排")?.value,
+    "ATA监考-分散，已安排人员周玉衡zhouyuheng@ata.net.cn",
   );
 });
 
@@ -371,6 +765,67 @@ test("人员日期选择器会从误开的年份面板恢复到目标日期", as
   assert.equal(operationPersonnelPageFromVisibleRaw({
     lines: ["监考类型：", "分散监考"],
   }).personnel.serviceType, "ATA 监考－分散在线监考");
+});
+
+test("同月人员日期范围直接连续选择开始日和结束日", async () => {
+  const events = [];
+  let calendarOpen = true;
+  const emptyControl = {
+    count: async () => 0,
+    first() { return this; },
+  };
+  const calendars = {
+    count: async () => calendarOpen ? 1 : 0,
+    last() { return this; },
+    waitFor: async () => {},
+  };
+  const dateCell = (label, closesCalendar = false) => ({
+    count: async () => 1,
+    click: async (options) => {
+      assert.deepEqual(options, { force: true, timeout: 10_000 });
+      events.push(label);
+      if (closesCalendar) calendarOpen = false;
+    },
+  });
+  const page = {
+    locator(selector) {
+      if (selector === ".ant-calendar-picker-container:visible") return calendars;
+      if ([
+        ".ant-calendar-decade-panel:visible",
+        ".ant-calendar-year-panel:visible",
+        ".ant-calendar-month-panel:visible",
+      ].includes(selector)) return emptyControl;
+      if (selector.includes('[title="2026年8月18日"]')) return dateCell("date:2026-08-18");
+      if (selector.includes('[title="2026年8月19日"]')) {
+        return dateCell("date:2026-08-19", true);
+      }
+      throw new Error(`unexpected page selector: ${selector}`);
+    },
+  };
+  const dialog = {
+    locator: (selector) => {
+      if (selector === 'input[placeholder="开始日期"]:visible') {
+        return {
+          count: async () => 1,
+          click: async () => events.push("input:开始日期"),
+        };
+      }
+      throw new Error(`结束日期输入框不应在选择开始日后被再次点击: ${selector}`);
+    },
+  };
+
+  await selectVisiblePersonnelDateRange(
+    page,
+    dialog,
+    "2026-08-18",
+    "2026-08-19",
+  );
+
+  assert.deepEqual(events, [
+    "input:开始日期",
+    "date:2026-08-18",
+    "date:2026-08-19",
+  ]);
 });
 
 test("人员日期在点击确定前必须回读为目标结束日期和提交日期", async () => {
@@ -632,6 +1087,63 @@ test("人员配置优先时只读预检查不会打开人员任务单", async ()
   assert.equal(snapshot.personnel.platform, "");
 });
 
+test("已发布批次人员配置未完成时预览仍返回待写入配置", async () => {
+  let openedTaskSheet = 0;
+  let openedSchedulePage = 0;
+  const batch = { code: "EZT261095", batchName: "蜀道装备第8次校招_2026年8月", published: true };
+  const incomplete = new Error("运控人员任务状态冲突：人员配置保存后页面未完整恢复：监考类型");
+  incomplete.code = "PERSONNEL_OPERATION_CONFLICT";
+  incomplete.reasonCode = "PERSONNEL_CONFIGURATION_INCOMPLETE";
+  incomplete.missingFields = ["监考类型"];
+  const visibleSnapshot = {
+    __currentBatchRaw: {},
+    __scheduleRows: [],
+    batch,
+    schedules: [],
+    personnel: {},
+    dates: {},
+    requirements: [],
+    taskSheet: {},
+    sendRecords: [],
+    directoryGroups: [],
+    evidence: {
+      batch: { present: true, missing: [] },
+      schedules: { present: true, missing: [] },
+      personnel: { present: false, missing: ["监考类型"] },
+      dates: { present: false, missing: ["人员落实结束日期"] },
+      requirements: { present: false, missing: ["考务需求表"] },
+      taskSheet: { present: false, missing: ["任务单内容"] },
+      sendRecords: { present: false, missing: ["发送记录表"] },
+      directoryGroups: { present: false, missing: ["人员目录"] },
+    },
+  };
+  const snapshot = await inspectOperationPersonnelTask(
+    { evaluate: async () => structuredClone(visibleSnapshot) },
+    { environment: "test", batch, batchCode: batch.code, allowUnpublishedPreview: true },
+    {
+      readBatchPages: async () => ({
+        headers: ["批次代码"],
+        pages: [[{ cells: [batch.code] }]],
+      }),
+      openBatchRow: async () => {},
+      openPersonnelTaskSheet: async () => {
+        openedTaskSheet += 1;
+        throw incomplete;
+      },
+      openEztestSchedulePage: async () => { openedSchedulePage += 1; },
+    },
+  );
+
+  assert.equal(openedTaskSheet, 1);
+  assert.equal(openedSchedulePage, 1);
+  assert.equal(snapshot.batch.code, batch.code);
+  assert.equal(snapshot.batch.published, true);
+  assert.deepEqual(snapshot.schedules, []);
+  assert.equal(snapshot.personnel.serviceType, "");
+  assert.equal(snapshot.dates.end, "");
+  assert.deepEqual(snapshot.requirements, []);
+});
+
 test("人员任务实际执行先写入并回读人员配置，再打开任务单", async () => {
   const events = [];
   let configured = false;
@@ -711,6 +1223,9 @@ test("人员任务实际执行先写入并回读人员配置，再打开任务�
     }, {
       name: "考站管理&质量控制部",
       people: [],
+    }, {
+      name: "结算组",
+      people: [],
     }],
     readSelectedRecipients: async () => selectedRecipients,
     selectRecipients: async (_page, recipients) => {
@@ -754,7 +1269,10 @@ test("人员任务实际执行先写入并回读人员配置，再打开任务�
   assert.ok(events.indexOf("syncPersonnelConfig") < events.indexOf("openTaskSheet"));
   assert.deepEqual(selectedRecipients, {
     to: [{ id: "chenjun@ata.net.cn", name: "陈军" }],
-    cc: [{ id: "group:考站管理&质量控制部", name: "考站管理&质量控制部", kind: "group" }],
+    cc: [
+      { id: "group:考站管理&质量控制部", name: "考站管理&质量控制部", kind: "group" },
+      { id: "group:结算组", name: "结算组", kind: "group" },
+    ],
   });
   assert.equal(submitted, true);
 });

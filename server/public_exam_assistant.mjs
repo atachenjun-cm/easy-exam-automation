@@ -67,12 +67,18 @@ const SEARCH_STOP_PHRASES = [
   "都有谁",
   "列出来",
   "列出",
+  "整理成",
+  "整理",
+  "导出",
+  "下载",
+  "生成",
   "提供",
   "发给我",
   "发我",
   "名单",
   "给我",
   "把",
+  "将",
   "谁",
   "还有",
   "的是",
@@ -294,16 +300,22 @@ function requestsCandidateList(message = "") {
   return /名单|哪(?:些|个)(?:考生|人|人员)?|都有谁|还有谁|谁|姓名|名字|发(?:给)?我|发下|给我|给下|列(?:出|出来)|导出|拉(?:个|一下)|来(?:一份|份)|(?:考生|人员|人)\s*(?:呢|吗|呀|啊)?$/u.test(raw);
 }
 
-function requestsNonParticipantList(message = "", context = {}) {
+function requestsCandidateExport(message = "") {
+  return /导出|下载|生成[^\n]{0,8}(?:名单|表格|文件)/u.test(text(message));
+}
+
+function requestsExplicitNonParticipants(message = "") {
   const raw = text(message);
-  const asksForPeople = requestsCandidateList(raw);
-  const asksForNonParticipants = /缺考|没考|未考|没去考|没有去考|没参加|没有参加|未参加|没参考|没有参考|未参考|没来|没有来|未到|没到|没有到|没进|没有进|未进入|没进入|还没(?:考|参加|参考|进入|进)|没登录|未登录/u.test(raw);
-  const asksForParticipants = /已参加|参加过|已参考|参考过/u.test(raw);
+  return /缺考|没考|未考|没试考|没有试考|未试考|没去考|没有去考|没参加|没有参加|未参加|没参考|没有参考|未参考|没来|没有来|未到|没到|没有到|没进|没有进|未进入|没进入|还没(?:考|参加|参考|进入|进)|没登录|未登录/u.test(raw);
+}
+
+function requestedCandidateListMode(message = "", context = {}, subjectName = "") {
+  if (!requestsCandidateList(message)) return "";
+  if (/已参加|参加过|已参考|参考过/u.test(text(message))) return "";
+  if (requestsExplicitNonParticipants(message)) return "non_participant";
+  if (subjectName) return "subject_roster";
   const hasSelectedExams = Array.isArray(context.selectedTaskIds) && context.selectedTaskIds.length > 0;
-  return asksForPeople && !asksForParticipants && (
-    asksForNonParticipants
-    || hasSelectedExams
-  );
+  return hasSelectedExams ? "non_participant" : "";
 }
 
 function extractSearchHint(message = "") {
@@ -356,6 +368,49 @@ function sessionsForTask(taskId, sessions = []) {
   return sessions.filter((session) => text(session?.taskId) === text(taskId));
 }
 
+function configuredSubjectsFromSession(session = {}) {
+  const config = session?.config && typeof session.config === "object" ? session.config : {};
+  const requirements = Array.isArray(config.examRequirements) && config.examRequirements.length
+    ? config.examRequirements
+    : (config.examRequirement && typeof config.examRequirement === "object" ? [config.examRequirement] : []);
+  const requirement = requirements[Number(session.requirementIndex || 0)] || {};
+  const requirementConfig = requirement?.config && typeof requirement.config === "object"
+    ? requirement.config
+    : {};
+  const courses = Array.isArray(requirementConfig.courses) && requirementConfig.courses.length
+    ? requirementConfig.courses
+    : config.courses;
+  return configuredAssistantSubjects(courses);
+}
+
+function subjectNamesForResolution({ sessions = [], taskIds = [], requirementIndexesByTask = {} } = {}) {
+  const allowedTaskIds = new Set((taskIds || []).map(text).filter(Boolean));
+  const names = [];
+  for (const session of sessions) {
+    const taskId = text(session?.taskId);
+    if (allowedTaskIds.size && !allowedTaskIds.has(taskId)) continue;
+    const allowedIndexes = requirementIndexesByTask?.[taskId];
+    if (Array.isArray(allowedIndexes) && allowedIndexes.length
+      && !allowedIndexes.includes(Number(session.requirementIndex || 0))) continue;
+    names.push(...configuredSubjectsFromSession(session));
+  }
+  return configuredAssistantSubjects(names);
+}
+
+function subjectNamedInMessage(message = "", subjectNames = []) {
+  const normalizedMessage = normalizedSearchText(message);
+  return [...subjectNames]
+    .sort((left, right) => normalizedSearchText(right).length - normalizedSearchText(left).length)
+    .find((subject) => {
+      const key = normalizedSearchText(subject);
+      return key.length >= 2 && normalizedMessage.includes(key);
+    }) || "";
+}
+
+function requestsAllSubjects(message = "") {
+  return /全部科目|所有科目|各科目|每个科目/u.test(text(message));
+}
+
 function taskSearchFields(task = {}, sessions = []) {
   return unique([
     task.projectCode,
@@ -364,6 +419,26 @@ function taskSearchFields(task = {}, sessions = []) {
     task.customerName,
     ...sessions.map((session) => session?.name),
   ].map(text));
+}
+
+function tasksNamedInMessage(tasks = [], sessions = [], message = "") {
+  const normalizedMessage = normalizedSearchText(message);
+  return tasks.filter((task) => taskSearchFields(task, sessionsForTask(task.taskId, sessions))
+    .some((field) => {
+      const key = normalizedSearchText(field);
+      return key.length >= 4 && normalizedMessage.includes(key);
+    }));
+}
+
+function searchHintWithoutTaskNames(hint = "", tasks = [], sessions = []) {
+  let remaining = normalizedSearchText(hint);
+  const taskHints = tasks.flatMap((task) => (
+    taskSearchFields(task, sessionsForTask(task.taskId, sessions))
+      .map((field) => extractSearchHint(field))
+      .filter((fieldHint) => fieldHint.length >= 4)
+  )).sort((left, right) => right.length - left.length);
+  for (const taskHint of taskHints) remaining = remaining.split(taskHint).join("");
+  return remaining;
 }
 
 function scoreTaskMatch(task, sessions, message, hint) {
@@ -419,6 +494,7 @@ function safeContext(context = {}) {
     pendingTaskIds,
     lastSessionTypes: requestedSessionTypes("", context),
     dateKey: text(context.dateKey),
+    subjectName: text(context.subjectName),
     requirementIndexesByTask,
   };
 }
@@ -426,9 +502,40 @@ function safeContext(context = {}) {
 function resolveTargets({ tasks, sessions, message, context, now }) {
   const queryDate = extractAssistantDate(message, now);
   const queryTime = extractAssistantTime(message);
-  const types = requestedSessionTypes(message, context);
-  const includeCandidateList = requestsNonParticipantList(message, context);
+  const namedTasks = tasksNamedInMessage(tasks, sessions, message);
   let hint = extractSearchHint(message);
+  const subjectTaskIds = namedTasks.length
+    ? namedTasks.map((task) => text(task.taskId))
+    : context.selectedTaskIds;
+  const scopedSubjectNames = subjectTaskIds.length
+    ? subjectNamesForResolution({
+        sessions,
+        taskIds: subjectTaskIds,
+        requirementIndexesByTask: namedTasks.length ? {} : context.requirementIndexesByTask,
+      })
+    : [];
+  const subjectHint = namedTasks.length
+    ? searchHintWithoutTaskNames(hint, namedTasks, sessions)
+    : hint;
+  const explicitSubjectName = subjectNamedInMessage(subjectHint, scopedSubjectNames);
+  if (explicitSubjectName) {
+    hint = hint.split(normalizedSearchText(explicitSubjectName)).join("");
+  }
+  const subjectName = requestsAllSubjects(message)
+    ? ""
+    : (explicitSubjectName || (!queryDate && !hint ? context.subjectName : ""));
+  const hasExplicitSessionType = /试考|模拟考|正考|正式考试/u.test(text(message));
+  const types = subjectName && !hasExplicitSessionType
+    ? ["formal"]
+    : requestedSessionTypes(message, context);
+  const candidateListMode = requestedCandidateListMode(message, context, subjectName);
+  const includeCandidateList = Boolean(candidateListMode);
+  const subjectOptions = {
+    subjectName,
+    candidateListMode,
+    includeCandidateList,
+    exportCandidateList: requestsCandidateExport(message),
+  };
   if (includeCandidateList && context.selectedTaskIds.length && hint) {
     const strongestNamedMatch = Math.max(0, ...tasks.map((task) => (
       scoreTaskMatch(task, sessionsForTask(task.taskId, sessions), message, hint)
@@ -439,7 +546,7 @@ function resolveTargets({ tasks, sessions, message, context, now }) {
   const pending = context.pendingTaskIds.filter((taskId) => taskById.has(taskId));
   const selectedIndex = selectionIndex(message);
   if (!queryDate && !hint && pending.length && selectedIndex >= 0 && selectedIndex < pending.length) {
-    return { kind: "targets", taskIds: [pending[selectedIndex]], types, mode: "selection", dateKey: "", includeCandidateList };
+    return { kind: "targets", taskIds: [pending[selectedIndex]], types, mode: "selection", dateKey: "", ...subjectOptions };
   }
 
   if (queryDate) {
@@ -455,18 +562,47 @@ function resolveTargets({ tasks, sessions, message, context, now }) {
       if (indexes.length) formalRequirementIndexes[text(task.taskId)] = unique(indexes);
       return indexes.length > 0;
     });
-    return formalMatches.length
-      ? {
+    if (formalMatches.length) {
+      return {
+        kind: "targets",
+        taskIds: formalMatches.map((task) => text(task.taskId)),
+        types,
+        mode: "date",
+        dateKey: queryDate,
+        queryTime,
+        requirementIndexesByTask: formalRequirementIndexes,
+        ...subjectOptions,
+      };
+    }
+
+    if (!hasExplicitSessionType && !subjectName) {
+      const trialRequirementIndexes = {};
+      const trialMatches = tasks.filter((task) => {
+        const indexes = sessionsForTask(task.taskId, sessions)
+          .filter((session) => (
+            session.sessionType === "trial"
+            && dateKeyFromSessionValue(session.start) === queryDate
+            && sessionMatchesTime(session, queryTime)
+          ))
+          .map((session) => Number(session.requirementIndex || 0));
+        if (indexes.length) trialRequirementIndexes[text(task.taskId)] = unique(indexes);
+        return indexes.length > 0;
+      });
+      if (trialMatches.length) {
+        return {
           kind: "targets",
-          taskIds: formalMatches.map((task) => text(task.taskId)),
-          types,
-          mode: "date",
+          taskIds: trialMatches.map((task) => text(task.taskId)),
+          types: ["trial"],
+          mode: "session_date",
           dateKey: queryDate,
           queryTime,
-          requirementIndexesByTask: formalRequirementIndexes,
-          includeCandidateList,
-        }
-      : { kind: "not_found", types, mode: "date", dateKey: queryDate, queryTime, hint: "" };
+          requirementIndexesByTask: trialRequirementIndexes,
+          ...subjectOptions,
+        };
+      }
+    }
+
+    return { kind: "not_found", types, mode: "date", dateKey: queryDate, queryTime, hint: "", ...subjectOptions };
   }
 
   if (hint) {
@@ -477,17 +613,18 @@ function resolveTargets({ tasks, sessions, message, context, now }) {
       }))
       .filter((item) => item.score >= 42)
       .sort((left, right) => right.score - left.score);
-    if (!ranked.length) return { kind: "not_found", types, mode: "name", dateKey: "", hint };
+    if (!ranked.length) return { kind: "not_found", types, mode: "name", dateKey: "", hint, ...subjectOptions };
     const bestScore = ranked[0].score;
     const matches = ranked.filter((item) => item.score >= bestScore - 8).slice(0, 10);
     if (matches.length === 1) {
-      return { kind: "targets", taskIds: [text(matches[0].task.taskId)], types, mode: "name", dateKey: "", includeCandidateList };
+      return { kind: "targets", taskIds: [text(matches[0].task.taskId)], types, mode: "name", dateKey: "", ...subjectOptions };
     }
     return {
       kind: "choices",
       taskIds: matches.map((item) => text(item.task.taskId)),
       types,
       labels: matches.map((item) => taskLabel(item.task, sessionsForTask(item.task.taskId, sessions))),
+      ...subjectOptions,
     };
   }
 
@@ -500,10 +637,10 @@ function resolveTargets({ tasks, sessions, message, context, now }) {
       mode: selected.length > 1 ? "followup_group" : "followup",
       dateKey: context.dateKey,
       requirementIndexesByTask: context.requirementIndexesByTask,
-      includeCandidateList,
+      ...subjectOptions,
     };
   }
-  return { kind: "prompt", types };
+  return { kind: "prompt", types, ...subjectOptions };
 }
 
 function normalizedRowStatus(row = {}) {
@@ -525,9 +662,8 @@ function assistantCandidate(row = {}) {
   };
 }
 
-export function summarizeAssistantSession({ session = {}, rows = [], now = new Date(), includeCandidates = false } = {}) {
-  const normalizedRows = Array.isArray(rows) ? rows : [];
-  const counts = {
+function emptyAssistantCounts() {
+  return {
     referenced: 0,
     inProgress: 0,
     interrupted: 0,
@@ -535,20 +671,90 @@ export function summarizeAssistantSession({ session = {}, rows = [], now = new D
     explicitAbsent: 0,
     unknown: 0,
   };
+}
+
+function countAssistantStatus(counts, status) {
+  if (status === "referenced") counts.referenced += 1;
+  else if (status === "in_progress") counts.inProgress += 1;
+  else if (status === "interrupted") counts.interrupted += 1;
+  else if (status === "not_started") counts.notStarted += 1;
+  else if (status === "absent") counts.explicitAbsent += 1;
+  else counts.unknown += 1;
+}
+
+function assistantStatistics(counts, { expected, ended, unreturned = 0 } = {}) {
+  return {
+    expected,
+    participated: counts.referenced + counts.inProgress,
+    referenced: counts.referenced,
+    inProgress: counts.inProgress,
+    interrupted: counts.interrupted,
+    notStarted: counts.notStarted,
+    absent: counts.explicitAbsent + (ended ? counts.notStarted : 0),
+    explicitAbsent: counts.explicitAbsent,
+    statusPending: counts.unknown + unreturned,
+  };
+}
+
+function configuredAssistantSubjects(subjectNames = []) {
+  const seen = new Set();
+  return (Array.isArray(subjectNames) ? subjectNames : [])
+    .map((subject) => text(subject?.name || subject?.course_name || subject))
+    .filter((subject) => {
+      const key = normalizedSearchText(subject);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+export function summarizeAssistantSession({
+  session = {},
+  rows = [],
+  subjectNames = [],
+  now = new Date(),
+  includeCandidates = false,
+} = {}) {
+  const normalizedRows = Array.isArray(rows) ? rows : [];
+  const counts = emptyAssistantCounts();
+  const configuredSubjects = configuredAssistantSubjects(subjectNames);
+  const configuredSubjectByKey = new Map(
+    configuredSubjects.map((subject) => [normalizedSearchText(subject), subject]),
+  );
+  const subjectBuckets = new Map(
+    configuredSubjects.map((subject) => [subject, { counts: emptyAssistantCounts(), rowCount: 0, unreturned: 0 }]),
+  );
   const nonParticipantCandidates = [];
   const interruptedCandidates = [];
   const statusPendingCandidates = [];
+  const allCandidates = [];
   const seenCandidateKeys = new Set();
+  const seenAllCandidateKeys = new Set();
   for (const row of normalizedRows) {
     const status = normalizedRowStatus(row);
-    if (status === "referenced") counts.referenced += 1;
-    else if (status === "in_progress") counts.inProgress += 1;
-    else if (status === "interrupted") counts.interrupted += 1;
-    else if (status === "not_started") counts.notStarted += 1;
-    else if (status === "absent") counts.explicitAbsent += 1;
-    else counts.unknown += 1;
+    countAssistantStatus(counts, status);
+    const candidate = assistantCandidate(row);
+    const rawSubject = candidate.course;
+    const subject = configuredSubjectByKey.get(normalizedSearchText(rawSubject))
+      || (configuredSubjects.length === 1 ? configuredSubjects[0] : rawSubject || "科目未返回");
+    candidate.course = session.sessionType === "trial"
+      ? ""
+      : configuredSubjectByKey.get(normalizedSearchText(rawSubject)) || rawSubject;
+    candidate.subject = subject;
+    if (!subjectBuckets.has(subject)) {
+      subjectBuckets.set(subject, { counts: emptyAssistantCounts(), rowCount: 0, unreturned: 0 });
+    }
+    const subjectBucket = subjectBuckets.get(subject);
+    subjectBucket.rowCount += 1;
+    countAssistantStatus(subjectBucket.counts, status);
+    if (includeCandidates) {
+      const allCandidateKey = candidate.permit || candidate.name;
+      if ((candidate.name || candidate.permit) && (!allCandidateKey || !seenAllCandidateKeys.has(allCandidateKey))) {
+        allCandidates.push({ ...candidate, status });
+        if (allCandidateKey) seenAllCandidateKeys.add(allCandidateKey);
+      }
+    }
     if (includeCandidates && ["not_started", "absent", "interrupted", "unknown"].includes(status)) {
-      const candidate = assistantCandidate(row);
       const key = candidate.permit || candidate.name;
       if ((candidate.name || candidate.permit) && (!key || !seenCandidateKeys.has(key))) {
         if (status === "not_started" || status === "absent") nonParticipantCandidates.push(candidate);
@@ -562,8 +768,25 @@ export function summarizeAssistantSession({ session = {}, rows = [], now = new D
   const end = parseSessionEnd(session.end || session.end_time);
   const ended = Boolean(end && end.getTime() <= now.getTime());
   const unreturned = Math.max(expected - normalizedRows.length, 0);
-  const participated = counts.referenced + counts.inProgress;
-  const notParticipated = counts.explicitAbsent + (ended ? counts.notStarted : 0);
+  if (unreturned) {
+    const subject = configuredSubjects.length === 1 ? configuredSubjects[0] : "科目未返回";
+    if (!subjectBuckets.has(subject)) {
+      subjectBuckets.set(subject, { counts: emptyAssistantCounts(), rowCount: 0, unreturned: 0 });
+    }
+    subjectBuckets.get(subject).unreturned += unreturned;
+  }
+  const statistics = assistantStatistics(counts, { expected, ended, unreturned });
+  const subjectStats = session.sessionType === "trial"
+    ? []
+    : [...subjectBuckets.entries()].map(([name, bucket]) => ({
+      name,
+      ended,
+      ...assistantStatistics(bucket.counts, {
+        expected: bucket.rowCount + bucket.unreturned,
+        ended,
+        unreturned: bucket.unreturned,
+      }),
+    }));
   return {
     sessionId: text(session.session_id || session.sessionId || session.id),
     sessionType: session.sessionType === "trial" ? "trial" : "formal",
@@ -571,15 +794,9 @@ export function summarizeAssistantSession({ session = {}, rows = [], now = new D
     start: text(session.start || session.start_time),
     end: text(session.end || session.end_time),
     ended,
-    expected,
-    participated,
-    referenced: counts.referenced,
-    inProgress: counts.inProgress,
-    interrupted: counts.interrupted,
-    notStarted: counts.notStarted,
-    absent: notParticipated,
-    explicitAbsent: counts.explicitAbsent,
-    statusPending: counts.unknown + unreturned,
+    ...statistics,
+    subjectStats,
+    allCandidates,
     nonParticipantCandidates,
     interruptedCandidates,
     statusPendingCandidates,
@@ -632,6 +849,26 @@ function sessionSummaryText(session = {}, { includeType = true } = {}) {
   return `${prefix ? `${prefix}：` : ""}${details.join("，")}`;
 }
 
+function sessionSubjectSummaryLines(session = {}, { indent = "" } = {}) {
+  const subjects = Array.isArray(session.subjectStats) ? session.subjectStats : [];
+  if (!session.available || !subjects.length) return [];
+  const type = SESSION_TYPE_LABELS[session.sessionType] || "考试";
+  const lines = [`${indent}${type}各科目参考统计：`];
+  subjects.forEach((subject) => {
+    const details = [
+      `应考 ${subject.expected} 人`,
+      `已参加 ${subject.participated} 人`,
+    ];
+    if (subject.ended) details.push(`未参加 ${subject.absent} 人`);
+    else details.push(`当前未进入考试 ${subject.notStarted + (subject.explicitAbsent || 0)} 人`);
+    if (subject.inProgress) details.push(`考试中 ${subject.inProgress} 人`);
+    if (subject.interrupted) details.push(`考试中断 ${subject.interrupted} 人`);
+    if (subject.statusPending) details.push(`状态待同步 ${subject.statusPending} 人`);
+    lines.push(`${indent}- ${subject.name}：${details.join("，")}`);
+  });
+  return lines;
+}
+
 function aggregateSessions(sessions = [], sessionType) {
   const available = sessions.filter((session) => session.sessionType === sessionType && session.available);
   if (!available.length) return null;
@@ -668,8 +905,87 @@ function taskDisplayName(task = {}) {
   return text(task.examName || task.projectName || "未命名考试");
 }
 
+function candidateListItem(candidate = {}, index = 0) {
+  const name = candidate.name || "姓名未返回";
+  const details = [
+    candidate.course ? `科目：${candidate.course}` : "",
+    candidate.permit ? `准考证号：${candidate.permit}` : "",
+  ].filter(Boolean);
+  return `${index + 1}. ${name}${details.length ? `（${details.join("；")}）` : ""}`;
+}
+
+function subjectStatForSession(session = {}, subjectName = "") {
+  const key = normalizedSearchText(subjectName);
+  return (Array.isArray(session.subjectStats) ? session.subjectStats : [])
+    .find((subject) => normalizedSearchText(subject?.name) === key) || null;
+}
+
+function candidateMatchesSubject(candidate = {}, subjectName = "") {
+  const requested = normalizedSearchText(subjectName);
+  return Boolean(requested) && [candidate.subject, candidate.course]
+    .some((value) => normalizedSearchText(value) === requested);
+}
+
+function subjectCandidateListLines(results = [], resolution = {}) {
+  const subjectName = text(resolution.subjectName);
+  if (!resolution.includeCandidateList || !subjectName) return [];
+  const lines = [];
+  for (const result of results) {
+    const matchingSessions = (result.sessions || []).filter((session) => (
+      resolution.types.includes(session.sessionType) && session.available
+    ));
+    for (const session of matchingSessions) {
+      const subject = subjectStatForSession(session, subjectName);
+      if (!subject) continue;
+      const type = SESSION_TYPE_LABELS[session.sessionType] || "考试";
+      const time = sessionTimeLabel(session);
+      const isRoster = resolution.candidateListMode === "subject_roster";
+      const candidates = (isRoster ? session.allCandidates : session.nonParticipantCandidates)
+        .filter((candidate) => candidateMatchesSubject(candidate, subjectName));
+      const total = isRoster
+        ? subject.expected
+        : (subject.ended ? subject.absent : subject.notStarted + (subject.explicitAbsent || 0));
+      const state = subject.ended ? `未参加${type}` : `当前未进入${type}`;
+      const title = isRoster
+        ? `科目“${subjectName}”的考生名单`
+        : `科目“${subjectName}”${state}的考生名单`;
+      lines.push(`${taskDisplayName(result)} - ${type}${time ? `（${time}）` : ""}${title}（${total} 人）：`);
+      if (!candidates.length) {
+        lines.push(total ? "状态接口未返回这些考生的姓名和准考证号。" : "无");
+      } else {
+        candidates.forEach((candidate, index) => lines.push(candidateListItem(candidate, index)));
+      }
+      if (total > candidates.length) {
+        lines.push(`另有 ${total - candidates.length} 人的身份信息尚未同步。`);
+      }
+      if (isRoster) continue;
+
+      const interruptedCandidates = (session.interruptedCandidates || [])
+        .filter((candidate) => candidateMatchesSubject(candidate, subjectName));
+      if (subject.interrupted) {
+        lines.push(`科目“${subjectName}”考试中断的考生（${subject.interrupted} 人，单独统计，不计为未参加）：`);
+        interruptedCandidates.forEach((candidate, index) => lines.push(candidateListItem(candidate, index)));
+        if (subject.interrupted > interruptedCandidates.length) {
+          lines.push(`另有 ${subject.interrupted - interruptedCandidates.length} 人的身份信息尚未同步。`);
+        }
+      }
+      const statusPendingCandidates = (session.statusPendingCandidates || [])
+        .filter((candidate) => candidateMatchesSubject(candidate, subjectName));
+      if (subject.statusPending) {
+        lines.push(`科目“${subjectName}”状态待同步的考生（${subject.statusPending} 人，暂不能判定是否参加）：`);
+        statusPendingCandidates.forEach((candidate, index) => lines.push(candidateListItem(candidate, index)));
+        if (subject.statusPending > statusPendingCandidates.length) {
+          lines.push(`另有 ${subject.statusPending - statusPendingCandidates.length} 人的身份信息尚未同步。`);
+        }
+      }
+    }
+  }
+  return lines;
+}
+
 function candidateListLines(results = [], resolution = {}) {
   if (!resolution.includeCandidateList) return [];
+  if (resolution.subjectName) return subjectCandidateListLines(results, resolution);
   const lines = [];
   for (const result of results) {
     const matchingSessions = (result.sessions || []).filter((session) => (
@@ -689,11 +1005,7 @@ function candidateListLines(results = [], resolution = {}) {
       if (!candidates.length) {
         lines.push(total ? "状态接口未返回这些考生的姓名和准考证号。" : "无");
       } else {
-        candidates.forEach((candidate, index) => {
-          const name = candidate.name || "姓名未返回";
-          const permit = candidate.permit ? `（准考证号：${candidate.permit}）` : "";
-          lines.push(`${index + 1}. ${name}${permit}`);
-        });
+        candidates.forEach((candidate, index) => lines.push(candidateListItem(candidate, index)));
       }
       if (total > candidates.length) {
         lines.push(`另有 ${total - candidates.length} 人的身份信息尚未同步。`);
@@ -703,11 +1015,7 @@ function candidateListLines(results = [], resolution = {}) {
         : [];
       if (session.interrupted) {
         lines.push(`${taskDisplayName(result)} - ${type}${time ? `（${time}）` : ""}考试中断的考生（${session.interrupted} 人，单独统计，不计为未参加）：`);
-        interruptedCandidates.forEach((candidate, index) => {
-          const name = candidate.name || "姓名未返回";
-          const permit = candidate.permit ? `（准考证号：${candidate.permit}）` : "";
-          lines.push(`${index + 1}. ${name}${permit}`);
-        });
+        interruptedCandidates.forEach((candidate, index) => lines.push(candidateListItem(candidate, index)));
         if (session.interrupted > interruptedCandidates.length) {
           lines.push(`另有 ${session.interrupted - interruptedCandidates.length} 人的身份信息尚未同步。`);
         }
@@ -717,17 +1025,73 @@ function candidateListLines(results = [], resolution = {}) {
         : [];
       if (session.statusPending) {
         lines.push(`${taskDisplayName(result)} - ${type}${time ? `（${time}）` : ""}状态待同步的考生（${session.statusPending} 人，暂不能判定是否参加）：`);
-        statusPendingCandidates.forEach((candidate, index) => {
-          const name = candidate.name || "姓名未返回";
-          const permit = candidate.permit ? `（准考证号：${candidate.permit}）` : "";
-          lines.push(`${index + 1}. ${name}${permit}`);
-        });
+        statusPendingCandidates.forEach((candidate, index) => lines.push(candidateListItem(candidate, index)));
         if (session.statusPending > statusPendingCandidates.length) {
           lines.push(`另有 ${session.statusPending - statusPendingCandidates.length} 人的身份信息尚未同步。`);
         }
       }
     }
   }
+  return lines;
+}
+
+function candidateListDownloads(results = [], resolution = {}) {
+  if (!resolution.exportCandidateList || !resolution.includeCandidateList) return [];
+  const downloads = [];
+  for (const result of results) {
+    const matchingSessions = (result.sessions || []).filter((session) => (
+      session.sessionType === "trial"
+      && resolution.types.includes(session.sessionType)
+      && session.available
+    ));
+    for (const session of matchingSessions) {
+      const total = session.ended
+        ? session.absent
+        : session.notStarted + (session.explicitAbsent || 0);
+      if (!total || !session.sessionId) continue;
+      const stateLabel = session.ended ? "未试考" : "当前未进入试考";
+      downloads.push({
+        kind: "not_started_candidates",
+        label: `导出${stateLabel}名单（${total} 人）`,
+        url: `/api/sessions/${encodeURIComponent(session.sessionId)}/not-started-candidates/download`,
+        fileName: `${text(session.name || taskDisplayName(result) || "试考")}-${stateLabel}考生名单.xlsx`,
+      });
+    }
+  }
+  return downloads;
+}
+
+function subjectAnswerLines(results = [], resolution = {}) {
+  const subjectName = text(resolution.subjectName);
+  const lines = [];
+  if (results.length === 1) {
+    lines.push(`查到了“${taskDisplayName(results[0])}”中的科目“${subjectName}”。`);
+  } else {
+    lines.push(`查到当前选中的 ${results.length} 个考试项目中的科目“${subjectName}”。`);
+  }
+  results.forEach((result, index) => {
+    if (results.length > 1) lines.push(`${index + 1}. ${taskDisplayName(result)}：`);
+    const indent = results.length > 1 ? "   " : "";
+    const matchingSessions = (result.sessions || []).filter((session) => resolution.types.includes(session.sessionType));
+    if (!matchingSessions.length) {
+      lines.push(`${indent}未找到已创建的${resolution.types.map((type) => SESSION_TYPE_LABELS[type]).join("或")}场次。`);
+      return;
+    }
+    let found = false;
+    for (const session of matchingSessions) {
+      if (!session.available) {
+        lines.push(`${indent}${SESSION_TYPE_LABELS[session.sessionType] || "考试"}：实时数据暂时无法读取`);
+        continue;
+      }
+      const subject = subjectStatForSession(session, subjectName);
+      if (!subject) continue;
+      found = true;
+      lines.push(`${indent}科目“${subjectName}”${sessionSummaryText({ ...session, ...subject })}`);
+    }
+    if (!found && matchingSessions.some((session) => session.available)) {
+      lines.push(`${indent}实时数据中没有找到科目“${subjectName}”。`);
+    }
+  });
   return lines;
 }
 
@@ -744,11 +1108,14 @@ function buildAnswer({ results, resolution, now }) {
   }).format(now);
   const allSessions = results.flatMap((result) => result.sessions || []);
   const lines = [];
-  if (resolution.mode === "date" || resolution.mode === "followup_group") {
+  if (resolution.subjectName) {
+    lines.push(...subjectAnswerLines(results, resolution));
+  } else if (["date", "session_date", "followup_group"].includes(resolution.mode)) {
     const timeText = resolution.queryTime
       ? ` ${String(resolution.queryTime.hour).padStart(2, "0")}:${String(resolution.queryTime.minute).padStart(2, "0")}`
       : "";
-    const dateText = resolution.dateKey ? `正考时间为 ${formatDateKey(resolution.dateKey)}${timeText}的` : "当前选中的";
+    const dateType = resolution.mode === "session_date" ? "试考" : "正考";
+    const dateText = resolution.dateKey ? `${dateType}时间为 ${formatDateKey(resolution.dateKey)}${timeText}的` : "当前选中的";
     lines.push(`查到${dateText} ${results.length} 个考试项目。`);
     for (const type of resolution.types) {
       const aggregate = aggregateSessions(allSessions, type);
@@ -760,8 +1127,9 @@ function buildAnswer({ results, resolution, now }) {
         lines.push(`${index + 1}. ${taskDisplayName(result)}：未找到已创建的${resolution.types.map((type) => SESSION_TYPE_LABELS[type]).join("或")}场次`);
         return;
       }
-      const summaries = available.map((session) => sessionSummaryText(session)).join("；");
-      lines.push(`${index + 1}. ${taskDisplayName(result)}：${summaries}`);
+      lines.push(`${index + 1}. ${taskDisplayName(result)}：`);
+      available.forEach((session) => lines.push(`   ${sessionSummaryText(session)}`));
+      available.forEach((session) => lines.push(...sessionSubjectSummaryLines(session, { indent: "   " })));
     });
   } else {
     const result = results[0];
@@ -771,6 +1139,7 @@ function buildAnswer({ results, resolution, now }) {
       lines.push(`这个项目暂时没有已创建的${resolution.types.map((type) => SESSION_TYPE_LABELS[type]).join("或")}场次。`);
     } else {
       available.forEach((session) => lines.push(sessionSummaryText(session)));
+      available.forEach((session) => lines.push(...sessionSubjectSummaryLines(session)));
     }
   }
   lines.push(...candidateListLines(results, resolution));
@@ -792,6 +1161,7 @@ function choiceResponse(resolution, context) {
       pendingTaskIds: resolution.taskIds,
       lastSessionTypes: resolution.types,
       dateKey: context.dateKey || "",
+      subjectName: resolution.subjectName || "",
       requirementIndexesByTask: {},
     },
     choices: resolution.labels.map((label, index) => ({ index: index + 1, label })),
@@ -823,7 +1193,7 @@ export async function createPublicExamAssistantResponse({
       ok: true,
       kind: "answer",
       answer: "当前还没有可查询的考试项目。",
-      context: { selectedTaskIds: [], pendingTaskIds: [], lastSessionTypes: [], dateKey: "" },
+      context: { selectedTaskIds: [], pendingTaskIds: [], lastSessionTypes: [], dateKey: "", subjectName: "" },
       results: [],
     };
   }
@@ -873,6 +1243,7 @@ export async function createPublicExamAssistantResponse({
         return summarizeAssistantSession({
           session,
           rows,
+          subjectNames: payload?.subjectNames || payload?.subjects || [],
           now,
           includeCandidates: resolution.includeCandidateList,
         });
@@ -901,6 +1272,7 @@ export async function createPublicExamAssistantResponse({
     pendingTaskIds: [],
     lastSessionTypes: resolution.types,
     dateKey: resolution.dateKey || "",
+    subjectName: resolution.subjectName || "",
     requirementIndexesByTask: resolution.requirementIndexesByTask || {},
   };
   return {
@@ -909,5 +1281,6 @@ export async function createPublicExamAssistantResponse({
     answer: buildAnswer({ results, resolution, now }),
     context: nextContext,
     results,
+    downloads: candidateListDownloads(results, resolution),
   };
 }

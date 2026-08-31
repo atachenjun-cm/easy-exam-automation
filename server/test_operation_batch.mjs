@@ -407,6 +407,7 @@ test("applyOperationBatchResult writes batch code without replacing internal ids
 
   const patch = applyOperationBatchResult(task, {
     operationBatchCode: "EZT260003",
+    batchName: "运控实际批次_2026年8月",
     batchGuid: "e368050be9e14671892d7ea8c48b33ca",
     status: "created_unpublished",
   });
@@ -415,8 +416,8 @@ test("applyOperationBatchResult writes batch code without replacing internal ids
   assert.equal(patch.requirementRequestId, undefined);
   assert.equal(patch.initialRequirementRequestId, undefined);
   assert.equal(patch.operationBatch.code, "EZT260003");
-  assert.equal(patch.operationBatch.batchName, "示例运营批次_2026年8月");
-  assert.equal(patch.scoreStampBatchName, "示例运营批次_2026年8月");
+  assert.equal(patch.operationBatch.batchName, "运控实际批次_2026年8月");
+  assert.equal(patch.scoreStampBatchName, "运控实际批次_2026年8月");
   assert.equal(patch.operationBatch.batchGuid, "e368050be9e14671892d7ea8c48b33ca");
   assert.equal(patch.operationBatch.status, "created_unpublished");
   assert.equal(patch.operationBatch.errorMessage, "");
@@ -425,7 +426,7 @@ test("applyOperationBatchResult writes batch code without replacing internal ids
   assert.equal(patch.operationBatch.events[0].type, "operation_batch_created");
 });
 
-test("applyOperationBatchResult preserves a manually selected score stamp batch name", () => {
+test("applyOperationBatchResult does not promote a draft name to an actual batch name", () => {
   const patch = applyOperationBatchResult({
     config: {
       scoreStampBatchName: "人工批次名",
@@ -433,7 +434,7 @@ test("applyOperationBatchResult preserves a manually selected score stamp batch 
     },
   }, { operationBatchCode: "EZT260006" });
 
-  assert.equal(patch.operationBatch.batchName, "自动批次名");
+  assert.equal(patch.operationBatch.batchName, undefined);
   assert.equal(patch.scoreStampBatchName, "人工批次名");
 });
 

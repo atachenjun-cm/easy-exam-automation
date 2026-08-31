@@ -17,7 +17,7 @@ export const CONTENT_PERSON_EMAIL_DIRECTORY = Object.freeze({
   "金胜峰": "jinshengfeng@ata.net.cn",
   "卢宁": "luning@ata.net.cn",
   "聂贝聪": "niebeicong@ata.net.cn",
-  "蒲佳婿": "pujiaxu@ata.net.cn",
+  "浦佳谞": "pujiaxu@ata.net.cn",
   "张力月": "zhangliyue@ata.net.cn",
   "朱虹": "zhuhong@ata.net.cn",
   "杨慧": "yanghui@ata.net.cn",
@@ -34,12 +34,17 @@ export const CONTENT_PERSON_EMAIL_DIRECTORY = Object.freeze({
   "张红玲": "zhangling@ata.net.cn",
   "洪昱": "hongyu@ata.net.cn",
   "刘明慧": "liuminghui@ata.net.cn",
-  "毛俊捷": "maojunjie@ata.net.cn",
+  "毛俊婕": "maojunjie@ata.net.cn",
   "潘君艳": "panjunyan@ata.net.cn",
   "张健翔": "zhangjianxiang@ata.net.cn",
   "张良": "zhangliang@ata.net.cn",
   "朱鹏涛": "zhupengtao@ata.net.cn",
   "周柳柳": "zhouliuliu@ata.net.cn",
+});
+
+const CONTENT_PERSON_NAME_ALIASES = Object.freeze({
+  "浦佳霁": "浦佳谞",
+  "蒲佳婿": "浦佳谞",
 });
 
 export const DEFAULT_CONTENT_EMAIL_CC = Object.freeze([
@@ -63,21 +68,74 @@ export function contentPersonnelNamesFromTask(task = {}) {
   const flowRecipients = (Array.isArray(raw.flowOpinionRows) ? raw.flowOpinionRows : [])
     .filter((row) => text(row?.["部门"] ?? row?.department) === "内容开发部")
     .flatMap((row) => splitPersonnel(row?.["接收人"] ?? row?.recipient));
-  return [...new Set(explicit ? splitPersonnel(explicit) : flowRecipients)];
+  const personnel = explicit ? splitPersonnel(explicit) : flowRecipients;
+  return [...new Set(personnel.map((name) => CONTENT_PERSON_NAME_ALIASES[name] || name))];
 }
 
-export function contentEmailDefaultsForTask(task = {}, currentUserEmail = "") {
+export function contentEmailDefaultsForTask(task = {}, actorEmail = "") {
   const personnel = contentPersonnelNamesFromTask(task);
   const matched = personnel.flatMap((name) => {
     const email = CONTENT_PERSON_EMAIL_DIRECTORY[name];
     return email ? [{ name, email }] : [];
   });
-  const platformEmail = text(currentUserEmail || task.ownerEmail).toLowerCase();
+  const projectOwnerEmail = text(task.ownerEmail).toLowerCase();
+  const currentUserEmail = text(actorEmail).toLowerCase();
+  const directoryPeople = Object.entries(CONTENT_PERSON_EMAIL_DIRECTORY)
+    .map(([name, email]) => ({ name, email }));
+  const projectPeople = [];
+  if (currentUserEmail && !directoryPeople.some((person) => person.email === currentUserEmail)) {
+    projectPeople.push({
+      name: currentUserEmail === projectOwnerEmail ? "当前用户（项目负责人）" : "当前用户",
+      email: currentUserEmail,
+    });
+  }
+  if (
+    projectOwnerEmail
+    && projectOwnerEmail !== currentUserEmail
+    && !directoryPeople.some((person) => person.email === projectOwnerEmail)
+  ) {
+    projectPeople.push({ name: "项目负责人", email: projectOwnerEmail });
+  }
+  const people = [...projectPeople, ...directoryPeople];
+  const ccPeople = DEFAULT_CONTENT_EMAIL_CC.map((email) => {
+    const directoryEntry = Object.entries(CONTENT_PERSON_EMAIL_DIRECTORY)
+      .find(([, directoryEmail]) => directoryEmail === email);
+    return { name: directoryEntry?.[0] || email, email };
+  });
   return {
     personnel,
     matched,
     unmatched: personnel.filter((name) => !CONTENT_PERSON_EMAIL_DIRECTORY[name]),
-    recipients: [...new Set([...matched.map((item) => item.email), platformEmail].filter(Boolean))],
+    recipients: [...new Set([...matched.map((item) => item.email), projectOwnerEmail].filter(Boolean))],
     cc: [...DEFAULT_CONTENT_EMAIL_CC],
+    people,
+    ccPeople,
+  };
+}
+
+function mergeEmailAddresses(...values) {
+  const seen = new Set();
+  return values.flatMap((value) => Array.isArray(value) ? value : [value])
+    .flatMap((value) => text(value).split(/[\s,，;；]+/))
+    .map((value) => value.toLowerCase())
+    .filter((value) => {
+      if (!value || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
+}
+
+export function contentEmailDeliveryForTask(
+  task = {},
+  _actorEmail = "",
+  { recipients = "", cc = "" } = {},
+) {
+  const defaults = contentEmailDefaultsForTask(task);
+  const resolvedRecipients = mergeEmailAddresses(recipients);
+  const recipientSet = new Set(resolvedRecipients);
+  return {
+    ...defaults,
+    recipients: resolvedRecipients,
+    cc: mergeEmailAddresses(cc).filter((email) => !recipientSet.has(email)),
   };
 }

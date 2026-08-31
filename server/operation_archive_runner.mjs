@@ -126,7 +126,7 @@ async function ensureBatchListReady(page, batchListUrl, options = {}) {
   const loginWaitMinutes = Number(options.loginWaitMinutes || process.env.OPERATION_CONSOLE_LOGIN_WAIT_MINUTES || 10);
   const createButton = page.getByRole("button", { name: /创建批次/ });
   try {
-    await createButton.waitFor({ state: "visible", timeout: 10000 });
+    await createButton.waitFor({ state: "visible", timeout: 30000 });
     return;
   } catch {}
   if (!operationConsoleNeedsLogin(page.url())) {
@@ -141,7 +141,7 @@ async function ensureBatchListReady(page, batchListUrl, options = {}) {
   await createButton.waitFor({ state: "visible", timeout: 30000 });
 }
 
-async function operationConsolePage(context, batchListUrl) {
+export async function operationArchiveConsolePage(context, batchListUrl) {
   const pages = typeof context?.pages === "function" ? context.pages() : [];
   const expectedOrigin = new URL(batchListUrl).origin;
   const matching = pages.find((page) => {
@@ -151,7 +151,7 @@ async function operationConsolePage(context, batchListUrl) {
       return false;
     }
   });
-  return matching || pages[0] || await context.newPage();
+  return matching || await context.newPage();
 }
 
 async function visibleLocators(locator) {
@@ -180,20 +180,20 @@ async function readBatchIdentity(page) {
   };
 }
 
-function operationArchiveBatchDetailUrl(value, batchListUrl) {
+export function normalizeOperationArchiveBatchDetailUrl(value, batchListUrl) {
   let detailUrl;
   try {
     detailUrl = new URL(text(value));
   } catch {
-    throw archiveError("OPERATION_ARCHIVE_BATCH_URL_INVALID", "已保存的运营批次详情地址无效");
+    return "";
   }
   const expectedOrigin = new URL(batchListUrl).origin;
   if (detailUrl.origin !== expectedOrigin
     || detailUrl.pathname !== "/batch/batchDetail"
     || !detailUrl.searchParams.get("batch_guid")) {
-    throw archiveError("OPERATION_ARCHIVE_BATCH_URL_INVALID", "已保存的运营批次详情地址不属于有效的批次详情页");
+    return "";
   }
-  return detailUrl;
+  return detailUrl.href;
 }
 
 export function assertOperationArchiveBatchIdentity(draft, identity = {}) {
@@ -231,9 +231,9 @@ async function readAndVerifyBatchIdentity(page, draft) {
 
 export async function openExactBatch(page, draft, batchListUrl, options = {}) {
   const batchCode = fieldValue(draft, "batchCode");
-  const savedDetailUrl = text(options.batchDetailUrl);
+  const savedDetailUrl = normalizeOperationArchiveBatchDetailUrl(options.batchDetailUrl, batchListUrl);
   if (savedDetailUrl) {
-    const targetUrl = operationArchiveBatchDetailUrl(savedDetailUrl, batchListUrl);
+    const targetUrl = new URL(savedDetailUrl);
     let currentUrl = null;
     try {
       currentUrl = new URL(page.url());
@@ -247,8 +247,11 @@ export async function openExactBatch(page, draft, batchListUrl, options = {}) {
     await page.goto(targetUrl.href, { waitUntil: "domcontentloaded" });
     return await readAndVerifyBatchIdentity(page, draft);
   }
-  const detailUrl = new URL(page.url());
-  if (detailUrl.origin === new URL(batchListUrl).origin && detailUrl.pathname === "/batch/batchDetail") {
+  let detailUrl = null;
+  try {
+    detailUrl = new URL(page.url());
+  } catch {}
+  if (detailUrl?.origin === new URL(batchListUrl).origin && detailUrl.pathname === "/batch/batchDetail") {
     const identity = await readBatchIdentity(page).catch(() => null);
     if (identity?.code === batchCode) {
       return assertOperationArchiveBatchIdentity(draft, identity);
@@ -542,13 +545,20 @@ export async function replaceOperationArchiveAttachments(page, modal, attachment
   let removed = 0;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     removed += await clearOperationArchiveAttachments(page, modal);
-    const fileInput = modal.locator('input[type="file"]');
-    if (await fileInput.count() !== 1) {
-      throw archiveError("OPERATION_ARCHIVE_ATTACHMENT_INPUT_MISSING", "归档弹窗缺少唯一附件上传控件");
+    let interrupted = false;
+    for (let index = 0; index < attachmentPaths.length; index += 1) {
+      const fileInput = modal.locator('input[type="file"]');
+      if (await fileInput.count() !== 1) {
+        throw archiveError("OPERATION_ARCHIVE_ATTACHMENT_INPUT_MISSING", "归档弹窗缺少唯一附件上传控件");
+      }
+      await fileInput.setInputFiles(attachmentPaths[index]);
+      const ready = await waitForArchiveAttachmentsReady(page, modal, index + 1);
+      if (!ready.ready) {
+        interrupted = true;
+        break;
+      }
     }
-    await fileInput.setInputFiles(attachmentPaths);
-    const ready = await waitForArchiveAttachmentsReady(page, modal, attachmentPaths.length);
-    if (ready.ready) return { removed, uploaded: attachmentPaths.length };
+    if (!interrupted) return { removed, uploaded: attachmentPaths.length };
   }
   throw archiveError("OPERATION_ARCHIVE_ATTACHMENT_REPLACE_FAILED", "历史附件反复回流，未能只保留最新归档截图");
 }
@@ -693,7 +703,7 @@ async function launchContext(options = {}) {
 async function withArchivePage(draft, options, operation) {
   const { context, owned } = await launchContext(options);
   const batchListUrl = operationConsoleBatchListUrl(options);
-  const page = await operationConsolePage(context, batchListUrl);
+  const page = await operationArchiveConsolePage(context, batchListUrl);
   try {
     const identity = await openExactBatch(page, draft, batchListUrl, options);
     return await operation(page, identity);

@@ -112,7 +112,7 @@ async function loginToEasyExam(page, login = {}) {
   throw error;
 }
 
-async function findExamCardElement(page, target) {
+export async function findExamCardElement(page, target) {
   const handle = await page.evaluateHandle(({ sessionId, sessionName }) => {
     const norm = (value) => String(value || "").replace(/\s+/g, " ").trim();
     const visible = (element) => {
@@ -133,6 +133,8 @@ async function findExamCardElement(page, target) {
     }
     const cards = [];
     for (const seed of seeds) {
+      const matchedBySessionId = Boolean(sessionPattern
+        && sessionPattern.test(seed.href || seed.getAttribute?.("href") || ""));
       let current = seed;
       for (let depth = 0; current && depth < 10; depth += 1, current = current.parentElement) {
         if (!visible(current)) continue;
@@ -141,7 +143,7 @@ async function findExamCardElement(page, target) {
         if (rect.width >= Math.min(680, window.innerWidth * 0.55)
           && rect.height >= 120
           && rect.height <= 480
-          && (!sessionName || content.includes(norm(sessionName)))) {
+          && (matchedBySessionId || !sessionName || content.includes(norm(sessionName)))) {
           cards.push(current);
         }
       }

@@ -72,6 +72,7 @@ function dependencies() {
 
 test("parses common Chinese date and start-time expressions", () => {
   assert.equal(extractAssistantDate("8-9 的考试试考多少人没参加", now), "2026-08-09");
+  assert.equal(extractAssistantDate("8-23考试情况", now), "2026-08-23");
   assert.equal(extractAssistantDate("今天的正考情况", now), "2026-08-10");
   const saturday = new Date("2026-08-08T05:00:00.000Z");
   assert.equal(extractAssistantDate("周一的考试情况", saturday), "2026-08-10");
@@ -200,6 +201,21 @@ test("never falls back from a formal exam date to a trial-only date match", asyn
   assert.match(response.answer, /没有找到正考日期为 2026 年 8 月 8 日的项目/);
 });
 
+test("falls back to same-day trial sessions for a generic date query", async () => {
+  const response = await createPublicExamAssistantResponse({
+    ...dependencies(),
+    message: "8-8考试情况",
+  });
+
+  assert.equal(response.kind, "answer");
+  assert.deepEqual(response.context.selectedTaskIds, ["task-a", "task-b"]);
+  assert.deepEqual(response.context.lastSessionTypes, ["trial"]);
+  assert.deepEqual(response.context.requirementIndexesByTask, { "task-a": [0], "task-b": [0] });
+  assert.match(response.answer, /查到试考时间为 2026 年 8 月 8 日的 2 个考试项目/);
+  assert.match(response.answer, /合计试考：应考 7 人，已参加 3 人，未参加 4 人/);
+  assert.doesNotMatch(response.answer, /华东正考|西南正考/);
+});
+
 test("keeps date-matched projects for a conversational formal-exam follow-up", async () => {
   const first = await createPublicExamAssistantResponse({
     ...dependencies(),
@@ -238,6 +254,31 @@ test("resolves an upcoming weekday and lists not-started trial candidates in a f
   assert.match(followup.answer, /当前未进入试考的考生名单（9 人）/);
   assert.match(followup.answer, /1\. 考生1（准考证号：A001）/);
   assert.match(followup.answer, /9\. 考生9（准考证号：A009）/);
+});
+
+test("offers the existing trial no-show Excel export from a follow-up", async () => {
+  const first = await createPublicExamAssistantResponse({
+    ...dependencies(),
+    message: "今天的考试情况",
+  });
+  const followup = await createPublicExamAssistantResponse({
+    ...dependencies(),
+    message: "导出未试考名单",
+    context: first.context,
+  });
+
+  assert.equal(followup.kind, "answer");
+  assert.deepEqual(followup.context.selectedTaskIds, ["task-a"]);
+  assert.deepEqual(followup.context.lastSessionTypes, ["trial"]);
+  assert.match(followup.answer, /未参加试考的考生名单（9 人）/);
+  assert.match(followup.answer, /1\. 考生1（准考证号：A001）/);
+  assert.doesNotMatch(followup.answer, /科目：试考/);
+  assert.deepEqual(followup.downloads, [{
+    kind: "not_started_candidates",
+    label: "导出未试考名单（9 人）",
+    url: "/api/sessions/a-trial-2/not-started-candidates/download",
+    fileName: "华东第二场试考-未试考考生名单.xlsx",
+  }]);
 });
 
 test("uses the previous exam selection for short colloquial candidate-list follow-ups", async () => {

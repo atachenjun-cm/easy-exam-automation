@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { operationBatchCodeIsValid } from "./operation_batch.mjs";
 
 const SCHEMA_VERSION = 1;
-const PERSONNEL_CC_GROUP = "考站管理&质量控制部";
+const PERSONNEL_CC_GROUPS = Object.freeze(["考站管理&质量控制部", "结算组"]);
 const EDITABLE_PERSONNEL_REQUIREMENT_NAMES = [
   "正式考试-最早登录系统时间",
   "正式考试-监考人员安排",
@@ -16,6 +16,16 @@ function text(value) {
 
 function confirmedTruthy(value) {
   return value === true || ["是", "需要", "true", "1"].includes(text(value).toLowerCase());
+}
+
+function operationPersonnelTaskAlreadySent(task = {}) {
+  const state = task.config?.operationPersonnelTask || {};
+  return Boolean(
+    state.status === "sent"
+    || state.lastSuccessfulFingerprint
+    || state.initialSendVerification?.status === "verified"
+    || (Array.isArray(state.sendHistory) && state.sendHistory.length > 0)
+  );
 }
 
 function taskRequirements(task) {
@@ -33,20 +43,13 @@ function stableJson(value) {
   return JSON.stringify(value);
 }
 
-function subjectStableKey(course, existing = {}, makeId = randomUUID) {
-  const code = text(course?.code || course?.course_code);
-  if (code) return `course:${code}`;
-  const seed = text(course?.personnelSubjectKey || existing.subjectKey);
-  return seed || `subject:${makeId()}`;
-}
-
 function assignScheduleCodes(entries, previousMap = {}) {
   const used = Object.values(previousMap).map((item) => Number(item.scheduleCode || 0));
   let nextCode = Math.max(0, ...used) + 1;
   const scheduleCodeMap = { ...previousMap };
   const schedules = entries.map((entry) => {
     const previous = scheduleCodeMap[entry.scheduleEntryId];
-    const scheduleCode = Number(previous?.scheduleCode || nextCode++);
+    const scheduleCode = Number(previous?.scheduleCode || entry.previousScheduleCode || nextCode++);
     scheduleCodeMap[entry.scheduleEntryId] = {
       scheduleEntryId: entry.scheduleEntryId,
       scheduleCode,
@@ -55,7 +58,8 @@ function assignScheduleCodes(entries, previousMap = {}) {
       sessionType: entry.sessionType,
       courseIndex: entry.courseIndex,
     };
-    return { ...entry, scheduleCode };
+    const { previousScheduleCode, ...schedule } = entry;
+    return { ...schedule, scheduleCode };
   });
   return { schedules, scheduleCodeMap };
 }
@@ -63,6 +67,25 @@ function assignScheduleCodes(entries, previousMap = {}) {
 function dateValue(value) {
   const parsed = Date.parse(text(value));
   return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function canonicalPersonnelScheduleDateTime(value) {
+  const raw = text(value);
+  const match = raw.match(
+    /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/,
+  );
+  if (!match) return raw;
+  const [, year, month, day, hour, minute, second = ""] = match;
+  const normalized = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")} ${hour.padStart(2, "0")}:${minute}`;
+  return second && second !== "00" ? `${normalized}:${second}` : normalized;
+}
+
+function normalizedPersonnelSchedule(item = {}) {
+  return {
+    ...structuredClone(item || {}),
+    start: canonicalPersonnelScheduleDateTime(item?.start),
+    end: canonicalPersonnelScheduleDateTime(item?.end),
+  };
 }
 
 function formatShanghaiDate(value) {
@@ -133,40 +156,41 @@ function includesTrialMonitoring(task, requirement) {
       .some((value) => ["是", "需要", "true"].includes(text(value).toLowerCase()));
 }
 
-function scheduleRows(task, previousMap, makeId, warnings) {
+function scheduleRows(task, previousMap, _makeId, warnings) {
   const rows = [];
-  for (const requirement of taskRequirements(task)) {
+  for (const [requirementIndex, requirement] of taskRequirements(task).entries()) {
     const config = requirement.config || {};
     const sessionType = text(config.sessionType) === "trial" || config.isTrial === true ? "trial" : "formal";
     if (sessionType === "trial" && !includesTrialMonitoring(task, requirement)) continue;
-    const courses = Array.isArray(config.courses) && config.courses.length
-      ? config.courses
-      : [{ name: requirement.fields?.["考试名称"] }];
-    courses.forEach((course, courseIndex) => {
-      const requirementId = text(requirement.id) || `requirement-${courseIndex + 1}`;
-      const existing = Object.values(previousMap).find((item) => item.requirementId === requirementId
-        && item.sessionType === sessionType && Number(item.courseIndex) === courseIndex) || {};
-      const subjectKey = subjectStableKey(course, existing, makeId);
-      const scheduleEntryId = `${requirementId}:${sessionType}:${subjectKey}`;
-      const start = text(config.startTimeDisplay || config.start || requirement.fields?.["考试日期时间"]);
-      const end = text(config.endTimeDisplay || config.end);
-      const startAt = dateValue(start);
-      const endAt = dateValue(end);
-      if (!Number.isFinite(startAt) || !Number.isFinite(endAt) || endAt <= startAt) {
-        warnings.push({ code: "INVALID_SCHEDULE_RANGE", scheduleEntryId });
-      }
-      rows.push({
-        scheduleEntryId,
-        requirementId,
-        sessionType,
-        subjectKey,
-        courseIndex,
-        subjectCode: text(course?.code || course?.course_code),
-        subjectName: text(course?.name || course?.course_name || requirement.fields?.["考试名称"]),
-        start,
-        end,
-        earlyLoginMinutes: Number(config.earlyLoginMinutes || 0),
-      });
+    const requirementId = text(requirement.id) || `requirement-${requirementIndex + 1}`;
+    const session = (Array.isArray(task.sessions) ? task.sessions : []).find((item) => (
+      text(item?.sessionType || item?.session_type) === sessionType
+      && Number(item?.requirementIndex || item?.requirement_index || 0) === requirementIndex
+    ));
+    const legacyEntry = Object.values(previousMap)
+      .filter((item) => item.requirementId === requirementId && item.sessionType === sessionType)
+      .sort((left, right) => Number(left.courseIndex || 0) - Number(right.courseIndex || 0))[0] || {};
+    const subjectKey = "exam";
+    const scheduleEntryId = `${requirementId}:${sessionType}:${subjectKey}`;
+    const start = text(session?.start || session?.start_time || config.startTimeDisplay || config.start);
+    const end = text(session?.end || session?.end_time || config.endTimeDisplay || config.end);
+    const startAt = dateValue(start);
+    const endAt = dateValue(end);
+    if (!Number.isFinite(startAt) || !Number.isFinite(endAt) || endAt <= startAt) {
+      warnings.push({ code: "INVALID_SCHEDULE_RANGE", scheduleEntryId });
+    }
+    rows.push({
+      scheduleEntryId,
+      requirementId,
+      sessionType,
+      subjectKey,
+      courseIndex: 0,
+      subjectCode: "",
+      subjectName: text(session?.name || requirement.fields?.["考试名称"] || config.examName),
+      start,
+      end,
+      earlyLoginMinutes: Number(config.earlyLoginMinutes || 0),
+      previousScheduleCode: legacyEntry.scheduleCode,
     });
   }
   return rows.sort((left, right) => dateValue(left.start) - dateValue(right.start));
@@ -281,10 +305,11 @@ export function buildOperationPersonnelTaskDraft(task = {}, options = {}) {
   const recipients = {
     toGroup: projectDepartment,
     toNames: projectManager ? [projectManager] : [],
-    ccGroup: PERSONNEL_CC_GROUP,
+    ccGroup: PERSONNEL_CC_GROUPS[0],
+    ccGroups: [...PERSONNEL_CC_GROUPS],
     ccCount: 0,
     ccGroupOnly: true,
-    ruleVersion: 3,
+    ruleVersion: 4,
   };
   const draft = {
     schemaVersion: SCHEMA_VERSION,
@@ -337,7 +362,7 @@ export function buildOperationPersonnelTaskDraft(task = {}, options = {}) {
     && item.code !== "PERSONNEL_DATES_EXPIRED"
     && !(item.code === "FORMAL_ROOM_ASSIGNMENT_REQUIRED" && monitorCountComplete)
   ));
-  if (expiredDateFields.length) {
+  if (expiredDateFields.length && !operationPersonnelTaskAlreadySent(task)) {
     draft.warnings.push({
       code: "PERSONNEL_DATES_EXPIRED",
       fields: expiredDateFields,
@@ -347,33 +372,47 @@ export function buildOperationPersonnelTaskDraft(task = {}, options = {}) {
   return draft;
 }
 
-export function operationPersonnelTaskFingerprint(draft) {
+export function operationPersonnelTaskSnapshot(draft = {}) {
+  const recipients = draft.recipients || {};
   const managedSchedules = (draft.managedSchedules || []).map(
     ({ requirementIndex, name, start, end }) => ({
       requirementIndex,
       name,
-      start,
-      end,
+      start: canonicalPersonnelScheduleDateTime(start),
+      end: canonicalPersonnelScheduleDateTime(end),
     }),
   );
-  const material = {
+  return {
     environment: draft.environment,
-    batch: draft.batch,
-    schedules: draft.schedules,
+    batch: structuredClone(draft.batch || {}),
+    schedules: (draft.schedules || []).map(normalizedPersonnelSchedule),
     managedSchedules,
-    personnel: draft.personnel,
-    requirementOverrides: draft.requirementOverrides || {},
-    dates: draft.dates,
+    personnel: structuredClone(draft.personnel || {}),
+    requirementOverrides: structuredClone(draft.requirementOverrides || {}),
+    dates: structuredClone(draft.dates || {}),
     recipients: {
-      ruleVersion: draft.recipients.ruleVersion,
-      toGroup: draft.recipients.toGroup,
-      toNames: draft.recipients.toNames,
-      ccGroup: draft.recipients.ccGroup,
-      ccCount: draft.recipients.ccCount,
-      ccGroupOnly: draft.recipients.ccGroupOnly === true,
+      ruleVersion: recipients.ruleVersion,
+      toGroup: recipients.toGroup,
+      toNames: recipients.toNames,
+      ccGroup: recipients.ccGroup,
+      ccGroups: recipients.ccGroups,
+      ccCount: recipients.ccCount,
+      ccGroupOnly: recipients.ccGroupOnly === true,
     },
   };
+}
+
+export function operationPersonnelTaskFingerprint(draft) {
+  const material = operationPersonnelTaskSnapshot(draft);
   return createHash("sha256").update(stableJson(material)).digest("hex");
+}
+
+export function operationPersonnelTaskBaselineFingerprint(state = {}) {
+  const history = Array.isArray(state.sendHistory) ? state.sendHistory : [];
+  const baseline = history.at(-1)?.taskSnapshot || state.lastSentTaskSnapshot;
+  return baseline
+    ? operationPersonnelTaskFingerprint(baseline)
+    : text(state.lastSuccessfulFingerprint);
 }
 
 function changedFields(before, after, prefix = "") {
@@ -393,6 +432,9 @@ function changedFields(before, after, prefix = "") {
 }
 
 const FIELD_LABELS = {
+  "batch.code": "批次代码",
+  "batch.name": "批次名称",
+  "batch.detailUrl": "批次详情地址",
   "dates.start": "人员落实开始日期",
   "dates.end": "人员落实结束日期",
   "dates.nameListDue": "人员名单提交日期",
@@ -408,36 +450,63 @@ const FIELD_LABELS = {
   "requirementOverrides.正式考试-监考人员安排": "正式考试-监考人员安排",
   "requirementOverrides.正式考试-监考人员数量": "正式考试-监考人员数量",
   "requirementOverrides.正式考试-监考人员比例": "正式考试-监考人员比例",
+  "recipients.ruleVersion": "收件规则版本",
+  "recipients.toGroup": "收件人分组",
+  "recipients.toNames": "收件人",
+  "recipients.ccGroup": "抄送分组",
+  "recipients.ccGroups": "抄送分组",
+  "recipients.ccCount": "抄送人数",
+  "recipients.ccGroupOnly": "仅使用抄送分组",
 };
 
+function personnelDiffDisplay(value) {
+  if (Array.isArray(value)) return value.map(personnelDiffDisplay).join("、") || "空";
+  if (value && typeof value === "object") return stableJson(value);
+  if (value === true) return "是";
+  if (value === false) return "否";
+  return text(value) || "空";
+}
+
+function personnelScheduleDisplay(item = {}) {
+  const name = text(item.subjectName || item.name) || "未命名考试";
+  const range = [text(item.start), text(item.end)].filter(Boolean).join(" 至 ");
+  return range ? `${name}（${range}）` : name;
+}
+
 export function diffOperationPersonnelTaskDrafts(before = {}, after = {}) {
-  const beforeById = new Map((before.schedules || []).map((item) => [item.scheduleEntryId, item]));
-  const afterById = new Map((after.schedules || []).map((item) => [item.scheduleEntryId, item]));
+  const normalizedBefore = operationPersonnelTaskSnapshot(before);
+  const normalizedAfter = operationPersonnelTaskSnapshot(after);
+  const beforeById = new Map(normalizedBefore.schedules.map((item) => [item.scheduleEntryId, item]));
+  const afterById = new Map(normalizedAfter.schedules.map((item) => [item.scheduleEntryId, item]));
   const added = [...afterById].filter(([id]) => !beforeById.has(id)).map(([, item]) => item);
   const deleted = [...beforeById].filter(([id]) => !afterById.has(id)).map(([, item]) => item);
   const changed = [...afterById].filter(([id, item]) => beforeById.has(id) && stableJson(beforeById.get(id)) !== stableJson(item))
     .map(([id, item]) => ({ before: beforeById.get(id), after: item }));
   const fields = [
-    ...changedFields(before.dates, after.dates, "dates"),
-    ...changedFields(before.personnel, after.personnel, "personnel"),
-    ...changedFields(before.requirementOverrides, after.requirementOverrides, "requirementOverrides"),
-    ...(stableJson(before.managedSchedules || []) === stableJson(after.managedSchedules || [])
+    ...changedFields(normalizedBefore.batch, normalizedAfter.batch, "batch"),
+    ...changedFields(normalizedBefore.dates, normalizedAfter.dates, "dates"),
+    ...changedFields(normalizedBefore.personnel, normalizedAfter.personnel, "personnel"),
+    ...changedFields(normalizedBefore.requirementOverrides, normalizedAfter.requirementOverrides, "requirementOverrides"),
+    ...changedFields(normalizedBefore.recipients, normalizedAfter.recipients, "recipients"),
+    ...(stableJson(normalizedBefore.managedSchedules) === stableJson(normalizedAfter.managedSchedules)
       ? []
       : [{
           path: "managedSchedules",
-          before: before.managedSchedules || [],
-          after: after.managedSchedules || [],
+          before: normalizedBefore.managedSchedules,
+          after: normalizedAfter.managedSchedules,
         }]),
   ];
   const parts = [];
-  if (added.length) parts.push(`考试日程：新增 ${added.length} 项`);
-  if (changed.length) parts.push(`考试日程：修改 ${changed.length} 项`);
-  if (deleted.length) parts.push(`考试日程：删除 ${deleted.length} 项`);
+  for (const item of added) parts.push(`新增考试日程：${personnelScheduleDisplay(item)}`);
+  for (const item of changed) {
+    parts.push(`修改考试日程：由“${personnelScheduleDisplay(item.before)}”调整为“${personnelScheduleDisplay(item.after)}”`);
+  }
+  for (const item of deleted) parts.push(`删除考试日程：${personnelScheduleDisplay(item)}`);
   for (const field of fields) {
     if (field.path === "managedSchedules") {
       parts.push("批次受管日程：已更新");
     } else {
-      parts.push(`${FIELD_LABELS[field.path] || field.path}：${field.before} → ${field.after}`);
+      parts.push(`${FIELD_LABELS[field.path] || field.path}：由“${personnelDiffDisplay(field.before)}”调整为“${personnelDiffDisplay(field.after)}”`);
     }
   }
   return { schedules: { added, changed, deleted }, fields, summary: parts.join("；") };
@@ -456,10 +525,11 @@ export function buildOperationPersonnelTaskStatus(task = {}, draft = {}) {
   }
   if (!operationBatchCodeIsValid(draft.batch?.code)) return { status: "waiting_batch", actions: [] };
   const fingerprint = operationPersonnelTaskFingerprint(draft);
-  if (state.lastSuccessfulFingerprint && state.lastSuccessfulFingerprint === fingerprint) {
+  const baselineFingerprint = operationPersonnelTaskBaselineFingerprint(state);
+  if (baselineFingerprint && baselineFingerprint === fingerprint) {
     return { status: "sent", actions: actions("preview_adjust", "调整人员任务并重新发送") };
   }
-  if (state.lastSuccessfulFingerprint) return { status: "changes_pending", actions: actions("preview_resend", "检查变更并重新发送") };
+  if (baselineFingerprint) return { status: "changes_pending", actions: actions("preview_resend", "检查变更并重新发送") };
   if (persistent === "changes_pending") return { status: "changes_pending", actions: actions("preview_resend", "检查变更并重新发送") };
   if (persistent === "sent") {
     return { status: "sent", actions: actions("preview_adjust", "调整人员任务并重新发送") };

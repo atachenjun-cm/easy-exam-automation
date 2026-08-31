@@ -73,31 +73,95 @@ function nextDate(value) {
   return date.toISOString().slice(0, 10);
 }
 
-function shanghaiDate(now = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(now);
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${values.year}-${values.month}-${values.day}`;
-}
-
 export function operationArchiveActualDataWindow(task = {}, options = {}) {
   const endDates = formalSessions(task)
     .map((session) => normalizeDate(session?.end || session?.end_time))
     .filter(Boolean)
     .sort();
-  if (!endDates.length) return { ready: false, lastFormalDate: "", availableDate: "" };
+  if (!endDates.length) {
+    return { ready: false, lastFormalDate: "", availableDate: "", availableAt: "", availableText: "" };
+  }
   const lastFormalDate = endDates.at(-1);
   const availableDate = nextDate(lastFormalDate);
-  const today = normalizeDate(options.today) || shanghaiDate(options.now ? new Date(options.now) : new Date());
+  const availableAt = availableDate ? `${availableDate}T08:00:00+08:00` : "";
+  const availableText = availableDate ? `${availableDate} 08:00` : "";
+  const current = options.now
+    ? new Date(options.now)
+    : options.today
+      ? new Date(`${normalizeDate(options.today)}T00:00:00+08:00`)
+      : new Date();
   return {
-    ready: Boolean(availableDate && today >= availableDate),
+    ready: Boolean(availableAt && Number.isFinite(current.getTime()) && current.getTime() >= Date.parse(availableAt)),
     lastFormalDate,
     availableDate,
+    availableAt,
+    availableText,
   };
+}
+
+function shanghaiDate(value) {
+  if (value === undefined || value === null || value === "") return "";
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  return new Date(date.getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+export function millisecondsUntilNextOperationArchiveEvidenceCheck(now = new Date()) {
+  const current = now instanceof Date ? now : new Date(now);
+  if (!Number.isFinite(current.getTime())) return 0;
+  const today = shanghaiDate(current);
+  const todayAt = Date.parse(`${today}T08:00:00+08:00`);
+  const target = current.getTime() <= todayAt
+    ? todayAt
+    : Date.parse(`${nextDate(today)}T08:00:00+08:00`);
+  return Math.max(0, target - current.getTime());
+}
+
+function scheduledOperationArchiveEvidenceDecision(task = {}, options = {}) {
+  const skip = { shouldAttempt: false, retryDelayMs: null };
+  if (text(task.hiddenAt || task.hidden_at)) return skip;
+  const current = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
+  if (!Number.isFinite(current.getTime())) return skip;
+  const dataWindow = operationArchiveActualDataWindow(task, { now: current });
+  const availableAt = Date.parse(dataWindow.availableAt);
+  const windowMs = Number(options.windowMs ?? 48 * 60 * 60 * 1000);
+  if (!dataWindow.ready || !Number.isFinite(availableAt)) return skip;
+  const elapsedMs = current.getTime() - availableAt;
+  if (elapsedMs < 0 || elapsedMs > windowMs) return skip;
+
+  const formal = formalSessions(task);
+  if (!formal.some((session) => text(session?.session_id))) return skip;
+  const archive = task.config?.operationArchive || {};
+  if (["submitted", "already_archived"].includes(text(archive.status))) return skip;
+  const scheduled = archive.evidenceScheduler || {};
+  if (text(scheduled.status) === "success") return skip;
+
+  const archiveScreenshots = Array.isArray(archive.archiveScreenshots) ? archive.archiveScreenshots : [];
+  const scoreStep = (Array.isArray(task.steps) ? task.steps : [])
+    .find((step) => text(step?.stepKey || step?.step_key) === "score_process") || {};
+  const legacyScreenshots = Array.isArray(scoreStep.result?.archiveScreenshots)
+    ? scoreStep.result.archiveScreenshots
+    : [];
+  if (archiveScreenshots.length || legacyScreenshots.length) return skip;
+
+  const maxAttempts = Number(options.maxAttempts ?? 3);
+  const attemptCount = Math.max(0, Number(scheduled.attemptCount || 0));
+  if (attemptCount >= maxAttempts) return skip;
+  const lastAttemptAt = Date.parse(text(scheduled.lastAttemptAt));
+  if (!Number.isFinite(lastAttemptAt)) return { shouldAttempt: true, retryDelayMs: null };
+  const retryMs = Number(options.retryMs ?? 30 * 60 * 1000);
+  const retryDelayMs = Math.max(0, lastAttemptAt + retryMs - current.getTime());
+  return retryDelayMs === 0
+    ? { shouldAttempt: true, retryDelayMs: null }
+    : { shouldAttempt: false, retryDelayMs };
+}
+
+export function shouldAttemptScheduledOperationArchiveEvidence(task = {}, options = {}) {
+  return scheduledOperationArchiveEvidenceDecision(task, options).shouldAttempt;
+}
+
+export function operationArchiveEvidenceRetryDelay(task = {}, options = {}) {
+  return scheduledOperationArchiveEvidenceDecision(task, options).retryDelayMs;
 }
 
 export function operationArchiveActualsFromScoreRows(rows = []) {
@@ -376,7 +440,7 @@ export function buildOperationArchiveDraft(task = {}, options = {}) {
     warnings.push({
       code: "ARCHIVE_ACTUAL_RESULT_NOT_READY",
       field: "attendedSubjects",
-      message: `正式考试数据将在 ${text(options.actuals.availableDate) || "考试结束次日"} 通过接口获取`,
+      message: `正式考试数据将在 ${text(options.actuals.availableText) || "考试结束次日 08:00"} 通过接口获取`,
     });
   }
   const actualOrder = Object.keys(fields);

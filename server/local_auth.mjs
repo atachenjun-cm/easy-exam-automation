@@ -114,15 +114,27 @@ export function isAdminUser(user) {
   return user?.role === "admin";
 }
 
-export function canViewOwner(user, ownerEmail = "") {
+function normalizeMemberEmails(memberEmails = []) {
+  if (!Array.isArray(memberEmails)) return [];
+  return [...new Set(memberEmails.map((email) => normalizeEmail(email)).filter(Boolean))];
+}
+
+export function canViewOwner(user, ownerEmail = "", users = []) {
   if (!user?.role) return true;
   if (isAdminUser(user)) return true;
   const owner = normalizeEmail(ownerEmail);
-  return Boolean(owner) && normalizeEmail(user.email) === owner;
+  if (!owner) return false;
+  const viewerEmail = normalizeEmail(user.email);
+  if (viewerEmail === owner) return true;
+  const viewer = (users || []).find((item) => normalizeEmail(item.email) === viewerEmail);
+  return normalizeMemberEmails(viewer?.memberEmails ?? user.memberEmails).includes(owner);
 }
 
 export function sanitizeUsers(users = []) {
-  return users.map(({ passwordHash, passwordSalt, ...user }) => ({ ...user }));
+  return users.map(({ passwordHash, passwordSalt, ...user }) => ({
+    ...user,
+    memberEmails: normalizeMemberEmails(user.memberEmails),
+  }));
 }
 
 export function upsertLocalUser(auth, { email, password }) {
@@ -154,6 +166,22 @@ export function updateLocalUser(auth, email, patch = {}) {
   if (!user) return null;
   if (patch.disabled !== undefined) user.disabled = Boolean(patch.disabled);
   if (patch.password) Object.assign(user, hashPassword(patch.password));
+  if (patch.memberEmails !== undefined) {
+    if (!Array.isArray(patch.memberEmails)) throw new Error("组员邮箱格式不正确。");
+    const memberEmails = normalizeMemberEmails(patch.memberEmails);
+    if (memberEmails.includes(normalizedEmail)) throw new Error("不能将自己添加为组员。");
+    for (const memberEmail of memberEmails) {
+      if (!(auth.users || []).some((item) => normalizeEmail(item.email) === memberEmail)) {
+        throw new Error(`请先开通组员账号：${memberEmail}`);
+      }
+      const existingLeader = (auth.users || []).find((item) => (
+        normalizeEmail(item.email) !== normalizedEmail
+        && normalizeMemberEmails(item.memberEmails).includes(memberEmail)
+      ));
+      if (existingLeader) throw new Error(`${memberEmail} 已属于 ${existingLeader.email} 的项目组。`);
+    }
+    user.memberEmails = memberEmails;
+  }
   user.updatedAt = new Date().toISOString();
   return user;
 }
@@ -162,7 +190,15 @@ export function deleteLocalUser(auth, email) {
   const normalizedEmail = normalizeEmail(email);
   const before = auth.users.length;
   auth.users = auth.users.filter((user) => normalizeEmail(user.email) !== normalizedEmail);
-  return auth.users.length !== before;
+  if (auth.users.length === before) return false;
+  const now = new Date().toISOString();
+  for (const user of auth.users) {
+    const memberEmails = normalizeMemberEmails(user.memberEmails);
+    if (!memberEmails.includes(normalizedEmail)) continue;
+    user.memberEmails = memberEmails.filter((memberEmail) => memberEmail !== normalizedEmail);
+    user.updatedAt = now;
+  }
+  return true;
 }
 
 export function parseCookies(header = "") {

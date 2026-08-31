@@ -7,6 +7,7 @@ export const ROUTES = [
   { name: "auto-config", pattern: /^\/auto-config\/?$/, menuKey: "auto-config" },
   { name: "exams", pattern: /^\/exams\/?$/, menuKey: "exams" },
   { name: "exam-detail", pattern: /^\/exams\/([^/]+)\/?$/, param: "examId", menuKey: "exams" },
+  { name: "candidate-changes", pattern: /^\/candidate-changes\/?$/, menuKey: "exams" },
   { name: "candidate-import", pattern: /^\/candidate-import\/?$/, menuKey: "candidate-import" },
   { name: "requirements", pattern: /^\/requirements\/?$/, menuKey: "requirements" },
   { name: "requirement-detail", pattern: /^\/requirements\/([^/]+)\/?$/, param: "requestId", menuKey: "requirements" },
