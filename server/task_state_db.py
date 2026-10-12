@@ -49,6 +49,31 @@ DISPLAY_STAGE_NAMES = {
     "sessions_auto_rooms": "试考考生导入 & 自动分班",
 }
 
+EXAM_LIST_STEP_KEYS = (
+    "requirement_parse",
+    "formal_session_create",
+    "trial_session_create",
+    "course_create",
+    "paper_bind",
+    "formal_candidate_import",
+    "trial_candidate_import",
+    "trial_paper_bind",
+    "sessions_auto_rooms",
+)
+
+EXAM_LIST_RESPONSE_CONFIG_KEYS = (
+    "examName",
+    "examAddress",
+    "examUrlType",
+    "unifiedExamAddress",
+    "examUrl",
+    "unifiedExamCode",
+    "unifiedExamPassword",
+    "examPassword",
+    "examCode",
+    "mockExamEnabled",
+)
+
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -65,6 +90,289 @@ def loads(value, fallback):
 
 def row_dict(row):
     return dict(row) if row else None
+
+
+def operation_archive_count(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        count = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return str(count) if count >= 0 else None
+
+
+def operation_archive_actuals_summary(config):
+    if not isinstance(config, dict):
+        return {}
+    archive = config.get("operationArchive")
+    if not isinstance(archive, dict):
+        return {}
+    if str(archive.get("status") or "") in {"submitted", "already_archived"}:
+        submission = archive.get("lastSubmission")
+        snapshot = submission.get("formSnapshot") if isinstance(submission, dict) else None
+        archived_count = operation_archive_count(
+            snapshot.get("attendedSubjects") if isinstance(snapshot, dict) else None
+        )
+        if archived_count is not None:
+            return {"completedSubjects": archived_count}
+    actuals = archive.get("actuals")
+    if not isinstance(actuals, dict):
+        return {}
+    completed_subjects = operation_archive_count(actuals.get("completedSubjects"))
+    if completed_subjects is None:
+        return {}
+    return {
+        "completedSubjects": completed_subjects,
+        **({"refreshedAt": str(actuals["refreshedAt"])} if str(actuals.get("refreshedAt") or "").strip() else {}),
+    }
+
+
+def exam_list_paper_summary(value):
+    if not isinstance(value, dict) or "status" not in value:
+        return {}
+    return {"status": value["status"]}
+
+
+def exam_list_response_requirement_summary(requirement):
+    if not isinstance(requirement, dict):
+        return {}
+    fields = requirement.get("fields") if isinstance(requirement.get("fields"), dict) else {}
+    config = requirement.get("config") if isinstance(requirement.get("config"), dict) else {}
+    summary = {}
+    if str(fields.get("考试名称") or "").strip():
+        summary["fields"] = {"考试名称": fields["考试名称"]}
+    requirement_config = {
+        key: config[key]
+        for key in ("examName", "mockExamEnabled")
+        if key in config
+    }
+    if isinstance(config.get("courses"), list) and config["courses"]:
+        requirement_config["courseCount"] = len(config["courses"])
+    if requirement_config:
+        summary["config"] = requirement_config
+    return summary
+
+
+def exam_list_sync_preview_summary(value):
+    if not isinstance(value, dict):
+        return None
+    summary = {}
+    if value.get("checkedAt"):
+        summary["checkedAt"] = value["checkedAt"]
+    source_sessions = value.get("sessions")
+    sessions = []
+    for item in source_sessions if isinstance(source_sessions, list) else []:
+        if not isinstance(item, dict):
+            continue
+        session = {
+            key: item[key]
+            for key in ("sessionId", "sessionType", "checkedAt", "error", "readbackWarning")
+            if key in item and item[key] not in (None, "")
+        }
+        difference_count = item.get("differenceCount")
+        if difference_count is None and isinstance(item.get("diff"), list):
+            difference_count = len(item["diff"])
+        if difference_count is not None:
+            session["differenceCount"] = difference_count
+        sessions.append(session)
+    if isinstance(source_sessions, list):
+        summary["sessions"] = sessions
+    return summary
+
+
+def exam_list_response_config_summary(config):
+    if not isinstance(config, dict):
+        return {}
+    summary = {key: config[key] for key in EXAM_LIST_RESPONSE_CONFIG_KEYS if key in config}
+    if isinstance(config.get("courses"), list) and config["courses"]:
+        summary["courseCount"] = len(config["courses"])
+    requirements = config.get("examRequirements")
+    if isinstance(requirements, list):
+        summary["examRequirements"] = [
+            exam_list_response_requirement_summary(requirement) for requirement in requirements
+        ]
+    if isinstance(config.get("examRequirement"), dict):
+        summary["examRequirement"] = exam_list_response_requirement_summary(config["examRequirement"])
+    if isinstance(config.get("paperFormBinds"), list):
+        summary["paperFormBinds"] = [
+            exam_list_paper_summary(value) for value in config["paperFormBinds"]
+        ]
+    paper_form_bind = exam_list_paper_summary(config.get("paperFormBind"))
+    if paper_form_bind:
+        summary["paperFormBind"] = paper_form_bind
+    sync_preview = exam_list_sync_preview_summary(config.get("examListSyncPreviewCache"))
+    if sync_preview is not None:
+        summary["examListSyncPreviewCache"] = sync_preview
+    return summary
+
+
+def exam_list_config_summary(config):
+    if not isinstance(config, dict):
+        return {}
+    summary = {key: config[key] for key in ("mockExamEnabled",) if key in config}
+    if isinstance(config.get("courses"), list) and config["courses"]:
+        summary["courseCount"] = len(config["courses"])
+    requirements = config.get("examRequirements")
+    if isinstance(requirements, list):
+        summary["examRequirements"] = [
+            {"config": exam_list_config_summary(requirement.get("config"))} if isinstance(requirement, dict) else {"config": {}}
+            for requirement in requirements
+        ]
+    if isinstance(config.get("paperFormBinds"), list):
+        summary["paperFormBinds"] = [
+            exam_list_paper_summary(value) for value in config["paperFormBinds"]
+        ]
+    paper_form_bind = exam_list_paper_summary(config.get("paperFormBind"))
+    if paper_form_bind:
+        summary["paperFormBind"] = paper_form_bind
+    return summary
+
+
+def exam_list_step_summary(row):
+    requirement_progress = loads(row["requirement_progress_json"], {})
+    if not isinstance(requirement_progress, dict):
+        requirement_progress = {}
+    return {
+        "stepKey": row["step_key"],
+        "status": row["status"],
+        "requirementProgress": {
+            key: {
+                "status": value["status"],
+                **({"subStatus": value["subStatus"]} if isinstance(value.get("subStatus"), dict) and value["subStatus"] else {}),
+            }
+            for key, value in requirement_progress.items()
+            if isinstance(value, dict) and "status" in value
+        },
+    }
+
+
+def exam_list_aggregate_status(statuses):
+    values = [status for status in statuses if status]
+    if not values:
+        return "pending"
+    for status in ("failed", "running", "waiting_manual"):
+        if status in values:
+            return status
+    if all(status in {"success", "skipped"} for status in values):
+        return "success"
+    if any(status in {"success", "skipped"} for status in values):
+        return "running"
+    return "pending"
+
+
+def exam_list_display_progress(sessions):
+    config = sessions[0]["config"]
+    steps = {step["stepKey"]: step for step in sessions[0]["steps"]}
+    if not steps:
+        return sessions[0]["progress"]
+    requirement_count = max(
+        len(config.get("examRequirements") or []),
+        max((session["requirementIndex"] + 1 for session in sessions), default=0),
+        max((int(key) + 1 for step in steps.values() for key in step["requirementProgress"] if key.isdigit()), default=0),
+        1,
+    )
+    requirements = config.get("examRequirements") or []
+    trial_indexes = [index for index in range(requirement_count) if (
+        bool((requirements[index].get("config") or {}).get("mockExamEnabled")) if index < len(requirements) else bool(config.get("mockExamEnabled"))
+    ) or any(session["sessionType"] == "trial" and session["requirementIndex"] == index for session in sessions)]
+    statuses = []
+    for key in ("requirement_parse", "formal_session_create"):
+        if key in steps:
+            statuses.append(steps[key]["status"])
+    for key in ("trial_session_create", "course_create", "trial_paper_bind", "paper_bind"):
+        if key not in steps or key in {"trial_session_create", "trial_paper_bind"} and not trial_indexes:
+            continue
+        step = steps[key]
+        if key in {"trial_session_create", "trial_paper_bind"}:
+            selected = [step["requirementProgress"].get(str(index), {}).get("status") for index in trial_indexes]
+            statuses.append(exam_list_aggregate_status(selected) if any(selected) else step["status"])
+        else:
+            statuses.append(step["status"])
+    paper_states = config.get("paperFormBinds") or []
+    paper_statuses = []
+    for index in range(requirement_count):
+        state = paper_states[index] if index < len(paper_states) else config.get("paperFormBind") if index == 0 else {}
+        paper_statuses.append((state or {}).get("status") or "pending")
+    statuses.append(exam_list_aggregate_status(paper_statuses))
+    for session_type, indexes in (("trial", trial_indexes), ("formal", range(requirement_count))):
+        if session_type == "trial" and not trial_indexes:
+            continue
+        import_step = steps.get(f"{session_type}_candidate_import", {})
+        room_step = steps.get("sessions_auto_rooms", {})
+        sub_key = "trialExamStatus" if session_type == "trial" else "formalExamStatus"
+        statuses.append(exam_list_aggregate_status([
+            exam_list_aggregate_status([
+                import_step.get("requirementProgress", {}).get(str(index), {}).get("status", "pending"),
+                room_step.get("requirementProgress", {}).get(str(index), {}).get("subStatus", {}).get(sub_key)
+                or room_step.get("requirementProgress", {}).get(str(index), {}).get("status", "pending"),
+            ])
+            for index in indexes
+        ]))
+    completed = sum(status == "success" for status in statuses)
+    return int(completed * 1000 / len(statuses) + 0.5) / 10 if statuses else sessions[0]["progress"]
+
+
+def exam_list_task_status(sessions):
+    statuses = [session["status"] or "pending" for session in sessions]
+    if statuses and all(status == "success" for status in statuses):
+        return "success"
+    priority = {"failed": 5, "running": 4, "waiting_manual": 3, "success": 2, "pending": 1}
+    return max(statuses, key=lambda status: priority.get(status, 1), default="pending")
+
+
+def exam_list_time(value):
+    text = str(value or "").strip().replace("/", "-")
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return parsed.timestamp()
+
+
+def exam_list_task_ended(sessions, now):
+    formal = [session for session in sessions if session["sessionType"] == "formal"]
+    if not formal:
+        return False
+    for session in formal:
+        end_time = exam_list_time(session["end"])
+        comparison_time = end_time if end_time is not None else exam_list_time(session["start"])
+        if comparison_time is None or comparison_time >= now:
+            return False
+    return True
+
+
+def exam_list_status_snapshot(sessions):
+    config = sessions[0]["config"]
+    snapshot_config = {
+        key: config[key]
+        for key in ("paperFormBinds", "paperFormBind", "mockExamEnabled", "courseCount")
+        if key in config
+    }
+    if isinstance(config.get("examRequirements"), list):
+        snapshot_config["examRequirements"] = [
+            {"config": {
+                key: value
+                for key, value in (requirement.get("config") or {}).items()
+                if key in {"mockExamEnabled", "courseCount"}
+            }}
+            for requirement in config["examRequirements"]
+        ]
+    return {
+        "progress": exam_list_display_progress(sessions),
+        "status": exam_list_task_status(sessions),
+        "config": snapshot_config,
+        "steps": sessions[0]["steps"],
+        "sessions": [{
+            "sessionType": session["sessionType"],
+            "requirementIndex": session["requirementIndex"],
+            "session_id": session["session_id"],
+        } for session in sessions],
+    }
 
 
 def status_from_sub_status(step_key, status, sub_status):
@@ -97,6 +405,129 @@ def aggregate_requirement_status(statuses):
     if any(value in {"success", "skipped"} for value in values):
         return "running"
     return "pending"
+
+
+def requirement_count_from_config(config):
+    requirements = config.get("examRequirements") if isinstance(config, dict) else None
+    if isinstance(requirements, list):
+        return len(requirements)
+    return 1
+
+
+def collect_session_ids(value, found=None):
+    found = found if found is not None else set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"sessionId", "formalSessionId", "trialSessionId", "session_id"} and item is not None and str(item):
+                found.add(str(item))
+            else:
+                collect_session_ids(item, found)
+    elif isinstance(value, list):
+        for item in value:
+            collect_session_ids(item, found)
+    return found
+
+
+def reindex_requirement_mapping(value, deleted_index):
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key, item in value.items():
+        try:
+            index = int(key)
+        except (TypeError, ValueError):
+            result[key] = item
+            continue
+        if index == deleted_index:
+            continue
+        result[str(index - 1 if index > deleted_index else index)] = item
+    return result
+
+
+def reindex_requirement_records(value, deleted_index):
+    if not isinstance(value, list):
+        return []
+    ownership_keys = ("requirementIndex", "courseRequirementIndex")
+    index_keys = (*ownership_keys, "sourceRequirementIndex")
+    result = []
+    for item in value:
+        if not isinstance(item, dict):
+            result.append(item)
+            continue
+        indexed_values = []
+        for key in index_keys:
+            try:
+                indexed_values.append((key, int(item[key])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if any(key in ownership_keys and index == deleted_index for key, index in indexed_values):
+            continue
+        updated = dict(item)
+        for key, index in indexed_values:
+            if index > deleted_index:
+                updated[key] = index - 1
+        result.append(updated)
+    return result
+
+
+def reindex_content_task_remarks(value, deleted_index):
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key, item in value.items():
+        parts = str(key).rsplit(":", 1)
+        if len(parts) != 2 or not parts[1].isdigit():
+            result[key] = item
+            continue
+        index = int(parts[1])
+        if index == deleted_index:
+            continue
+        result[f"{parts[0]}:{index - 1 if index > deleted_index else index}"] = item
+    return result
+
+
+def step_summary_from_requirement_progress(requirement_progress, expected_count):
+    if not requirement_progress or expected_count <= 0:
+        return {
+            "status": "pending", "startedAt": None, "completedAt": None, "durationMs": None,
+            "errorMessage": None, "result": {}, "subStatus": {}, "logs": [], "retryCount": 0,
+        }
+    statuses = [
+        (requirement_progress.get(str(index)) or {}).get("status", "pending")
+        for index in range(expected_count)
+    ]
+    status = aggregate_requirement_status(statuses)
+    entries = [
+        requirement_progress[key]
+        for key in sorted(requirement_progress, key=lambda value: int(value) if str(value).isdigit() else 10**9)
+        if isinstance(requirement_progress[key], dict)
+    ]
+    started_values = [item.get("startedAt") for item in entries if item.get("startedAt")]
+    completed_values = [item.get("completedAt") for item in entries if item.get("completedAt")]
+    selected = entries[-1] if entries else {}
+    logs = [log for item in entries for log in (item.get("logs") or [])]
+    started_at = min(started_values) if started_values else None
+    completed_at = max(completed_values) if completed_values and status in {"success", "failed", "skipped"} else None
+    duration_ms = None
+    if started_at and completed_at:
+        start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        duration_ms = max(0, int((end_dt - start_dt).total_seconds() * 1000))
+    error_message = next(
+        (str(item.get("errorMessage")) for item in entries if item.get("errorMessage")),
+        None,
+    )
+    return {
+        "status": status,
+        "startedAt": started_at,
+        "completedAt": completed_at,
+        "durationMs": duration_ms,
+        "errorMessage": error_message,
+        "result": selected.get("result") or {},
+        "subStatus": selected.get("subStatus") or {},
+        "logs": logs,
+        "retryCount": 0,
+    }
 
 
 class TaskStore:
@@ -158,6 +589,12 @@ class TaskStore:
                     logs_json TEXT NOT NULL DEFAULT '[]',
                     requirement_progress_json TEXT NOT NULL DEFAULT '{}',
                     PRIMARY KEY(task_id, step_key),
+                    FOREIGN KEY(task_id) REFERENCES exam_tasks(task_id)
+                );
+                CREATE TABLE IF NOT EXISTS exam_list_status_snapshots (
+                    task_id TEXT PRIMARY KEY,
+                    snapshot_json TEXT NOT NULL,
+                    captured_at TEXT NOT NULL,
                     FOREIGN KEY(task_id) REFERENCES exam_tasks(task_id)
                 );
                 CREATE TABLE IF NOT EXISTS exam_candidates (
@@ -321,6 +758,12 @@ class TaskStore:
         except (TypeError, ValueError):
             requirement_index = 0
         with self.connect() as db:
+            task = db.execute("SELECT config_json FROM exam_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if not task:
+                raise ValueError("Task not found")
+            task_config = loads(task["config_json"], {})
+            if requirement_index >= requirement_count_from_config(task_config):
+                raise ValueError("Requirement index out of range")
             db.execute(
                 """INSERT INTO exam_sessions
                 (task_id, requirement_index, session_type, session_id, name, start_time, end_time,
@@ -429,9 +872,223 @@ class TaskStore:
             db.execute("DELETE FROM exam_custom_fields WHERE task_id=?", (task_id,))
             db.execute("DELETE FROM exam_candidates WHERE task_id=?", (task_id,))
             db.execute("DELETE FROM exam_task_steps WHERE task_id=?", (task_id,))
+            db.execute("DELETE FROM exam_list_status_snapshots WHERE task_id=?", (task_id,))
             db.execute("DELETE FROM exam_sessions WHERE task_id=?", (task_id,))
             db.execute("DELETE FROM exam_tasks WHERE task_id=?", (task_id,))
         return True
+
+    def delete_requirement(self, task_id, requirement_index):
+        try:
+            requirement_index = int(requirement_index)
+        except (TypeError, ValueError):
+            raise ValueError("Requirement index out of range")
+        now = utc_now()
+        with self.connect() as db:
+            task = db.execute("SELECT * FROM exam_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if not task:
+                raise ValueError("Task not found")
+            config = loads(task["config_json"], {})
+            requirements = config.get("examRequirements")
+            if not isinstance(requirements, list) or not requirements:
+                legacy = config.get("examRequirement")
+                requirements = [legacy] if isinstance(legacy, dict) else []
+            if requirement_index < 0 or requirement_index >= len(requirements):
+                raise ValueError("Requirement index out of range")
+
+            step_rows = db.execute(
+                "SELECT * FROM exam_task_steps WHERE task_id=?", (task_id,)
+            ).fetchall()
+            deleted_session_ids = {
+                str(row["session_id"])
+                for row in db.execute(
+                    "SELECT session_id FROM exam_sessions WHERE task_id=? AND requirement_index=?",
+                    (task_id, requirement_index),
+                ).fetchall()
+                if row["session_id"]
+            }
+            for row in step_rows:
+                progress = loads(row["requirement_progress_json"], {})
+                if isinstance(progress, dict):
+                    collect_session_ids(progress.get(str(requirement_index)), deleted_session_ids)
+            session_sync = config.get("sessionSync")
+            if isinstance(session_sync, dict):
+                for session_id, snapshot in (session_sync.get("snapshots") or {}).items():
+                    try:
+                        snapshot_index = int((snapshot or {}).get("requirementIndex"))
+                    except (TypeError, ValueError):
+                        continue
+                    if snapshot_index == requirement_index:
+                        deleted_session_ids.add(str(session_id))
+
+            placeholders = ",".join("?" for _ in deleted_session_ids)
+            deleted_change_set_ids = []
+            if deleted_session_ids:
+                params = [task_id, *sorted(deleted_session_ids)]
+                deleted_change_set_ids = [
+                    row["id"] for row in db.execute(
+                        f"SELECT id FROM candidate_change_sets WHERE task_id=? AND session_id IN ({placeholders})",
+                        params,
+                    ).fetchall()
+                ]
+                for change_set_id in deleted_change_set_ids:
+                    db.execute("DELETE FROM candidate_roster_snapshots WHERE change_set_id=?", (change_set_id,))
+                    db.execute("DELETE FROM candidate_change_items WHERE change_set_id=?", (change_set_id,))
+                db.execute(
+                    f"DELETE FROM candidate_change_sets WHERE task_id=? AND session_id IN ({placeholders})",
+                    params,
+                )
+                db.execute(
+                    f"DELETE FROM exam_custom_fields WHERE task_id=? AND session_id IN ({placeholders})",
+                    params,
+                )
+                db.execute(
+                    f"DELETE FROM exam_candidates WHERE task_id=? AND session_id IN ({placeholders})",
+                    params,
+                )
+
+            db.execute(
+                "DELETE FROM exam_sessions WHERE task_id=? AND requirement_index=?",
+                (task_id, requirement_index),
+            )
+            db.execute(
+                "UPDATE exam_sessions SET requirement_index=-requirement_index-1 WHERE task_id=? AND requirement_index>?",
+                (task_id, requirement_index),
+            )
+            db.execute(
+                "UPDATE exam_sessions SET requirement_index=-requirement_index-2, updated_at=? WHERE task_id=? AND requirement_index<0",
+                (now, task_id),
+            )
+
+            remaining_items = [item for index, item in enumerate(requirements) if index != requirement_index]
+            remaining_requirements = [
+                {**item, "order": index + 1} if isinstance(item, dict) else item
+                for index, item in enumerate(remaining_items)
+            ]
+            next_config = dict(config)
+            if requirement_index == 0 and remaining_requirements:
+                primary_config = remaining_requirements[0].get("config") if isinstance(remaining_requirements[0], dict) else None
+                if isinstance(primary_config, dict):
+                    next_config.update(primary_config)
+            next_config["examRequirements"] = remaining_requirements
+            next_config["examRequirement"] = remaining_requirements[0] if remaining_requirements else None
+            next_config["examListSyncPreviewCache"] = None
+            next_config["sessionSyncPreviewCache"] = None
+
+            for plural_key, legacy_key in (
+                ("paperFormBinds", "paperFormBind"),
+                ("paperBindReminders", "paperBindReminder"),
+            ):
+                values = config.get(plural_key)
+                if isinstance(values, list):
+                    remaining_values = [item for index, item in enumerate(values) if index != requirement_index]
+                    next_config[plural_key] = remaining_values
+                    next_config[legacy_key] = remaining_values[0] if remaining_values else {}
+                elif requirement_index == 0 and legacy_key in config:
+                    next_config[legacy_key] = {}
+
+            next_config["contentTaskRemarks"] = reindex_content_task_remarks(
+                config.get("contentTaskRemarks"), requirement_index
+            )
+            for history_key in ("projectSourceChangeHistory", "examRequirementChangeHistory"):
+                if history_key in config:
+                    next_config[history_key] = reindex_requirement_records(config.get(history_key), requirement_index)
+
+            for session_key in ("sessionPersonalById", "candidateChangePending"):
+                value = config.get(session_key)
+                if isinstance(value, dict):
+                    next_config[session_key] = {
+                        key: item for key, item in value.items() if str(key) not in deleted_session_ids
+                    }
+
+            if isinstance(session_sync, dict):
+                next_session_sync = dict(session_sync)
+                snapshots = {}
+                for session_id, snapshot in (session_sync.get("snapshots") or {}).items():
+                    if str(session_id) in deleted_session_ids:
+                        continue
+                    updated_snapshot = dict(snapshot) if isinstance(snapshot, dict) else snapshot
+                    if isinstance(updated_snapshot, dict):
+                        try:
+                            snapshot_index = int(updated_snapshot.get("requirementIndex"))
+                        except (TypeError, ValueError):
+                            snapshot_index = None
+                        if snapshot_index == requirement_index:
+                            continue
+                        if snapshot_index is not None and snapshot_index > requirement_index:
+                            updated_snapshot["requirementIndex"] = snapshot_index - 1
+                    snapshots[session_id] = updated_snapshot
+                next_session_sync["snapshots"] = snapshots
+                next_session_sync["history"] = reindex_requirement_records(
+                    session_sync.get("history"), requirement_index
+                )
+                next_config["sessionSync"] = next_session_sync
+
+            message_center = config.get("messageCenter")
+            if isinstance(message_center, dict):
+                next_message_center = dict(message_center)
+                next_message_center["requirements"] = reindex_requirement_mapping(
+                    message_center.get("requirements"), requirement_index
+                )
+                candidate_changes = message_center.get("candidateChanges")
+                if isinstance(candidate_changes, dict):
+                    next_message_center["candidateChanges"] = {
+                        key: item for key, item in candidate_changes.items() if key not in deleted_change_set_ids
+                    }
+                next_config["messageCenter"] = next_message_center
+            project_card = config.get("projectCard")
+            if isinstance(project_card, dict):
+                next_config["projectCard"] = {**project_card, "updatedAt": now}
+
+            expected_count = len(remaining_requirements)
+            for row in step_rows:
+                progress = loads(row["requirement_progress_json"], {})
+                if not isinstance(progress, dict) or not progress:
+                    if row["step_key"] == "session_change":
+                        result = loads(row["result_json"], {})
+                        result_index = result.get("requirementIndex") if isinstance(result, dict) else None
+                        try:
+                            result_index = int(result_index)
+                        except (TypeError, ValueError):
+                            result_index = None
+                        if result_index == requirement_index:
+                            db.execute(
+                                """UPDATE exam_task_steps SET status='pending', started_at=NULL, completed_at=NULL,
+                                duration_ms=NULL, error_message=NULL, retry_count=0, result_json='{}',
+                                sub_status_json='{}', logs_json='[]' WHERE task_id=? AND step_key=?""",
+                                (task_id, row["step_key"]),
+                            )
+                        elif result_index is not None and result_index > requirement_index:
+                            result["requirementIndex"] = result_index - 1
+                            result["history"] = reindex_requirement_records(result.get("history"), requirement_index)
+                            db.execute(
+                                "UPDATE exam_task_steps SET result_json=? WHERE task_id=? AND step_key=?",
+                                (json.dumps(result, ensure_ascii=False), task_id, row["step_key"]),
+                            )
+                    continue
+                reindexed_progress = reindex_requirement_mapping(progress, requirement_index)
+                summary = step_summary_from_requirement_progress(reindexed_progress, expected_count)
+                db.execute(
+                    """UPDATE exam_task_steps SET status=?, started_at=?, completed_at=?, duration_ms=?,
+                    error_message=?, retry_count=?, result_json=?, sub_status_json=?, logs_json=?,
+                    requirement_progress_json=? WHERE task_id=? AND step_key=?""",
+                    (
+                        summary["status"], summary["startedAt"], summary["completedAt"], summary["durationMs"],
+                        summary["errorMessage"], summary["retryCount"],
+                        json.dumps(summary["result"], ensure_ascii=False),
+                        json.dumps(summary["subStatus"], ensure_ascii=False),
+                        json.dumps(summary["logs"], ensure_ascii=False),
+                        json.dumps(reindexed_progress, ensure_ascii=False),
+                        task_id, row["step_key"],
+                    ),
+                )
+
+            db.execute("DELETE FROM exam_list_status_snapshots WHERE task_id=?", (task_id,))
+            db.execute(
+                "UPDATE exam_tasks SET config_json=?, updated_at=? WHERE task_id=?",
+                (json.dumps(next_config, ensure_ascii=False), now, task_id),
+            )
+            self._refresh_task(db, task_id)
+        return self.get_task(task_id)
 
     def upsert_custom_fields(self, task_id, session_id, fields):
         now = utc_now()
@@ -690,6 +1347,11 @@ class TaskStore:
             if not current:
                 raise ValueError("Task step not found")
 
+            task_row = db.execute("SELECT config_json FROM exam_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if not task_row:
+                raise ValueError("Task not found")
+            task_config = loads(task_row["config_json"], {})
+
             requirement_progress = loads(current["requirement_progress_json"], {})
             normalized_requirement_index = None
             if requirement_index is not None:
@@ -697,6 +1359,8 @@ class TaskStore:
                     normalized_requirement_index = max(int(requirement_index), 0)
                 except (TypeError, ValueError):
                     normalized_requirement_index = 0
+                if normalized_requirement_index >= requirement_count_from_config(task_config):
+                    raise ValueError("Requirement index out of range")
 
             sub_status = result.get("subStatus") or loads(current["sub_status_json"], {})
             if normalized_requirement_index is not None:
@@ -725,8 +1389,6 @@ class TaskStore:
                     "subStatus": requirement_sub_status,
                     "logs": requirement_logs,
                 }
-                task_row = db.execute("SELECT config_json FROM exam_tasks WHERE task_id=?", (task_id,)).fetchone()
-                task_config = loads(task_row["config_json"], {}) if task_row else {}
                 requirements = task_config.get("examRequirements")
                 expected_count = len(requirements) if isinstance(requirements, list) and requirements else normalized_requirement_index + 1
                 expected_count = max(expected_count, normalized_requirement_index + 1, 1)
@@ -818,7 +1480,65 @@ class TaskStore:
                 rows = db.execute("SELECT * FROM exam_tasks WHERE hidden_at IS NULL ORDER BY updated_at DESC").fetchall()
         return [self._task_summary(row) for row in rows]
 
-    def list_sessions(self):
+    def list_sessions(self, now=None):
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT s.*, t.project_name, t.source_account, t.owner_email,
+                          t.progress AS task_progress,
+                          t.config_json
+                FROM exam_sessions s JOIN exam_tasks t ON t.task_id=s.task_id
+                ORDER BY s.updated_at DESC"""
+            ).fetchall()
+            step_rows = db.execute(
+                """SELECT task_id, step_key, status, requirement_progress_json
+                FROM exam_task_steps WHERE step_key IN (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ORDER BY task_id, step_key""",
+                EXAM_LIST_STEP_KEYS,
+            ).fetchall()
+            saved_snapshots = {
+                row["task_id"]: loads(row["snapshot_json"], None)
+                for row in db.execute("SELECT task_id, snapshot_json FROM exam_list_status_snapshots")
+            }
+            steps_by_task = {}
+            for row in step_rows:
+                summary = exam_list_step_summary(row)
+                steps_by_task.setdefault(row["task_id"], []).append(summary)
+            sessions = [self._session(row) for row in rows]
+            sessions_by_task = {}
+            for session in sessions:
+                sessions_by_task.setdefault(session["taskId"], []).append(session)
+            comparison_time = (now or datetime.now().astimezone()).timestamp()
+            for task_id, task_sessions in sessions_by_task.items():
+                compact_sessions = [{
+                    **session,
+                    "config": exam_list_config_summary(session["config"]),
+                    "steps": steps_by_task.get(task_id, []),
+                } for session in task_sessions]
+                snapshot = exam_list_status_snapshot(compact_sessions)
+                saved = saved_snapshots.get(task_id)
+                if exam_list_task_ended(task_sessions, comparison_time):
+                    if isinstance(saved, dict) and isinstance(saved.get("sessions"), list) and isinstance(saved.get("steps"), list):
+                        snapshot = saved
+                    else:
+                        db.execute(
+                            "INSERT OR IGNORE INTO exam_list_status_snapshots VALUES (?, ?, ?)",
+                            (task_id, json.dumps(snapshot, ensure_ascii=False), utc_now()),
+                        )
+                    for session in task_sessions:
+                        session["statusSnapshot"] = snapshot
+                elif saved != snapshot:
+                    db.execute(
+                        """INSERT INTO exam_list_status_snapshots VALUES (?, ?, ?)
+                        ON CONFLICT(task_id) DO UPDATE SET
+                        snapshot_json=excluded.snapshot_json, captured_at=excluded.captured_at""",
+                        (task_id, json.dumps(snapshot, ensure_ascii=False), utc_now()),
+                    )
+        return [
+            {**session, "config": exam_list_response_config_summary(session["config"])}
+            for session in sessions
+        ]
+
+    def list_sessions_full(self):
         with self.connect() as db:
             rows = db.execute(
                 """SELECT s.*, t.project_name, t.source_account, t.owner_email, t.progress AS task_progress,
@@ -848,13 +1568,51 @@ class TaskStore:
         result["customFields"] = self.list_custom_fields(task_id)
         return result
 
+    def get_tasks(self, task_ids):
+        details = []
+        seen = set()
+        for task_id in task_ids or []:
+            normalized = str(task_id or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            task = self.get_task(normalized)
+            if task:
+                details.append(task)
+        return details
+
     def _task_summary(self, row):
         config = loads(row["config_json"], {})
         project_card = config.get("projectCard") if isinstance(config.get("projectCard"), dict) else {}
+        operation_workflow_archive_snapshot = (
+            config.get("operationWorkflowArchiveSnapshot")
+            if isinstance(config.get("operationWorkflowArchiveSnapshot"), dict)
+            else {}
+        )
         requirements = config.get("examRequirements")
         if not isinstance(requirements, list) or not requirements:
             legacy_requirement = config.get("examRequirement")
             requirements = [legacy_requirement] if isinstance(legacy_requirement, dict) else []
+        psychological_requirement_indexes = []
+        for index, requirement in enumerate(requirements):
+            if not isinstance(requirement, dict):
+                continue
+            config_selection = requirement.get("configSelection")
+            values = config_selection.get("values") if isinstance(config_selection, dict) else None
+            if (
+                isinstance(values, dict)
+                and values.get("requirementTemplate") == "psychological_assessment"
+            ):
+                psychological_requirement_indexes.append(index)
+        if not psychological_requirement_indexes and len(requirements) == 1:
+            fanwei_source = config.get("fanweiSource")
+            raw = fanwei_source.get("raw") if isinstance(fanwei_source, dict) else None
+            raw_fields = raw.get("fields") if isinstance(raw, dict) else None
+            if (
+                isinstance(raw_fields, dict)
+                and raw_fields.get("考核内容是否仅性格测试") == "是"
+            ):
+                psychological_requirement_indexes.append(0)
         exam_name_candidates = [config.get("examName")]
         for requirement in requirements:
             fields = requirement.get("fields") if isinstance(requirement.get("fields"), dict) else {}
@@ -869,6 +1627,8 @@ class TaskStore:
             "hiddenAt": row["hidden_at"] if "hidden_at" in row.keys() else None,
             "customerName": str(config.get("customerName") or ""),
             "projectCode": str(config.get("projectCode") or ""),
+            "psychologicalRequirementIndexes": psychological_requirement_indexes,
+            "operationArchiveActuals": operation_archive_actuals_summary(config),
             "projectCard": {
                 "createdAt": str(project_card.get("createdAt") or ""),
                 "updatedAt": str(project_card.get("updatedAt") or ""),
@@ -876,12 +1636,14 @@ class TaskStore:
                 "sourceType": str(project_card.get("sourceType") or ""),
                 "sourceKey": str(project_card.get("sourceKey") or ""),
             } if project_card else {},
+            "operationWorkflowArchiveSnapshot": operation_workflow_archive_snapshot,
             "currentStage": row["current_stage"], "progress": row["progress"],
             "createdAt": row["created_at"], "updatedAt": row["updated_at"],
         }
 
     def _session(self, row):
         data = row_dict(row)
+        config = loads(data.get("config_json"), {})
         return {
             "taskId": data["task_id"], "sessionType": data["session_type"],
             "requirementIndex": int(data.get("requirement_index") or 0),
@@ -893,7 +1655,7 @@ class TaskStore:
             "sourceAccount": data.get("source_account", ""),
             "ownerEmail": data.get("owner_email", ""),
             "progress": data.get("task_progress", 0),
-            "config": loads(data.get("config_json"), {}),
+            "config": config,
         }
 
     def _step(self, row):
@@ -975,8 +1737,12 @@ def main():
         result = store.list_tasks(True)
     elif action == "list_sessions":
         result = store.list_sessions()
+    elif action == "list_sessions_full":
+        result = store.list_sessions_full()
     elif action == "get":
         result = store.get_task(payload.get("taskId"))
+    elif action == "get_many":
+        result = store.get_tasks(payload.get("taskIds") or [])
     elif action == "update_step":
         result = store.update_step(
             payload.get("taskId"), payload.get("stepKey"), payload.get("status"), payload.get("result"),
@@ -991,6 +1757,8 @@ def main():
         result = {"hidden": store.hide_task(payload.get("taskId"))}
     elif action == "delete":
         result = {"deleted": store.delete_task(payload.get("taskId"))}
+    elif action == "delete_requirement":
+        result = store.delete_requirement(payload.get("taskId"), payload.get("requirementIndex"))
     elif action == "upsert_session":
         result = store.upsert_session(
             payload.get("taskId"), payload.get("sessionType"), payload.get("session") or {},

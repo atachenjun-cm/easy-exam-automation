@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import {
+  FANWEI_LOCAL_HELPER_SERVER_FILES,
   FANWEI_LOCAL_HELPER_UPDATE_SCHEMA_VERSION,
   FANWEI_LOCAL_HELPER_UPDATE_STRATEGY,
 } from "./fanwei_local_helper_version.mjs";
@@ -24,12 +25,20 @@ const execFileAsync = promisify(execFile);
 const UPDATE_PACKAGE_PATH = "/api/fanwei/helper-update-package";
 const UPDATE_PACKAGE_MAX_BYTES = 180 * 1024 * 1024;
 const UPDATE_DOWNLOAD_TIMEOUT_MS = 120_000;
-const REQUIRED_SERVER_FILES = [
-  "fanwei_local_helper_cli.mjs",
-  "fanwei_local_helper.mjs",
-  "fanwei_local_helper_update.mjs",
-  "fanwei_local_helper_version.mjs",
-];
+
+function powershellLiteral(value = "") {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+export function fanweiHelperWindowsExpandArchiveArgs(packagePath, outputDir) {
+  return [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    `Expand-Archive -LiteralPath ${powershellLiteral(packagePath)} -DestinationPath ${powershellLiteral(outputDir)} -Force`,
+  ];
+}
 
 export class FanweiHelperUpdateError extends Error {
   constructor(code, message, status = 400) {
@@ -128,7 +137,7 @@ export async function validateStagedFanweiHelperPackage(packageDir, {
     throw updateError("helper_update_manifest_mismatch", "助手更新包与当前系统或目标版本不匹配。", 422);
   }
   const serverDir = path.join(packageDir, "server");
-  for (const fileName of REQUIRED_SERVER_FILES) {
+  for (const fileName of FANWEI_LOCAL_HELPER_SERVER_FILES) {
     try {
       await access(path.join(serverDir, fileName));
     } catch {
@@ -140,15 +149,11 @@ export async function validateStagedFanweiHelperPackage(packageDir, {
 
 async function defaultExtractPackage({ packagePath, outputDir, platform }) {
   if (platform === "win32") {
-    await execFileAsync("powershell.exe", [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-Command",
-      "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
-      packagePath,
-      outputDir,
-    ], { timeout: UPDATE_DOWNLOAD_TIMEOUT_MS, windowsHide: true });
+    await execFileAsync(
+      "powershell.exe",
+      fanweiHelperWindowsExpandArchiveArgs(packagePath, outputDir),
+      { timeout: UPDATE_DOWNLOAD_TIMEOUT_MS, windowsHide: true },
+    );
     return;
   }
   await execFileAsync("unzip", ["-q", packagePath, "-d", outputDir], {

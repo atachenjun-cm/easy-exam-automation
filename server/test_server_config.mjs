@@ -4,6 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { FANWEI_LOCAL_HELPER_SERVER_FILES } from "./fanwei_local_helper_version.mjs";
+
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const serverSource = fs.readFileSync(path.join(rootDir, "server", "easy_exam_server.mjs"), "utf8");
 const requirementApiSource = fs.readFileSync(path.join(rootDir, "server", "requirement_request_api.mjs"), "utf8");
@@ -14,6 +16,25 @@ test("content email reads the same configured requirement database as the requir
     serverSource,
     /const requirementDbPath = path\.resolve\(\s*rootDir,\s*process\.env\.REQUIREMENT_DB_PATH \|\| path\.join\(rootDir, "\.easy_exam_runtime", "requirement_requests\.sqlite3"\),?\s*\);/,
   );
+});
+
+test("project workflow summaries batch-load only visible task details", () => {
+  const taskListHandler = serverSource.slice(
+    serverSource.indexOf("async function handleTaskList"),
+    serverSource.indexOf("async function handlePlatformApiLogs"),
+  );
+  assert.ok(taskListHandler.includes('runTaskState("get_many"'));
+  assert.ok(taskListHandler.includes('requestUrl.searchParams.get("taskIds")'));
+  assert.ok(taskListHandler.includes("taskIds: workflowTasks.map((task) => task.taskId)"));
+  assert.equal(taskListHandler.includes('runTaskState("get", { taskId: task.taskId })'), false);
+});
+
+test("public assistant keeps full session config while the exam list uses compact sessions", () => {
+  const handler = serverSource.slice(
+    serverSource.indexOf("async function handlePublicExamAssistantChat"),
+    serverSource.indexOf("async function findCachedMonitorAccounts"),
+  );
+  assert.ok(handler.includes('listSessions: () => runTaskState("list_sessions_full")'));
 });
 
 test("server wires operation collaboration and content email endpoints", () => {
@@ -40,7 +61,7 @@ test("project workflow exposes the operation content configuration draft", () =>
 
 test("Fanwei helper downloads include the shared task-send evidence module", () => {
   assert.ok(
-    serverSource.includes('"operation_task_send_record.mjs"'),
+    FANWEI_LOCAL_HELPER_SERVER_FILES.includes("operation_task_send_record.mjs"),
     "operation_task_send_record.mjs is not included in helper downloads",
   );
 });
@@ -149,7 +170,11 @@ test("operation batch reconciliation independently recovers publication and sche
   assert.ok(handler.includes('path: "/operation-batch/reconcile"'));
   assert.ok(handler.includes('currentOperationBatch.scheduleStatus !== "synced"'));
   assert.ok(handler.includes("if (!followUpNeeded)"));
-  assert.ok(handler.includes('code: "OPERATION_BATCH_ACTUAL_NAME_MISSING"'));
+  assert.ok(handler.includes("existingOperationBatchCode && !operationBatchCodeIsValid(existingOperationBatchCode)"));
+  assert.ok(handler.includes("syncOnly: !existingOperationBatchCode"));
+  assert.ok(handler.includes("publishRequired: Boolean(existingOperationBatchCode)"));
+  assert.ok(handler.includes("syncOnly: preparation.syncOnly"));
+  assert.ok(handler.includes("const syncOnlyCompleted = preparation.syncOnly === true"));
   assert.ok(handler.includes("operationBatchCode: existingOperationBatchCode"));
   assert.ok(handler.includes("desired: operationBatchDesiredForLocalHelper(preparation.desired)"));
   assert.ok(handler.includes("publishAfterCreate: false"));
@@ -204,19 +229,10 @@ test("server exposes authenticated prebuilt Fanwei helper installer downloads", 
   assert.ok(serverSource.includes("function requestOrigin(req)"));
   assert.ok(serverSource.includes("function helperPackageConfig(origin = \"\")"));
   assert.ok(serverSource.includes("async function dynamicFanweiHelperPackagePath"));
+  assert.ok(serverSource.includes("async function dynamicFanweiHelperUpdatePackagePath"));
   assert.ok(serverSource.includes("async function overlayLatestFanweiHelperFiles"));
-  for (const helperFile of [
-    "operation_batch_update_runner.mjs",
-    "operation_personnel_console_runner.mjs",
-    "operation_archive_runner.mjs",
-    "content_email_directory.mjs",
-    "operation_batch.mjs",
-    "operation_content.mjs",
-    "operation_task_send_record.mjs",
-    "operation_content_runner.mjs",
-  ]) {
-    assert.ok(serverSource.includes(`"${helperFile}"`), `${helperFile} is not included in helper downloads`);
-  }
+  assert.ok(serverSource.includes("async function overlayLatestFanweiHelperServerFiles"));
+  assert.ok(serverSource.includes("FANWEI_LOCAL_HELPER_SERVER_FILES"));
   assert.ok(serverSource.includes("await extractFanweiHelperPackageZip(packagePath, tempRoot)"));
   assert.ok(serverSource.includes("YIKAO_CONSOLE_ORIGINS=${origins}"));
   assert.ok(serverSource.includes('"http://127.0.0.1:8765"'));
@@ -714,6 +730,7 @@ test("created courses and paper retry target the selected requirement", () => {
     serverSource.indexOf("async function runScheduledPaperBindingOnce"),
   );
   assert.ok(paperBindRunner.includes("examDate: formalSession?.start"));
+  assert.ok(paperBindRunner.includes("examName: formalSession?.name"));
 });
 
 test("monitor account export uses monitor session URL instead of exam URL", () => {
@@ -860,7 +877,8 @@ test("operation archive exposes the screenshot and sends it to the local helper 
   assert.ok(serverSource.includes("async function handleOperationArchiveScreenshot"));
   assert.ok(serverSource.includes("async function handleOperationArchiveEvidenceRefresh"));
   assert.ok(serverSource.includes("async function refreshOperationArchiveActuals"));
-  assert.ok(serverSource.includes("refreshOperationArchiveEvidenceDraft(task, { actuals })"));
+  assert.ok(serverSource.includes("assessment: operationArchiveAssessmentFromPapers(task)"));
+  assert.ok(serverSource.includes("refreshOperationArchiveEvidenceDraft(activeTask, { actuals })"));
   assert.ok(serverSource.includes("operationArchiveEvidenceInFlight"));
   assert.ok(serverSource.includes("operation_archive_evidence_refreshed"));
   assert.ok(serverSource.includes("actuals: { ...actuals, refreshedAt: now }"));
@@ -983,10 +1001,20 @@ test("candidate import configures selected import fields as visible personal fie
 });
 
 test("candidate personal field setup reads original session config and updates by PUT", () => {
+  const readFn = serverSource.slice(
+    serverSource.indexOf("async function getTenantSessionDetail"),
+    serverSource.indexOf("async function ensureSessionCustomPersonalFields"),
+  );
   const setupFn = serverSource.slice(
     serverSource.indexOf("async function getTenantSessionDetail"),
     serverSource.indexOf("async function handleCandidateTemplate"),
   );
+  assert.ok(readFn.includes('new URL(`/tenant/api/session/${encodeURIComponent(sessionId)}/`, base)'));
+  assert.ok(readFn.includes('source: "detail"'));
+  assert.ok(readFn.includes('new URL("/tenant/api/session/", base)'));
+  assert.ok(readFn.includes('listUrl.searchParams.set("session_ids", sessionId)'));
+  assert.ok(readFn.includes('source: "list"'));
+  assert.ok(readFn.indexOf("detailUrl") < readFn.indexOf("listUrl"));
   assert.ok(setupFn.includes("getTenantSessionDetail(login, sessionId)"));
   assert.ok(setupFn.includes("获取原场次配置"));
   assert.ok(setupFn.includes("buildSessionPersonalPutPayload"));

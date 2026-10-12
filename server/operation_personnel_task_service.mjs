@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { projectImplementationPersonByEmail } from "./content_email_directory.mjs";
+
 import {
   buildOperationPersonnelTaskDraft,
   buildOperationPersonnelTaskStatus,
@@ -178,8 +180,8 @@ function canAccess(task, actor = {}) {
     && text(task.ownerEmail).toLowerCase() === text(actor.email).toLowerCase();
 }
 
-function assertTask(task, actor) {
-  if (!task || !canAccess(task, actor)) {
+function assertTask(task, actor, canAccessTask = canAccess) {
+  if (!task || !canAccessTask(task, actor)) {
     throw serviceError("PERSONNEL_TASK_NOT_FOUND", 404, "人员任务不存在");
   }
   return task;
@@ -322,6 +324,12 @@ export function operationPersonnelInformationMissing(draft = {}, options = {}) {
   const personnel = draft.personnel || {};
   const dates = draft.dates || {};
   const recipients = draft.recipients || {};
+  const recipientPeople = Array.isArray(recipients.toPeople) && recipients.toPeople.length
+    ? recipients.toPeople
+    : (Array.isArray(recipients.toNames) ? recipients.toNames : []).map((name) => ({
+        group: recipients.toGroup,
+        name,
+      }));
   const requirements = operationPersonnelRequirementsFromPersonnel(
     personnel,
     draft.requirementOverrides,
@@ -339,9 +347,9 @@ export function operationPersonnelInformationMissing(draft = {}, options = {}) {
     ["人员落实开始日期", /^\d{4}-\d{2}-\d{2}$/.test(text(dates.start))],
     ["人员落实结束日期", /^\d{4}-\d{2}-\d{2}$/.test(text(dates.end))],
     ["人员名单提交日期", /^\d{4}-\d{2}-\d{2}$/.test(text(dates.nameListDue))],
-    ["收件项目部", Boolean(text(recipients.toGroup))],
-    ["收件人项目经理", Array.isArray(recipients.toNames)
-      && recipients.toNames.length === 1 && Boolean(text(recipients.toNames[0]))],
+    ["收件人", recipientPeople.length > 0 && recipientPeople.every((person) => (
+      Boolean(text(person?.group || person?.department)) && Boolean(text(person?.name))
+    ))],
     ["固定抄送部门", Array.isArray(recipients.ccGroups)
       && recipients.ccGroups.length === 2
       && recipients.ccGroups[0] === "考站管理&质量控制部"
@@ -425,6 +433,32 @@ function editableDraft(base, input = {}, options = {}) {
   const dates = input.draft?.dates || input.dates || {};
   for (const key of ["start", "end", "nameListDue"]) {
     if (Object.hasOwn(dates, key)) set(`dates.${key}`, text(dates[key]));
+  }
+  const recipients = input.draft?.recipients || input.recipients;
+  if (recipients && Object.hasOwn(recipients, "toPeople")) {
+    if (!Array.isArray(recipients.toPeople)) {
+      throw serviceError("PERSONNEL_RECIPIENT_INVALID", 400, "人员任务收件人格式无效");
+    }
+    const selected = [];
+    const seen = new Set();
+    for (const item of recipients.toPeople) {
+      const email = text(item?.email).toLowerCase();
+      const person = projectImplementationPersonByEmail(email);
+      if (!person) {
+        throw serviceError(
+          "PERSONNEL_RECIPIENT_INVALID",
+          400,
+          `人员任务收件人不在项目实施部门目录中：${email || "空"}`,
+        );
+      }
+      if (seen.has(person.email)) continue;
+      seen.add(person.email);
+      selected.push({ group: person.group, name: person.name, email: person.email });
+    }
+    const groups = [...new Set(selected.map((person) => person.group))];
+    set("recipients.toPeople", selected);
+    set("recipients.toGroup", groups.length === 1 ? groups[0] : "");
+    set("recipients.toNames", selected.map((person) => person.name));
   }
   const requirements = input.draft?.requirements || input.requirements || {};
   const requirementEntries = Array.isArray(requirements)
@@ -674,6 +708,7 @@ function operationPersonnelAttemptInstruction(attempt = {}, checkpoints = {}) {
     environment: attempt.environment,
     kind: attempt.kind,
     batch: attempt.target?.batch || {},
+    recipients: structuredClone(attempt.taskSnapshot?.recipients || {}),
     target: attempt.target,
     managedSchedules: managedScheduleProjection(attempt.managedSchedules),
     displaySchedules: structuredClone(attempt.displaySchedules || []),
@@ -699,6 +734,7 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
     environment: rawEnvironment = "",
     activeAttemptIds = new Set(),
     previewBrowserSessions = new Map(),
+    canAccessTask = canAccess,
     now = Date.now,
     makeToken = randomUUID,
     makeAttemptId = randomUUID,
@@ -787,7 +823,7 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
   }
 
   async function readAuthorized(taskId, actor) {
-    return assertTask(await readTask(taskId), actor);
+    return assertTask(await readTask(taskId), actor, canAccessTask);
   }
 
   async function readRequirementFor(task) {
@@ -1062,6 +1098,7 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
             ...(knownResendDirectoryProbeSummary
               ? { directoryProbeSummary: knownResendDirectoryProbeSummary }
               : {}),
+            recipients: draft.recipients,
           });
       browserSession = inspected.browserSession;
       snapshot = normalizeOperationPersonnelSnapshot(inspected.snapshot);
@@ -1106,10 +1143,11 @@ export function createOperationPersonnelTaskService(dependencies = {}) {
         const fullSnapshot = normalizeOperationPersonnelSnapshot(await inspectRetainedSession(
           browserSession,
           {
-          environment,
-          batch: draft.batch,
-          batchCode: draft.batch.code,
-          directoryProbeSummary,
+            environment,
+            batch: draft.batch,
+            batchCode: draft.batch.code,
+            recipients: draft.recipients,
+            directoryProbeSummary,
           },
         ));
         const drift = operationSnapshotChanges(

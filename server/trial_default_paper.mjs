@@ -352,12 +352,12 @@ async function verifyDefaultTrialPaperBinding({ login, apiBase, binding, paper, 
       };
     }
   } catch (error) {
-    emitLog("[试考默认卷] 场次试卷列表回查失败，继续检查场次详情", "warning");
+    emitLog("[试考默认卷] 场次试卷列表回查失败，继续检查场次列表", "warning");
   }
 
-  const detailPath = `/tenant/api/session/${encodeURIComponent(binding.sessionId)}/`;
-  const detailPayload = await requestJson(login, `${apiBase}${detailPath}`, { method: "GET" }, `回查试考场次详情 ${binding.sessionId}`);
-  const courses = extractSessionCourses(detailPayload, binding.sessionId);
+  const listPath = `/tenant/api/session/?session_ids=${encodeURIComponent(binding.sessionId)}`;
+  const listPayload = await requestJson(login, `${apiBase}${listPath}`, { method: "GET" }, `回查试考场次列表 ${binding.sessionId}`);
+  const courses = extractSessionCourses(listPayload, binding.sessionId);
   const matchedCourse = courses.find((candidate) => candidate.code === binding.courseCode || (!candidate.code && candidate.name === DEFAULT_TRIAL_COURSE_NAME));
   const matchedPaper = (matchedCourse?.papers || []).find((candidate) => trialPaperMatches(candidate, expectedCodes));
   if (matchedPaper) {

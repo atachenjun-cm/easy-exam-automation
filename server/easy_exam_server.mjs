@@ -15,10 +15,11 @@ import {
   bindPapersToFormalSession,
   detectSessionPaperBindings,
   fetchSessionSubjectPaperSnapshot,
+  fetchTenantCoursesForSession,
 } from "./paper_binding.mjs";
 import { millisecondsUntilNextHour } from "./paper_bind_scheduler.mjs";
 import { fetchPaperUnitInfo } from "./paper_unit_info.mjs";
-import { bindDefaultTrialPaperToSession } from "./trial_default_paper.mjs";
+import { bindDefaultTrialPaperToSession, DEFAULT_TRIAL_COURSE_CODE } from "./trial_default_paper.mjs";
 import {
   ensureFormalCoursesCreated,
   normalizeCourseRecords,
@@ -26,8 +27,10 @@ import {
 import { prepareCandidatesForCourseImport } from "./candidate_course_assignment.mjs";
 import { buildTenantCandidateEntries } from "./candidate_tenant_payload.mjs";
 import {
+  buildAppendOnlyCandidateRoster,
   buildCandidateChangePreview,
   buildCandidateChangeEditorFields,
+  buildTrialCandidateSyncPlan,
   candidateChangeFieldMappings,
   candidateChangeImpact,
   candidateChangeSessionAllowsChanges,
@@ -38,10 +41,14 @@ import {
   normalizeCandidateRoster,
 } from "./candidate_change.mjs";
 import { assignAddedCandidatesToExistingRooms } from "./candidate_change_room_assignment.mjs";
+import { clearCandidateChangeRooms } from "./candidate_change_room_cleanup.mjs";
+import { buildCandidateChangeTouchRoster } from "./candidate_change_touch.mjs";
 import {
   normalizeCustomPersonalFieldNames,
   normalizeCustomPersonalFieldRequests,
   normalizeImportPersonalFieldRequests,
+  resolveSessionPersonalSnapshot,
+  setSessionPersonalSnapshot,
   syncImportPersonalFields,
 } from "./candidate_personal_fields.mjs";
 import { isFrontendRoute, webContentType } from "./frontend_routes.mjs";
@@ -54,7 +61,11 @@ import {
   readAssistantQueryLogs,
   readPlatformApiLogs,
 } from "./platform_api_audit.mjs";
-import { isTenantEmptyPageError } from "./tenant_pagination.mjs";
+import {
+  collectTenantApiKeySecrets,
+  createTenantApiKeyResponseReplacer,
+} from "./tenant_api_key_redaction.mjs";
+import { classifyTenantSingleScoreError, isTenantEmptyPageError } from "./tenant_pagination.mjs";
 import {
   buildAuthContext,
   buildLoginCookie,
@@ -64,8 +75,12 @@ import {
   deleteLocalUser,
   deleteSession,
   deleteSessionsForEmail,
+  FEATURE_PERMISSION_MESSAGE_CENTER_DIRECT_SEND,
   getSessionUser,
+  groupLeaderForMember,
+  hasFeaturePermission,
   isAdminUser,
+  memberAccountProfileAccess,
   normalizeEmail,
   parseCookies,
   restoreSessions,
@@ -73,10 +88,23 @@ import {
   serializeSessions,
   shouldAllowInternalWechatCollectorRequest,
   shouldAllowWithoutAuth,
+  setMemberAccountProfileAccess,
   updateLocalUser,
   upsertLocalUser,
+  userFeaturePermissions,
   verifyLogin,
 } from "./local_auth.mjs";
+import {
+  buildMessageCenterRoster,
+  createMessageCenterClient,
+  ensureMessageCenterTemplate,
+  messageCenterBatchUrl,
+  messageCenterConfigFromEnv,
+  messageCenterOperationBatch,
+  messageCenterPreparationFingerprint,
+  messageCenterTemplatesForPreparation,
+  waitForMessageCenterImport,
+} from "./message_center.mjs";
 import { handleRequirementRequest } from "./requirement_request_api.mjs";
 import {
   acquireOperationBatchCreation,
@@ -86,6 +114,7 @@ import {
   initializeOperationBatchDefaults,
   normalizeOperationProjectDepartment,
   operationBatchCodeIsValid,
+  operationProjectDepartmentForManager,
   releaseOperationBatchCreation,
 } from "./operation_batch.mjs";
 import { defaultOperationBatchName, resolveOperationBatchName } from "./operation_batch_name.mjs";
@@ -97,6 +126,7 @@ import {
   operationArchiveAssessmentFromPapers,
   operationArchiveActualDataWindow,
   operationArchiveFingerprint,
+  operationArchiveInspectionTransition,
   operationArchiveState,
   refreshOperationArchiveEvidenceDraft,
   shouldAttemptScheduledOperationArchiveEvidence,
@@ -125,8 +155,10 @@ import { enableSessionVideoRecording } from "./session_video_recording.mjs";
 import { calculateRoomSizes } from "./room_assignment.mjs";
 import {
   apiKeyHint,
+  apiKeyLabelAfterRotation,
   apiKeyProfileId,
   apiKeyProfileCredentialsForUser,
+  apiKeySafeLabel,
   apiKeyProfilesForUser,
   currentUserLogin,
   deleteApiKeyProfileForUser,
@@ -136,6 +168,8 @@ import {
   publicApiKeyProfiles,
   publicApiKeyProfilesForUser,
   saveUserLogin,
+  setSharedAutomationProfileSelection,
+  sharedAutomationProfileSelection,
   updateApiKeyProfileForUser,
   upsertApiKeyProfileInRecord,
 } from "./user_settings.mjs";
@@ -143,6 +177,7 @@ import { runCustomerServiceSchedulerForTargets } from "./customer_service_schedu
 import { fetchSimplePrftAssessmentReports } from "./simple_prft_assessment_report.mjs";
 import {
   buildFanweiHelperPackageManifest,
+  FANWEI_LOCAL_HELPER_SERVER_FILES,
   FANWEI_LOCAL_HELPER_VERSION,
 } from "./fanwei_local_helper_version.mjs";
 import {
@@ -187,6 +222,12 @@ import {
   sessionSyncErrorMessage,
 } from "./session_sync.mjs";
 import {
+  knownRequirementTextRepairChanges,
+  repairKnownRequirementText,
+  repairKnownRequirementTextFields,
+  repairRequirementTextFieldsFromDefaults,
+} from "./requirement_text_integrity.mjs";
+import {
   syncExamConfigToTencentDocs,
   tencentDocsSettingsFromEnv,
 } from "./tencent_docs_sync.mjs";
@@ -207,7 +248,6 @@ import {
   buildFanweiProjectConfig,
   buildProjectWorkflow,
   normalizeFanweiBusinessRequirement,
-  removeProjectExamRequirement,
 } from "./project_workflow.mjs";
 import {
   buildAutoConfigFromRequirement,
@@ -275,9 +315,11 @@ const assistantQueryLogPath = path.join(runtimeDir, "assistant_query_logs.jsonl"
 const platformApiLogPath = path.join(runtimeDir, "platform_api_logs.jsonl");
 const userSettingsPath = path.join(runtimeDir, "user_settings.json");
 const emailSettingsPath = path.join(runtimeDir, "email_settings.json");
+const messageCenterSettingsPath = path.join(runtimeDir, "message_center_settings.json");
 const parserScript = path.join(__dirname, "exam_request_parser.py");
 const fanweiWorkbookScript = path.join(__dirname, "fanwei_requirement_workbook.py");
 const candidateParserScript = path.join(__dirname, "candidate_list_parser.py");
+const messageCenterRosterScript = path.join(__dirname, "message_center_roster.py");
 const monitorAccountExporterScript = path.join(__dirname, "monitor_account_exporter.py");
 const notStartedCandidateExporterScript = path.join(__dirname, "not_started_candidate_exporter.py");
 const scoreFeedbackExporterScript = path.join(__dirname, "score_feedback_exporter.py");
@@ -363,13 +405,24 @@ const state = {
   authSessions: [],
   userSettings: defaultUserSettings(),
 };
+const tenantApiKeyResponseSecrets = new Set();
+
+function rememberCurrentTenantApiKeys() {
+  for (const secret of collectTenantApiKeySecrets({
+    settings: state.settings,
+    userSettings: state.userSettings,
+    env: process.env,
+  })) {
+    tenantApiKeyResponseSecrets.add(secret);
+  }
+}
 
 function json(res, code, payload) {
   res.writeHead(code, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
   });
-  res.end(JSON.stringify(payload));
+  res.end(stringifyPublicJson(payload));
 }
 
 function corsJson(res, code, payload) {
@@ -380,7 +433,12 @@ function corsJson(res, code, payload) {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   });
-  res.end(JSON.stringify(payload));
+  res.end(stringifyPublicJson(payload));
+}
+
+function stringifyPublicJson(payload) {
+  rememberCurrentTenantApiKeys();
+  return JSON.stringify(payload, createTenantApiKeyResponseReplacer([...tenantApiKeyResponseSecrets]));
 }
 
 function sendHtml(res, html) {
@@ -639,7 +697,7 @@ function buildPersonalInformation() {
     identity_id: {
       editable: false,
       required: false,
-      visible: true,
+      visible: false,
       default: true,
       type: "text",
       order: 4,
@@ -654,6 +712,26 @@ function buildPersonalInformation() {
       label: "证件号",
     },
   };
+}
+
+function taskSessionPersonal(task = {}, sessionId = "", storedMappings = []) {
+  return resolveSessionPersonalSnapshot(
+    task?.config || {},
+    sessionId,
+    buildPersonalInformation(),
+    storedMappings,
+  );
+}
+
+async function persistSessionPersonalSnapshot(taskId, sessionId, personal = {}) {
+  if (!taskId || !String(sessionId || "").trim()) return null;
+  const task = await runTaskState("get", { taskId });
+  return await runTaskState("update_config", {
+    taskId,
+    config: {
+      sessionPersonalById: setSessionPersonalSnapshot(task?.config || {}, sessionId, personal),
+    },
+  });
 }
 
 function applyTimeRule(payload, rule, fallbackRule = "") {
@@ -854,9 +932,16 @@ function buildSessionPayloads(config) {
 
 async function runYikaoApiCreationJob({ job, login }) {
   const ts = () => new Date().toISOString();
-  const updateJobStep = (stepKey, status, result = {}) => (
-    updateTaskStep(job.taskId, stepKey, status, result, job.requirementIndex)
-  );
+  const ensureRequirementActive = () => {
+    if (!job.localRequirementDeleted) return;
+    const error = new Error("需求单已从平台删除，停止记录自动配置结果。");
+    error.code = "LOCAL_REQUIREMENT_DELETED";
+    throw error;
+  };
+  const updateJobStep = (stepKey, status, result = {}) => {
+    ensureRequirementActive();
+    return updateTaskStep(job.taskId, stepKey, status, result, job.requirementIndex);
+  };
   const emitLog = (message, level = "success") => {
     pushEvent(job, { type: "log", level, message, ts: ts() });
   };
@@ -866,6 +951,7 @@ async function runYikaoApiCreationJob({ job, login }) {
 
   let activeStep = "formal_session_create";
   try {
+    ensureRequirementActive();
     pushEvent(job, { type: "status", status: "running", message: "租户 API 创建考试中", ts: ts() });
     emitStage("读取需求单", 10);
     const payloads = buildSessionPayloads(job.config);
@@ -924,6 +1010,7 @@ async function runYikaoApiCreationJob({ job, login }) {
           url: result?.url,
           result,
         };
+        ensureRequirementActive();
         await runTaskState("upsert_session", {
           taskId: job.taskId,
           requirementIndex: job.requirementIndex,
@@ -937,6 +1024,7 @@ async function runYikaoApiCreationJob({ job, login }) {
             url: result?.url || "",
           },
         });
+        await persistSessionPersonalSnapshot(job.taskId, sessionId, item.payload.personal);
         await updateJobStep(activeStep, "success", {
           message: `创建成功：${item.payload.name}${sessionId ? `，session_id=${sessionId}` : ""}`,
           result: { sessionId, name: item.payload.name, kind: item.kind },
@@ -960,6 +1048,7 @@ async function runYikaoApiCreationJob({ job, login }) {
           emitLog,
         });
         job.config = { ...job.config, courses };
+        ensureRequirementActive();
         await persistTaskRequirementCourses(job.taskId, job.requirementIndex, courses);
         await updateJobStep("course_create", "success", {
           message: courses.length
@@ -1022,6 +1111,7 @@ async function runYikaoApiCreationJob({ job, login }) {
       });
     }
 
+    ensureRequirementActive();
     const creationCapture = await saveApiCreationCapture(job, created);
     pushEvent(job, { type: "captures", captures: [creationCapture], ts: ts() });
     emitLog("[API 创建] 已生成创建完成确认截图，可在网页最后确认截图区域查看");
@@ -1043,6 +1133,16 @@ async function runYikaoApiCreationJob({ job, login }) {
       },
     });
   } catch (error) {
+    if (job.localRequirementDeleted || error?.code === "LOCAL_REQUIREMENT_DELETED") {
+      pushEvent(job, {
+        type: "status",
+        status: "cancelled",
+        message: "需求单已从平台删除，已停止记录后续自动配置结果。",
+        ts: ts(),
+      });
+      pushEvent(job, { type: "done", ts: ts(), summary: { deletedFromPlatform: true } });
+      return;
+    }
     await updateJobStep(activeStep, "failed", {
       errorMessage: error instanceof Error ? error.message : String(error),
       message: `步骤执行失败：${error instanceof Error ? error.message : String(error)}`,
@@ -1197,6 +1297,56 @@ function taskStepByKey(task, stepKey) {
   return (task?.steps || []).find((step) => step.stepKey === stepKey) || null;
 }
 
+async function readCompleteTaskSessionCandidates(task, session, login, latestState = null) {
+  const sessionId = String(session?.session_id || "").trim();
+  if (!task?.taskId || !sessionId) return { candidates: [], localCandidates: [] };
+
+  const entriesNum = latestState
+    ? Number(latestState?.entriesNum || 0)
+    : getEntriesNum(await getEntryCount(login, sessionId));
+
+  let tenantEntries = Array.isArray(latestState?.entries) ? latestState.entries : [];
+  if (tenantEntries.length !== entriesNum) {
+    tenantEntries = await fetchAllSessionEntries(login, sessionId, [], { expectedCount: entriesNum });
+  }
+  if (tenantEntries.length !== entriesNum) {
+    const error = new Error(`易考线上考生明细为 ${tenantEntries.length} 人，与场次统计 ${entriesNum} 人不一致，已停止使用该名单。`);
+    error.status = 502;
+    throw error;
+  }
+
+  const localCandidates = await runTaskState("list_candidates", {
+    taskId: task.taskId,
+    sessionId,
+  }).catch(() => []);
+  const candidates = candidateChangeRosterRows(
+    tenantEntries,
+    localCandidates,
+    candidateChangeCourseContext(task, session),
+  ).map((candidate) => ({ ...candidate, session_id: sessionId }));
+  const permits = candidates.map((candidate) => String(candidate?.permit || "").trim()).filter(Boolean);
+  if (candidates.length !== entriesNum || new Set(permits).size !== entriesNum) {
+    const error = new Error("易考线上考生名单存在缺失或重复准考证号，已停止使用该名单。");
+    error.status = 502;
+    throw error;
+  }
+  return { candidates, localCandidates };
+}
+
+async function syncTaskSessionCandidateMirror(task, session, login, latestState = {}) {
+  const sessionId = String(session?.session_id || "").trim();
+  const { candidates, localCandidates } = await readCompleteTaskSessionCandidates(
+    task,
+    session,
+    login,
+    latestState,
+  );
+  if (candidateRosterHash(candidates) === candidateRosterHash(localCandidates)) return false;
+
+  await runTaskState("replace_candidates", { taskId: task.taskId, sessionId, candidates });
+  return true;
+}
+
 async function syncTaskDetailSessionState(req, task) {
   if (!task?.taskId) return task;
   const login = getYikaoLoginForTask(task);
@@ -1224,6 +1374,9 @@ async function syncTaskDetailSessionState(req, task) {
     }
 
     if (entriesNum > 0) {
+      try {
+        await syncTaskSessionCandidateMirror(currentTask, currentSession, login, latestState);
+      } catch {}
       const importStepKey = taskSessionImportStepKey(session.sessionType);
       const importStep = taskStepByKey(currentTask, importStepKey);
       const requirementIndex = Number(session.requirementIndex || 0);
@@ -1277,6 +1430,7 @@ function pinTaskApiKeyProfile(config = {}, login = {}) {
       apiBase: process.env.YIKAO_API_BASE || login.apiBase,
       tenantApiKey,
     }),
+    ...(login.accountOwnerEmail ? { apiKeyProfileOwnerEmail: normalizeEmail(login.accountOwnerEmail) } : {}),
   };
 }
 
@@ -1333,7 +1487,7 @@ async function createImportFromWorkbook({
       projectName,
       sourceAccount: "",
       ownerEmail: auth.enabled ? taskOwnerEmail : "",
-      config: initializeOperationBatchDefaults(taskConfig, auth.enabled ? taskOwnerEmail : ""),
+      config: initializeOperationBatchDefaults(taskConfig),
     });
   }
   await updateTaskStep(task.taskId, "requirement_parse", "success", {
@@ -1351,6 +1505,7 @@ function createJob(importRecord, login) {
     importId: importRecord.id,
     taskId: importRecord.taskId,
     requirementIndex: Number(importRecord.requirementIndex || 0),
+    requirementId: String(importRecord.requirementId || ""),
     config: importRecord.parsed.config,
     login,
     status: "queued",
@@ -1422,7 +1577,7 @@ async function handleImport(req, res) {
     projectName,
     sourceAccount: "",
     ownerEmail: taskOwnerEmail,
-    config: initializeOperationBatchDefaults(parsed?.config || {}, taskOwnerEmail),
+    config: initializeOperationBatchDefaults(parsed?.config || {}),
   });
   await updateTaskStep(task.taskId, "requirement_parse", "success", {
     message: `需求单解析完成：${filename}`,
@@ -1566,8 +1721,9 @@ async function handleFanweiRequirementPreview(req, res) {
 async function createFanweiRequirementImportFromPayload(payload, req, options = {}) {
   const fanwei = validateFanweiReadPayloadForRequest(payload);
   let model = buildFanweiRequirementModel(fanwei);
+  const requirementDefaults = await loadFanweiRequirementDefaults();
   model.requirementFields = {
-    ...(await loadFanweiRequirementDefaults()),
+    ...requirementDefaults,
     ...model.requirementFields,
   };
   model = applyVirtualFanweiRequirementDefaults(model, model.fields["运控流水号"] || payload.serialNo);
@@ -1580,8 +1736,13 @@ async function createFanweiRequirementImportFromPayload(payload, req, options = 
   const submittedRequirementEntries = submittedRequirementFields
     .map((fields, index) => ({ fields, configSelection: submittedConfigSelections[index] }))
     .filter((entry) => entry.fields && typeof entry.fields === "object" && !Array.isArray(entry.fields));
+  const requirementTextIntegrityReports = [];
   const requirementFieldsList = submittedRequirementEntries
-    .map((entry) => ({ ...model.requirementFields, ...editableRequirementFieldsRecord(entry.fields) }));
+    .map((entry) => {
+      const integrity = repairRequirementTextFieldsFromDefaults(entry.fields, requirementDefaults);
+      requirementTextIntegrityReports.push(integrity);
+      return { ...model.requirementFields, ...editableRequirementFieldsRecord(integrity.fields) };
+    });
   const requirementConfigSelectionsList = submittedRequirementEntries
     .map((entry) => editableRequirementConfigSelection(entry.configSelection));
   if (!requirementFieldsList.length) requirementFieldsList.push({ ...model.requirementFields });
@@ -1662,6 +1823,7 @@ async function createFanweiRequirementImportFromPayload(payload, req, options = 
     appendedRequirementCount: appendedExamRequirements.length,
     workbookPath: uploadPath,
     projectReused: Boolean(existingTask),
+    requirementTextIntegrity: requirementTextIntegrityResponse(requirementTextIntegrityReports),
   };
 }
 
@@ -1736,12 +1898,12 @@ function richRequirementPlainText(value) {
 }
 
 function normalizeRequirementRichField(value) {
-  const text = String(value ?? "").trim();
+  const text = repairKnownRequirementText(value).trim();
   return richRequirementPlainText(text) ? text : "";
 }
 
 function editableRequirementFieldsRecord(value) {
-  const fields = editableStringRecord(value);
+  const fields = repairKnownRequirementTextFields(editableStringRecord(value));
   if (fields["人工判分"] === "新版") fields["人工判分"] = "新版阅卷";
   for (const field of richRequirementFields) {
     if (Object.hasOwn(fields, field)) fields[field] = normalizeRequirementRichField(fields[field]);
@@ -1749,17 +1911,145 @@ function editableRequirementFieldsRecord(value) {
   return fields;
 }
 
+function requirementTextIntegrityResponse(reports = []) {
+  const repairs = [];
+  const seenRepairs = new Set();
+  const warningFields = new Set();
+  for (const report of reports) {
+    for (const repair of report?.repairs || []) {
+      const field = String(repair?.field || "").trim();
+      const source = String(repair?.source || "").trim();
+      const key = `${field}\u0000${source}`;
+      if (!field || seenRepairs.has(key)) continue;
+      seenRepairs.add(key);
+      repairs.push({ field, source });
+    }
+    for (const field of report?.warningFields || []) {
+      const normalized = String(field || "").trim();
+      if (normalized) warningFields.add(normalized);
+    }
+  }
+  return { repairs, warningFields: [...warningFields] };
+}
+
+async function repairRequirementTextForPersistence(value = {}) {
+  let defaults = {};
+  try {
+    defaults = await loadFanweiRequirementDefaults();
+  } catch {}
+  return repairRequirementTextFieldsFromDefaults(value, defaults);
+}
+
+async function repairTaskRequirementTextBeforeAutoConfig(task, requirementIndex) {
+  const requirements = taskExamRequirements(task);
+  const current = requirements[requirementIndex];
+  if (!current) {
+    return { task, requirement: null, integrity: requirementTextIntegrityResponse() };
+  }
+
+  const integrity = await repairRequirementTextForPersistence(current.fields || {});
+  const repairs = [...integrity.repairs];
+  const fields = editableRequirementFieldsRecord(integrity.fields);
+  const config = { ...(current.config || {}) };
+  const repairedFieldNames = new Set(repairs.map((repair) => repair.field));
+  const derivedFields = [
+    ["考前等待提示", "preLoginPrompt", normalizeRequirementRichField],
+    ["考试承诺书内容", "pledgeContent", normalizeRequirementRichField],
+  ];
+  for (const [field, configKey, normalize] of derivedFields) {
+    const fieldValue = String(fields[field] ?? "");
+    const configValue = String(config[configKey] ?? "");
+    const shouldSync = repairedFieldNames.has(field)
+      || (configValue.includes("\uFFFD") && fieldValue && !fieldValue.includes("\uFFFD"));
+    if (!shouldSync) continue;
+    const repairedValue = normalize(fieldValue);
+    if (repairedValue === configValue) continue;
+    config[configKey] = repairedValue;
+    if (!repairedFieldNames.has(field)) {
+      repairs.push({ field, before: configValue, after: repairedValue, source: "derived_config" });
+      repairedFieldNames.add(field);
+    }
+  }
+
+  const currentPreviewRows = Array.isArray(current.previewRows) ? current.previewRows : [];
+  let previewRows = currentPreviewRows;
+  if (repairs.length || JSON.stringify(currentPreviewRows).includes("\uFFFD")) {
+    const rebuiltPreviewRows = buildAutoConfigPreviewRows(config);
+    if (JSON.stringify(rebuiltPreviewRows) !== JSON.stringify(currentPreviewRows)) {
+      previewRows = rebuiltPreviewRows;
+      if (
+        JSON.stringify(currentPreviewRows).includes("\uFFFD")
+        && !JSON.stringify(rebuiltPreviewRows).includes("\uFFFD")
+      ) {
+        repairs.push({
+          field: "自动配置预览",
+          before: "包含异常字符",
+          after: "已根据需求单配置重新生成",
+          source: "derived_preview",
+        });
+      }
+    }
+  }
+
+  if (!repairs.length) {
+    return {
+      task,
+      requirement: current,
+      integrity: requirementTextIntegrityResponse([{ ...integrity, repairs }]),
+    };
+  }
+
+  const now = new Date().toISOString();
+  const examRequirement = {
+    ...current,
+    version: Number(current.version || 0) + 1,
+    modifiedAt: now,
+    fields,
+    config,
+    previewRows,
+  };
+  const examRequirements = [...requirements];
+  examRequirements[requirementIndex] = examRequirement;
+  const fieldChanges = projectRequirementFieldChanges(current.fields, fields);
+  const derivedChanges = repairs
+    .filter((repair) => repair.source === "derived_config" || repair.source === "derived_preview")
+    .map((repair) => ({ field: repair.field, before: repair.before, after: repair.after }));
+  const updatedTask = await runTaskState("update_config", {
+    taskId: task.taskId,
+    config: {
+      examRequirements,
+      examRequirement: examRequirements[0],
+      projectSourceChangeHistory: appendProjectSourceChangeHistory(task, {
+        source: "examRequirementAutoRepair",
+        requirementIndex,
+        changedAt: now,
+        versionBefore: Number(current.version || 0),
+        versionAfter: Number(examRequirement.version || 0),
+        changes: [...fieldChanges, ...derivedChanges],
+      }),
+    },
+  });
+  return {
+    task: updatedTask || task,
+    requirement: examRequirement,
+    integrity: requirementTextIntegrityResponse([{ ...integrity, repairs }]),
+  };
+}
+
 function projectRequirementFieldChanges(beforeFields = {}, afterFields = {}) {
+  const integrityRepairs = knownRequirementTextRepairChanges(beforeFields, afterFields);
+  const repairedFields = new Set(integrityRepairs.map((change) => change.field));
   const before = editableRequirementFieldsRecord(beforeFields);
   const after = editableRequirementFieldsRecord(afterFields);
-  return Array.from(new Set([...Object.keys(before), ...Object.keys(after)]))
+  const ordinaryChanges = Array.from(new Set([...Object.keys(before), ...Object.keys(after)]))
     .sort((left, right) => left.localeCompare(right, "zh-CN"))
-    .filter((field) => before[field] !== after[field])
+    .filter((field) => !repairedFields.has(field) && before[field] !== after[field])
     .map((field) => ({
       field,
       before: before[field] || "",
       after: after[field] || "",
     }));
+  return [...integrityRepairs, ...ordinaryChanges];
 }
 
 function projectRequirementConfigSelectionChanges(beforeValue = {}, afterValue = {}) {
@@ -1916,13 +2206,25 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
   const source = String(payload.source || "").trim();
   const now = new Date().toISOString();
   let configPatch = {};
+  let requirementTextIntegrity = requirementTextIntegrityResponse();
 
   if (source === "fanwei") {
+    const submittedProjectManager = String(
+      payload.fields?.["选择项目经理"]
+      || payload.fields?.["项目经理"]
+      || "",
+    ).trim();
+    const mappedProjectDepartment = operationProjectDepartmentForManager(submittedProjectManager);
     const submittedProjectDepartment = String(payload.fields?.["项目部归属"] || "").trim();
-    const projectDepartment = normalizeOperationProjectDepartment(submittedProjectDepartment);
-    if (submittedProjectDepartment && !projectDepartment) {
+    const normalizedSubmittedProjectDepartment = normalizeOperationProjectDepartment(submittedProjectDepartment);
+    if (submittedProjectDepartment && !normalizedSubmittedProjectDepartment) {
       return badRequest(res, "项目部归属不在允许选项中，请重新选择。");
     }
+    const projectDepartment = normalizedSubmittedProjectDepartment || mappedProjectDepartment;
+    const projectDepartmentMode = normalizedSubmittedProjectDepartment
+      && normalizedSubmittedProjectDepartment !== mappedProjectDepartment
+      ? "manual"
+      : "default_rule";
     const currentSource = task.config?.fanweiSource || {};
     const currentRaw = currentSource.raw || {};
     const currentBusiness = task.config?.businessRequirement || {};
@@ -1952,6 +2254,7 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
         ...editableStringRecord(currentRaw.fields),
         ...editableStringRecord(payload.fields),
         "批次名称": batchName.value,
+        ...(projectDepartment ? { "项目部归属": projectDepartment } : {}),
       },
       serviceConfirmation: {
         ...(currentRaw.serviceConfirmation || {}),
@@ -1973,6 +2276,7 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
       serialNo: businessRequirement.operation_serial_number || currentSource.serialNo || "",
       batchNameMode: batchName.mode,
       batchNameAutoValue: batchName.autoValue,
+      projectDepartmentMode,
       raw,
     };
     const projectCard = {
@@ -1996,7 +2300,7 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
                 projectDepartment: {
                   ...(task.config.operationBatch.draft.fields.projectDepartment || {}),
                   value: projectDepartment,
-                  source: "manual",
+                  source: projectDepartmentMode,
                   label: "项目部归属",
                 },
               },
@@ -2022,7 +2326,9 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
       : 0;
     const current = currentRequirements[requirementIndex] || task.config?.examRequirement || {};
     const currentConfig = current.config || {};
-    const fields = editableRequirementFieldsRecord(payload.fields);
+    const integrity = await repairRequirementTextForPersistence(payload.fields);
+    const fields = editableRequirementFieldsRecord(integrity.fields);
+    requirementTextIntegrity = requirementTextIntegrityResponse([integrity]);
     const configSelection = editableRequirementConfigSelection(payload.configSelection ?? current.configSelection);
     const changes = [
       ...projectRequirementFieldChanges(current.fields, fields),
@@ -2090,17 +2396,37 @@ async function handleProjectSourceSnapshotUpdate(taskId, req, res) {
     return badRequest(res, "仅支持修改泛微业务需求或易考需求单。");
   }
 
+  const projectName = source === "fanwei"
+    ? (configPatch.businessRequirement?.project_name || task.projectName || "")
+    : source === "examRequirement"
+      ? (configPatch.examName || task.projectName || "")
+      : "";
+  const taskWithUpdatedSource = {
+    ...task,
+    projectName,
+    config: { ...(task.config || {}), ...configPatch },
+  };
+  const batchDraft = buildOperationBatchDraft(
+    taskWithUpdatedSource,
+    operationBatchDraftOverridesFromTask(taskWithUpdatedSource),
+  );
+  configPatch.operationBatch = {
+    ...(taskWithUpdatedSource.config?.operationBatch || {}),
+    draft: batchDraft,
+    updatedAt: now,
+  };
   const updated = await runTaskState("update_config", {
     taskId,
     config: configPatch,
-    projectName: source === "fanwei"
-      ? (configPatch.businessRequirement?.project_name || task.projectName || "")
-      : source === "examRequirement"
-        ? (configPatch.examName || task.projectName || "")
-        : undefined,
+    projectName,
   });
-  const batchDraft = buildOperationBatchDraft(updated, operationBatchDraftOverridesFromTask(updated));
-  return json(res, 200, { ok: true, task: updated, batchDraft, workflow: buildProjectWorkflow(updated, batchDraft) });
+  return json(res, 200, {
+    ok: true,
+    task: updated,
+    batchDraft,
+    workflow: buildProjectWorkflow(updated, batchDraft),
+    requirementTextIntegrity,
+  });
 }
 
 async function handleProjectSourceSnapshotCreate(taskId, req, res) {
@@ -2118,7 +2444,8 @@ async function handleProjectSourceSnapshotCreate(taskId, req, res) {
 
   const sourceRequirement = requirements[sourceRequirementIndex];
   const sourceConfig = sourceRequirement.config || {};
-  const fields = editableRequirementFieldsRecord(payload.fields ?? sourceRequirement.fields);
+  const integrity = await repairRequirementTextForPersistence(payload.fields ?? sourceRequirement.fields);
+  const fields = editableRequirementFieldsRecord(integrity.fields);
   const configSelection = editableRequirementConfigSelection(
     Object.hasOwn(payload, "configSelection") ? payload.configSelection : sourceRequirement.configSelection,
   );
@@ -2188,17 +2515,8 @@ async function handleProjectSourceSnapshotCreate(taskId, req, res) {
     requirementIndex: appended.requirementIndex,
     batchDraft,
     workflow: buildProjectWorkflow(updated, batchDraft),
+    requirementTextIntegrity: requirementTextIntegrityResponse([integrity]),
   });
-}
-
-function taskRequirementExecutionStartedAtOrAfter(task = {}, requirementIndex = 0) {
-  const normalizedIndex = Number(requirementIndex);
-  const hasSession = (task.sessions || []).some((session) => Number(session.requirementIndex || 0) >= normalizedIndex);
-  if (hasSession) return true;
-  return (task.steps || []).some((step) => Object.keys(step.requirementProgress || {}).some((key) => {
-    const progressIndex = Number(key);
-    return Number.isInteger(progressIndex) && progressIndex >= normalizedIndex;
-  }));
 }
 
 async function handleProjectSourceSnapshotDelete(taskId, req, res) {
@@ -2213,14 +2531,32 @@ async function handleProjectSourceSnapshotDelete(taskId, req, res) {
   if (!Number.isInteger(requirementIndex) || requirementIndex < 0 || requirementIndex >= requirements.length) {
     return badRequest(res, "需求单序号不存在，请刷新项目后重试。");
   }
-  if (taskRequirementExecutionStartedAtOrAfter(task, requirementIndex)) {
-    return json(res, 409, { error: "该需求单或后续需求单已进入自动配置，不能删除。" });
+  const deletedRequirementId = String(requirements[requirementIndex]?.id || "");
+  const affectedJobs = [];
+  for (const job of state.jobs.values()) {
+    if (job.taskId !== taskId || ["success", "failed", "cancelled"].includes(job.status)) continue;
+    const previous = {
+      job,
+      requirementIndex: job.requirementIndex,
+      localRequirementDeleted: job.localRequirementDeleted,
+    };
+    const sameRequirement = deletedRequirementId && job.requirementId
+      ? job.requirementId === deletedRequirementId
+      : Number(job.requirementIndex || 0) === requirementIndex;
+    if (sameRequirement) job.localRequirementDeleted = true;
+    else if (Number(job.requirementIndex || 0) > requirementIndex) job.requirementIndex -= 1;
+    affectedJobs.push(previous);
   }
-  const configPatch = {
-    ...removeProjectExamRequirement(task.config || {}, requirementIndex),
-    ...sessionSyncCacheInvalidation(),
-  };
-  const updated = await runTaskState("update_config", { taskId, config: configPatch });
+  let updated;
+  try {
+    updated = await runTaskState("delete_requirement", { taskId, requirementIndex });
+  } catch (error) {
+    for (const previous of affectedJobs) {
+      previous.job.requirementIndex = previous.requirementIndex;
+      previous.job.localRequirementDeleted = previous.localRequirementDeleted;
+    }
+    throw error;
+  }
   const batchDraft = buildOperationBatchDraft(updated, operationBatchDraftOverridesFromTask(updated));
   return json(res, 200, { ok: true, task: updated, batchDraft, workflow: buildProjectWorkflow(updated, batchDraft) });
 }
@@ -2670,7 +3006,7 @@ function validateCandidatePayload(candidates = [], fieldMapping = {}) {
   return errors;
 }
 
-const disallowedCandidateCustomFieldNames = new Set(["姓名", "身份证号", "证件号", "准考证号", "科目编号", "科目名称"]);
+const disallowedCandidateCustomFieldNames = new Set(["姓名", "身份证号", "证件号", "准考证号", "性别", "gender", "sex", "科目编号", "科目名称"]);
 
 function validateCandidateCustomFields(candidates = []) {
   const errors = [];
@@ -2718,6 +3054,7 @@ const baseImportFieldDefinitions = [
   { key: "permit", field_name: "准考证号", field_code: "permit" },
   { key: "identity_id", field_name: "身份证号", field_code: "identity_id" },
   { key: "id_card", field_name: "身份证号", field_code: "identity_id" },
+  { key: "gender", field_name: "性别", field_code: "gender" },
   { key: "phone", field_name: "手机号码", field_code: "phone" },
   { key: "mobile", field_name: "手机号码", field_code: "phone" },
   { key: "email", field_name: "邮箱", field_code: "email" },
@@ -2819,52 +3156,35 @@ function buildSessionPersonalPutPayload(sessionDetail, personal) {
   };
 }
 
-async function getTenantSessionDetail(login, sessionId) {
-  const base = normalizeApiBase(process.env.YIKAO_API_BASE);
-  const detailUrl = new URL(`/tenant/api/session/${encodeURIComponent(sessionId)}/`, base);
-  let detailError = null;
-  try {
-    const payload = await readTenantJsonWithLogin(login, detailUrl, {}, "获取原场次配置");
-    const detail = extractTenantSessionConfig(payload, sessionId);
-    if (detail) return { detail, source: "detail" };
-  } catch (error) {
-    detailError = error;
-  }
-
+async function getTenantSessionListDetail(login, sessionId) {
+  const base = normalizeApiBase(process.env.YIKAO_API_BASE || login?.apiBase);
   const listUrl = new URL("/tenant/api/session/", base);
   listUrl.searchParams.set("session_ids", sessionId);
   const payload = await readTenantJsonWithLogin(login, listUrl, {}, "获取原场次配置");
   const detail = extractTenantSessionConfig(payload, sessionId);
   if (!detail) {
     const error = new Error("场次信息项同步失败：未获取到原场次配置");
-    error.detail = detailError?.detail || null;
-    error.status = detailError?.status || 502;
+    error.status = 502;
     throw error;
   }
-  return {
-    detail,
-    source: "list",
-    detail_error: detailError
-      ? { status: detailError.status || null, message: detailError.message || String(detailError), detail: detailError.detail || null }
-      : null,
-  };
+  return { detail, source: "list" };
 }
 
-async function ensureSessionCustomPersonalFields(login, sessionId, customFields = []) {
+async function ensureSessionCustomPersonalFields(login, sessionId, customFields = [], localPersonal = {}) {
   const requests = normalizeImportPersonalFieldRequests(customFields);
   const names = requests.map((field) => field.field_name);
   if (!names.length) return { updated: false, names: [], mappings: [] };
-  const base = normalizeApiBase(process.env.YIKAO_API_BASE);
+  const base = normalizeApiBase(process.env.YIKAO_API_BASE || login?.apiBase);
   const sessionUrl = new URL(`/tenant/api/session/${encodeURIComponent(sessionId)}/`, base);
   try {
-    const sessionConfig = await getTenantSessionDetail(login, sessionId);
+    const sessionConfig = await getTenantSessionListDetail(login, sessionId);
     const sessionDetail = sessionConfig.detail;
-    const existingPersonal =
-      sessionDetail?.personal && typeof sessionDetail.personal === "object" && !Array.isArray(sessionDetail.personal)
-        ? sessionDetail.personal
-        : {};
+    const existingPersonal = {
+      ...(objectValue(localPersonal) || {}),
+      ...(objectValue(sessionDetail?.personal) || {}),
+    };
     const existingNames = personalFieldLabels(existingPersonal);
-    const sync = syncImportPersonalFields(existingPersonal, requests);
+    const sync = syncImportPersonalFields(existingPersonal, requests, { syncIdentityVisibility: true });
     const putPayload = buildSessionPersonalPutPayload(sessionDetail, sync.personal);
     await readTenantJsonWithLogin(
       login,
@@ -2881,7 +3201,7 @@ async function ensureSessionCustomPersonalFields(login, sessionId, customFields 
       created: sync.mappings.filter((field) => field.status === "created").map((field) => field.field_name),
       existing_names: existingNames,
       source: sessionConfig.source,
-      detail_error: sessionConfig.detail_error || null,
+      personal: sync.personal,
     };
   } catch (error) {
     const detail = error?.detail ? `：${JSON.stringify(error.detail)}` : "";
@@ -2928,25 +3248,6 @@ async function handleExamRequestTemplate(req, res) {
   });
   createReadStream(examRequestTemplatePath).pipe(res);
 }
-
-const fanweiHelperServerFileNames = [
-  "fanwei_local_helper_cli.mjs",
-  "fanwei_local_helper.mjs",
-  "fanwei_local_helper_update.mjs",
-  "fanwei_local_helper_version.mjs",
-  "fanwei_auto_read.mjs",
-  "score_stamp_application.mjs",
-  "operation_batch_runner.mjs",
-  "operation_batch_update_runner.mjs",
-  "operation_personnel_console_runner.mjs",
-  "operation_personnel_task_runner.mjs",
-  "operation_archive_runner.mjs",
-  "content_email_directory.mjs",
-  "operation_batch.mjs",
-  "operation_content.mjs",
-  "operation_task_send_record.mjs",
-  "operation_content_runner.mjs",
-];
 
 const fanweiHelperNodeModuleNames = ["playwright", "playwright-core"];
 const FANWEI_HELPER_UPDATE_DOWNLOAD_TTL_MS = 5 * 60 * 1000;
@@ -3036,12 +3337,21 @@ function fanweiHelperDeployFileNames(packageName) {
   throw new Error(`无法识别泛微本机助手平台：${packageName}`);
 }
 
-async function overlayLatestFanweiHelperFiles(stagedPackageDir, packageName) {
+async function overlayLatestFanweiHelperServerFiles(stagedPackageDir, packageName) {
   const serverDir = path.join(stagedPackageDir, "server");
   await fs.mkdir(serverDir, { recursive: true });
-  for (const fileName of fanweiHelperServerFileNames) {
+  for (const fileName of FANWEI_LOCAL_HELPER_SERVER_FILES) {
     await fs.copyFile(path.join(rootDir, "server", fileName), path.join(serverDir, fileName));
   }
+  await fs.writeFile(
+    path.join(stagedPackageDir, "helper-package.json"),
+    `${JSON.stringify(buildFanweiHelperPackageManifest(fanweiHelperPackagePlatform(packageName)), null, 2)}\n`,
+    { mode: 0o600 },
+  );
+}
+
+async function overlayLatestFanweiHelperFiles(stagedPackageDir, packageName) {
+  await overlayLatestFanweiHelperServerFiles(stagedPackageDir, packageName);
   for (const moduleName of fanweiHelperNodeModuleNames) {
     await fs.cp(
       path.join(rootDir, "node_modules", moduleName),
@@ -3056,11 +3366,24 @@ async function overlayLatestFanweiHelperFiles(stagedPackageDir, packageName) {
     await fs.copyFile(path.join(deployDir, fileName), destination);
     if (fileName === "install-macos.command") await fs.chmod(destination, 0o755);
   }
-  await fs.writeFile(
-    path.join(stagedPackageDir, "helper-package.json"),
-    `${JSON.stringify(buildFanweiHelperPackageManifest(fanweiHelperPackagePlatform(packageName)), null, 2)}\n`,
-    { mode: 0o600 },
-  );
+}
+
+async function dynamicFanweiHelperUpdatePackagePath(fileName) {
+  const packageName = path.basename(fileName, ".zip");
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "yikao-helper-update-"));
+  try {
+    const stagedPackageDir = path.join(tempRoot, packageName);
+    await overlayLatestFanweiHelperServerFiles(stagedPackageDir, packageName);
+    const outputPath = path.join(tempRoot, fileName);
+    await createFanweiHelperPackageZip({ cwd: tempRoot, outputPath, packageName });
+    return {
+      packagePath: outputPath,
+      cleanup: () => fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {}),
+    };
+  } catch (error) {
+    await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 async function dynamicFanweiHelperPackagePath(packagePath, origin) {
@@ -3146,16 +3469,12 @@ async function handleFanweiHelperUpdateManifest(req, url, res) {
     });
   }
 
-  const packagePath = await resolveFanweiHelperPackagePath(resolvedPlatform.fileName);
-  if (!packagePath) {
-    return json(res, 503, { error: `泛微本机助手安装包（${resolvedPlatform.platform}）尚未生成，请联系管理员。` });
-  }
   const origin = requestOrigin(req);
   if (!origin) return badRequest(res, "无法确认当前平台地址。");
 
   let downloadPackage;
   try {
-    downloadPackage = await dynamicFanweiHelperPackagePath(packagePath, origin);
+    downloadPackage = await dynamicFanweiHelperUpdatePackagePath(resolvedPlatform.fileName);
   } catch (error) {
     console.error(`泛微本机助手自动更新包生成失败：${error?.message || error}`);
     return json(res, 503, { error: "泛微本机助手自动更新包生成失败，请联系管理员。" });
@@ -3398,7 +3717,7 @@ async function handlePublicExamAssistantChat(req, res) {
       message: payload.message,
       context: payload.context,
       listTasks: () => runTaskState("list_all"),
-      listSessions: () => runTaskState("list_sessions"),
+      listSessions: () => runTaskState("list_sessions_full"),
       getTask: (taskId) => runTaskState("get", { taskId }),
       fetchSessionRows: fetchPublicAssistantSessionRows,
     });
@@ -3514,10 +3833,11 @@ async function handleSessionMonitorAccounts(sessionId, req, res) {
 
 function normalizeTenantList(payload) {
   if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.results)) return payload.results;
-  if (Array.isArray(payload?.data)) return payload.data;
-  if (Array.isArray(payload?.items)) return payload.items;
-  if (Array.isArray(payload?.sessions)) return payload.sessions;
+  for (const container of [payload, payload?.data, payload?.result]) {
+    for (const key of ["results", "data", "items", "sessions", "list"]) {
+      if (Array.isArray(container?.[key])) return container[key];
+    }
+  }
   return [];
 }
 
@@ -3983,13 +4303,15 @@ async function fetchSingleEntryScore(login, sessionId, permit, logs = []) {
   try {
     return await readTenantJsonWithLogin(login, tenantUrl, {}, "查询单个考生成绩");
   } catch (error) {
-    if (Number(error?.status) === 404) {
+    const errorKind = classifyTenantSingleScoreError(error);
+    if (errorKind === "missing") {
       logs.push(`[成绩处理] 考生 permit=${permit} 单个成绩为空，按无成绩处理`);
       return null;
     }
     logs.push(
       `[成绩处理] 考生 permit=${permit} 单个成绩查询失败：HTTP ${error?.status || ""} ${tenantErrorDetail(error)}`.trim(),
     );
+    if (errorKind === "forbidden") throw error;
     return null;
   }
 }
@@ -4521,8 +4843,12 @@ async function handleCandidateImport(req, res) {
 
   const task = await findVisibleTaskBySessionId(req, sessionId);
   if (!task) return notFound(res);
+  const session = taskSessionForId(task, sessionId);
   const login = getYikaoLoginForTask(task);
-  const courseAssignment = prepareCandidatesForCourseImport(candidates, task, { sessionId });
+  const courseAssignment = prepareCandidatesForCourseImport(candidates, task, {
+    sessionId,
+    courses: candidateChangeCourseContext(task, session),
+  });
   if (courseAssignment.errors.length) {
     return json(res, 400, {
       error: "考生科目分配失败",
@@ -4542,7 +4868,15 @@ async function handleCandidateImport(req, res) {
   let personalFields = { updated: false, names: [], mappings: [] };
   if (selectedImportFields.length) {
     try {
-      personalFields = await ensureSessionCustomPersonalFields(login, sessionId, selectedImportFields);
+      const storedMappings = task?.taskId
+        ? await runTaskState("list_custom_fields", { taskId: task.taskId, sessionId }).catch(() => [])
+        : [];
+      personalFields = await ensureSessionCustomPersonalFields(
+        login,
+        sessionId,
+        selectedImportFields,
+        taskSessionPersonal(task, sessionId, storedMappings),
+      );
     } catch (error) {
       return json(res, error?.status && Number(error.status) >= 400 ? Number(error.status) : 502, {
         error: error?.message || "场次信息项同步失败，无法导入考生。",
@@ -4560,12 +4894,14 @@ async function handleCandidateImport(req, res) {
     return field.field_kind === "custom" || fieldCode === "phone" || fieldCode === "email";
   });
   let localCustomFieldSave = null;
+  let localPersonalSnapshotSave = null;
   if (task?.taskId && customFieldMappings.length) {
     localCustomFieldSave = await runTaskState("upsert_custom_fields", {
       taskId: task.taskId,
       sessionId,
       fields: customFieldMappings,
     });
+    localPersonalSnapshotSave = await persistSessionPersonalSnapshot(task.taskId, sessionId, personalFields.personal);
   }
 
   let beforeState = null;
@@ -4658,7 +4994,6 @@ async function handleCandidateImport(req, res) {
   let localCandidateSave = null;
   if (task?.taskId) {
     localCandidateSave = await runTaskState("upsert_candidates", { taskId: task.taskId, sessionId, candidates });
-    const session = taskSessionForId(task, sessionId);
     await updateTaskSessionProgress(task, sessionId, {
       candidateCount: entriesNum,
       roomCount: Number(importState?.roomsCount || session?.roomCount || 0),
@@ -4688,6 +5023,7 @@ async function handleCandidateImport(req, res) {
     entry_count: entryCount,
     entries_num: entriesNum,
     diagnosis,
+    trial_sync: candidateTrialSyncAvailability(task, session, entriesNum),
     custom_fields: {
       selected_count: customFieldNames.length,
       names: customFieldNames,
@@ -4698,6 +5034,7 @@ async function handleCandidateImport(req, res) {
       save_result: localCandidateSave,
       fields_saved_locally: Boolean(localCustomFieldSave),
       fields_save_result: localCustomFieldSave,
+      personal_snapshot_saved: Boolean(localPersonalSnapshotSave),
       sent_to_yikao: customFieldNames.length > 0,
       personal_fields: personalFields,
       field_mappings: customFieldMappings,
@@ -4878,6 +5215,7 @@ async function handleCreateJob(req, res) {
   let importRecord = null;
   let taskForJob = null;
   let requirementIndex = 0;
+  let requirementTextIntegrity = requirementTextIntegrityResponse();
   if (payload.taskId) {
     const task = await runTaskState("get", { taskId: payload.taskId });
     if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
@@ -4888,11 +5226,15 @@ async function handleCreateJob(req, res) {
       if (!Number.isInteger(requirementIndex) || requirementIndex < 0 || requirementIndex >= requirements.length) {
         return badRequest(res, "需求单序号不存在，请刷新项目后重试。");
       }
-      const requirement = requirements[requirementIndex];
+      const repairResult = await repairTaskRequirementTextBeforeAutoConfig(task, requirementIndex);
+      taskForJob = repairResult.task;
+      requirementTextIntegrity = repairResult.integrity;
+      const requirement = repairResult.requirement || requirements[requirementIndex];
       importRecord = {
         id: requirement.uploadId || `task:${task.taskId}:requirement:${requirementIndex + 1}`,
         taskId: task.taskId,
         requirementIndex,
+        requirementId: requirement.id || "",
         filename: requirement.filename || `${task.projectName || "项目"}-需求单${requirementIndex + 1}.xlsx`,
         uploadPath: "",
         parsed: {
@@ -4916,9 +5258,8 @@ async function handleCreateJob(req, res) {
     return badRequest(res, "需求单缺少考试名称或考试时间，请重新导入并检查表格。");
   }
 
-  const reuseBoundTaskLogin = taskForJob && taskHasCreatedSessions(taskForJob);
-  const storedLogin = reuseBoundTaskLogin ? getYikaoLoginForTask(taskForJob) : getYikaoLoginForRequest(req);
-  const login = taskForJob || auth.enabled ? storedLogin : { ...storedLogin, ...(payload.login || {}) };
+  const selectedLogin = getYikaoLoginForRequest(req);
+  const login = taskForJob || auth.enabled ? selectedLogin : { ...selectedLogin, ...(payload.login || {}) };
   if (!login.url || !login.username || !login.password) {
     return badRequest(res, "请先填写并保存后台登录配置。");
   }
@@ -4943,7 +5284,11 @@ async function handleCreateJob(req, res) {
 
   runYikaoApiCreationJob({ job, login });
 
-  json(res, 200, { jobId: job.id, taskId: job.taskId });
+  json(res, 200, {
+    jobId: job.id,
+    taskId: job.taskId,
+    requirementTextIntegrity,
+  });
 }
 
 function getAuthUserFromRequest(auth, req) {
@@ -4952,13 +5297,156 @@ function getAuthUserFromRequest(auth, req) {
   return getSessionUser(auth, cookies[auth.cookieName]) || null;
 }
 
-function getYikaoLoginForRequest(req) {
-  const user = getAuthUserFromRequest(auth, req);
-  const login = currentUserLogin({
+function authUserWithCurrentFeaturePermissions(auth, user) {
+  if (!user) return null;
+  const storedUser = (auth.users || []).find((candidate) => (
+    normalizeEmail(candidate.email) === normalizeEmail(user.email)
+  ));
+  return {
+    ...user,
+    featurePermissions: userFeaturePermissions(storedUser || user),
+  };
+}
+
+function requireFeaturePermission(auth, req, res, permission, label) {
+  if (!auth.enabled) return { email: "", role: "admin", featurePermissions: [] };
+  const user = authUserWithCurrentFeaturePermissions(auth, getAuthUserFromRequest(auth, req));
+  if (!user) {
+    json(res, 401, { error: "请先登录" });
+    return null;
+  }
+  if (!hasFeaturePermission(user, permission)) {
+    json(res, 403, { error: `当前账号未开通${label}权限，请联系管理员。` });
+    return null;
+  }
+  return user;
+}
+
+function accountSettingsAccessForUser(user) {
+  const leader = auth.enabled ? groupLeaderForMember(user, auth.users || []) : null;
+  return {
     user,
+    leader,
+    userEmail: normalizeEmail(user?.email || ""),
+    leaderEmail: normalizeEmail(leader?.email || ""),
+  };
+}
+
+function authUserForEmail(email = "") {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return { email: "" };
+  return (auth.users || []).find((user) => normalizeEmail(user.email) === normalizedEmail)
+    || { email: normalizedEmail, role: normalizedEmail === normalizeEmail(auth.email) ? "admin" : "user" };
+}
+
+function leaderProfilesForAccess(access) {
+  if (!access.leader || !access.leaderEmail) return [];
+  const profiles = apiKeyProfilesForUser({
+    user: access.leader,
     userSettings: state.userSettings,
     legacySettings: state.settings,
   });
+  const permission = memberAccountProfileAccess(
+    access.leader,
+    access.userEmail,
+    profiles.map((profile) => profile.id),
+  );
+  const allowedIds = new Set(permission.profileIds);
+  return profiles.filter((profile) => allowedIds.has(profile.id));
+}
+
+function sharedProfileForAccess(access) {
+  if (!access.leaderEmail) return null;
+  const selection = sharedAutomationProfileSelection({ user: access.user, userSettings: state.userSettings });
+  if (!selection || selection.ownerEmail !== access.leaderEmail) return null;
+  const profile = leaderProfilesForAccess(access).find((item) => item.id === selection.profileId);
+  return profile ? { owner: access.leader, ownerEmail: access.leaderEmail, profile } : null;
+}
+
+function loginForOwnedProfile(owner, profile, ownerEmail, shared = false) {
+  const login = loginForApiKeyProfile({
+    user: owner,
+    userSettings: state.userSettings,
+    legacySettings: state.settings,
+    profileId: profile.id,
+  });
+  return {
+    ...login,
+    accountOwnerEmail: ownerEmail,
+    accountProfileId: profile.id,
+    shared,
+  };
+}
+
+function currentLoginForAccess(access) {
+  const sharedProfile = sharedProfileForAccess(access);
+  if (sharedProfile) {
+    return loginForOwnedProfile(
+      sharedProfile.owner,
+      sharedProfile.profile,
+      sharedProfile.ownerEmail,
+      true,
+    );
+  }
+  const profiles = auth.enabled
+    ? apiKeyProfilesForUser({ user: access.user, userSettings: state.userSettings, legacySettings: state.settings })
+    : state.settings.apiKeyProfiles || [];
+  const currentProfile = profiles.find((profile) => profile.current) || null;
+  const login = currentProfile
+    ? loginForApiKeyProfile({
+        user: auth.enabled ? access.user : null,
+        userSettings: state.userSettings,
+        legacySettings: state.settings,
+        profileId: currentProfile.id,
+      })
+    : currentUserLogin({
+        user: access.user,
+        userSettings: state.userSettings,
+        legacySettings: state.settings,
+      });
+  return {
+    ...login,
+    accountOwnerEmail: access.userEmail,
+    accountProfileId: currentProfile?.id || "",
+    shared: false,
+  };
+}
+
+function pinnedLoginForAccess(access, { ownerEmail = "", profileId = "", profileLabel = "" } = {}) {
+  const normalizedOwnerEmail = normalizeEmail(ownerEmail);
+  const normalizedProfileId = String(profileId || "").trim();
+  const normalizedProfileLabel = normalizeEmail(profileLabel || "");
+  if (!normalizedProfileId && !normalizedProfileLabel) return null;
+  const owners = auth.enabled
+    ? [
+        ...(normalizedOwnerEmail === access.userEmail || !normalizedOwnerEmail
+          ? [{ user: access.user, email: access.userEmail, shared: false }]
+          : []),
+        ...(access.leaderEmail && (normalizedOwnerEmail === access.leaderEmail || !normalizedOwnerEmail)
+          ? [{ user: access.leader, email: access.leaderEmail, shared: true }]
+          : []),
+      ]
+    : [{ user: null, email: "", shared: false }];
+  for (const owner of owners) {
+    const profiles = auth.enabled
+      ? (owner.shared
+          ? leaderProfilesForAccess(access)
+          : apiKeyProfilesForUser({ user: owner.user, userSettings: state.userSettings, legacySettings: state.settings }))
+      : state.settings.apiKeyProfiles || [];
+    const profile = profiles.find((item) => normalizedProfileId && item.id === normalizedProfileId)
+      || profiles.find((item) => (
+        normalizedProfileLabel
+        && normalizeEmail(item.login?.username || item.label || "") === normalizedProfileLabel
+      ));
+    if (profile) return loginForOwnedProfile(owner.user, profile, owner.email, owner.shared);
+  }
+  return null;
+}
+
+function getYikaoLoginForRequest(req) {
+  const user = getAuthUserFromRequest(auth, req);
+  const access = accountSettingsAccessForUser(user);
+  const login = currentLoginForAccess(access);
   return {
     ...login,
     operatorAccount: normalizeEmail(user?.email || "") || login.username || "本机模式",
@@ -4968,31 +5456,17 @@ function getYikaoLoginForRequest(req) {
 
 function getYikaoLoginForTask(task = {}) {
   const ownerEmail = normalizeEmail(task.ownerEmail || "");
+  const access = accountSettingsAccessForUser(authUserForEmail(ownerEmail));
   const profileId = String(task.config?.apiKeyProfileId || "").trim();
   const profileLabel = String(task.sourceAccount || "").trim();
-  if (ownerEmail) {
-    const login = loginForApiKeyProfile({
-      user: { email: ownerEmail },
-      userSettings: state.userSettings,
-      legacySettings: state.settings,
-      profileId,
-      profileLabel,
-    });
-    if (login?.tenantApiKey) {
-      return {
-        ...login,
-        operatorAccount: ownerEmail || login.username || "系统自动任务",
-        allowEnvFallback: !auth.enabled,
-      };
-    }
-  }
-  const login = loginForApiKeyProfile({
-    user: ownerEmail ? { email: ownerEmail } : null,
-    userSettings: state.userSettings,
-    legacySettings: state.settings,
+  const pinnedLogin = pinnedLoginForAccess(access, {
+    ownerEmail: task.config?.apiKeyProfileOwnerEmail,
     profileId,
     profileLabel,
   });
+  const pinnedOwnerEmail = normalizeEmail(task.config?.apiKeyProfileOwnerEmail || "");
+  const revokedSharedAccount = Boolean(pinnedOwnerEmail && pinnedOwnerEmail !== access.userEmail && !pinnedLogin);
+  const login = pinnedLogin || (revokedSharedAccount ? {} : currentLoginForAccess(access));
   return {
     ...login,
     operatorAccount: ownerEmail || login.username || "系统自动任务",
@@ -5000,22 +5474,8 @@ function getYikaoLoginForTask(task = {}) {
   };
 }
 
-function taskHasCreatedSessions(task = {}) {
-  return (task.sessions || []).some((session) => String(session?.session_id || "").trim());
-}
-
 function tenantIdForTask(task = {}) {
-  const ownerEmail = normalizeEmail(task.ownerEmail || "");
-  const profileId = String(task.config?.apiKeyProfileId || "").trim();
-  const profileLabel = normalizeEmail(task.sourceAccount || "");
-  const profiles = apiKeyProfilesForUser({
-    user: ownerEmail ? { email: ownerEmail } : null,
-    userSettings: state.userSettings,
-    legacySettings: state.settings,
-  });
-  const profile = profiles.find((item) => profileId && item.id === profileId)
-    || profiles.find((item) => profileLabel && normalizeEmail(item.login?.username || item.label || "") === profileLabel);
-  return String(profile?.tenantId || task.config?.tenantId || "").trim();
+  return String(getYikaoLoginForTask(task).tenantId || task.config?.tenantId || "").trim();
 }
 
 async function syncTaskTenantId(task = {}) {
@@ -5027,18 +5487,28 @@ async function syncTaskTenantId(task = {}) {
   });
 }
 
-function publicYikaoLogin(login) {
+function publicYikaoLogin(login, { includePassword = true } = {}) {
   return {
     url: login?.url || "",
     username: login?.username || "",
     tenantId: login?.tenantId || "",
-    password: login?.password || "",
-    tenantApiKey: login?.tenantApiKey || "",
+    password: includePassword ? login?.password || "" : "",
+    passwordConfigured: Boolean(login?.password),
+    tenantApiKeyConfigured: Boolean(
+      login?.tenantApiKey || (login?.allowEnvFallback ? process.env.YIKAO_API_KEY : ""),
+    ),
+    accountOwnerEmail: normalizeEmail(login?.accountOwnerEmail || ""),
+    shared: Boolean(login?.shared),
   };
 }
 
+function publicYikaoSettings(login, options = {}) {
+  return { login: publicYikaoLogin(login, options) };
+}
+
 async function handleGetSettings(req, res) {
-  json(res, 200, { ...state.settings, login: publicYikaoLogin(getYikaoLoginForRequest(req)) });
+  const login = getYikaoLoginForRequest(req);
+  json(res, 200, publicYikaoSettings(login, { includePassword: !login.shared }));
 }
 
 async function handleSaveSettings(req, res) {
@@ -5057,25 +5527,63 @@ async function handleSaveSettings(req, res) {
         apiBase: nextLogin.apiBase || "https://eztest.cn",
         tenantId: nextLogin.tenantId || "",
         tenantApiKey: nextLogin.tenantApiKey,
-        label: nextLogin.username || nextLogin.tenantApiKey,
+        label: nextLogin.username || apiKeyHint(nextLogin.tenantApiKey),
         login: nextLogin,
       }, { current: true });
     }
     state.settings = nextSettings;
     await fs.writeFile(settingsPath, JSON.stringify(nextSettings, null, 2), "utf8");
-    return json(res, 200, { ok: true, settings: state.settings });
+    return json(res, 200, { ok: true, settings: publicYikaoSettings(getYikaoLoginForRequest(req)) });
   }
 
   const user = getAuthUserFromRequest(auth, req);
   if (!user) return json(res, 401, { error: "请先登录" });
-  saveUserLogin(state.userSettings, user, payload?.login || {});
+  const submittedLogin = payload?.login || {};
+  saveUserLogin(state.userSettings, user, submittedLogin);
+  setSharedAutomationProfileSelection(state.userSettings, user, null);
   await fs.writeFile(userSettingsPath, JSON.stringify(state.userSettings, null, 2), "utf8");
-  json(res, 200, { ok: true, settings: { ...state.settings, login: publicYikaoLogin(getYikaoLoginForRequest(req)) } });
+  const login = getYikaoLoginForRequest(req);
+  json(res, 200, {
+    ok: true,
+    settings: publicYikaoSettings(login, { includePassword: !login.shared }),
+  });
+}
+
+function customerServiceProfilesForAccess(access) {
+  const selectedSharedProfile = sharedProfileForAccess(access);
+  const ownProfiles = (auth.enabled
+    ? publicApiKeyProfilesForUser({ user: access.user, userSettings: state.userSettings })
+    : publicApiKeyProfiles(state.settings.apiKeyProfiles || []))
+    .map((profile) => ({
+      ...profile,
+      ownerEmail: access.userEmail,
+      shared: false,
+      canManage: true,
+      current: !selectedSharedProfile && profile.current,
+    }));
+  const leaderProfiles = access.leader
+    ? publicApiKeyProfiles(leaderProfilesForAccess(access))
+      .map((profile) => ({
+        ...profile,
+        ownerEmail: access.leaderEmail,
+        shared: true,
+        canManage: false,
+        current: selectedSharedProfile?.profile.id === profile.id,
+      }))
+    : [];
+  return {
+    profiles: [...leaderProfiles, ...ownProfiles],
+    canManageAccountDetails: true,
+    viewerEmail: access.userEmail,
+    leaderEmail: access.leaderEmail,
+    inheritedFrom: access.leaderEmail,
+  };
 }
 
 async function handleCustomerServiceScheduler(req, res, url) {
   const user = getAuthUserFromRequest(auth, req);
   if (auth.enabled && !user) return json(res, 401, { error: "请先登录" });
+  const access = accountSettingsAccessForUser(user);
 
   const profileMatch = url.pathname.match(/^\/api\/customer-service-scheduler\/profiles\/([^/]+)$/);
   const profileCredentialsMatch = url.pathname.match(
@@ -5084,16 +5592,14 @@ async function handleCustomerServiceScheduler(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/customer-service-scheduler") {
     return json(res, 200, {
       ok: true,
-      profiles: auth.enabled
-        ? publicApiKeyProfilesForUser({ user, userSettings: state.userSettings })
-        : publicApiKeyProfiles(state.settings.apiKeyProfiles || []),
+      ...customerServiceProfilesForAccess(access),
     });
   }
 
   if (req.method === "GET" && profileCredentialsMatch) {
     const profileId = decodeURIComponent(profileCredentialsMatch[1]);
     const credentials = apiKeyProfileCredentialsForUser({
-      user: auth.enabled ? user : null,
+      user: auth.enabled ? access.user : null,
       userSettings: state.userSettings,
       legacySettings: state.settings,
       profileId,
@@ -5108,7 +5614,32 @@ async function handleCustomerServiceScheduler(req, res, url) {
     const profileId = decodeURIComponent(profileMatch[1]);
     try {
       if (auth.enabled) {
-        updateApiKeyProfileForUser(state.userSettings, user, profileId, payload);
+        const requestedOwnerEmail = normalizeEmail(payload.ownerEmail || access.userEmail);
+        if (requestedOwnerEmail === access.leaderEmail && access.leader) {
+          if (payload.current !== true || Object.keys(payload).some((key) => !["current", "ownerEmail"].includes(key))) {
+            return json(res, 403, { error: "组员只能选择使用组长共享的账号，不能修改该账号。" });
+          }
+          const sharedProfile = apiKeyProfilesForUser({
+            user: access.leader,
+            userSettings: state.userSettings,
+            legacySettings: state.settings,
+          }).find((profile) => profile.id === profileId);
+          if (!sharedProfile) return notFound(res);
+          setSharedAutomationProfileSelection(state.userSettings, access.user, {
+            ownerEmail: access.leaderEmail,
+            profileId,
+          });
+        } else {
+          if (requestedOwnerEmail && requestedOwnerEmail !== access.userEmail) {
+            return json(res, 403, { error: "不能选择当前项目组以外的账号。" });
+          }
+          const profilePatch = { ...payload };
+          delete profilePatch.ownerEmail;
+          updateApiKeyProfileForUser(state.userSettings, access.user, profileId, profilePatch);
+          if (profilePatch.current === true) {
+            setSharedAutomationProfileSelection(state.userSettings, access.user, null);
+          }
+        }
         await fs.writeFile(userSettingsPath, JSON.stringify(state.userSettings, null, 2), "utf8");
       } else {
         updateLocalApiKeyProfile(profileId, payload);
@@ -5116,9 +5647,7 @@ async function handleCustomerServiceScheduler(req, res, url) {
       }
       return json(res, 200, {
         ok: true,
-        profiles: auth.enabled
-          ? publicApiKeyProfilesForUser({ user, userSettings: state.userSettings })
-          : publicApiKeyProfiles(state.settings.apiKeyProfiles || []),
+        ...customerServiceProfilesForAccess(access),
       });
     } catch (error) {
       return badRequest(res, error instanceof Error ? error.message : String(error));
@@ -5129,7 +5658,7 @@ async function handleCustomerServiceScheduler(req, res, url) {
     const profileId = decodeURIComponent(profileMatch[1]);
     try {
       if (auth.enabled) {
-        deleteApiKeyProfileForUser(state.userSettings, user, profileId);
+        deleteApiKeyProfileForUser(state.userSettings, access.user, profileId);
         await fs.writeFile(userSettingsPath, JSON.stringify(state.userSettings, null, 2), "utf8");
       } else {
         deleteLocalApiKeyProfile(profileId);
@@ -5137,9 +5666,7 @@ async function handleCustomerServiceScheduler(req, res, url) {
       }
       return json(res, 200, {
         ok: true,
-        profiles: auth.enabled
-          ? publicApiKeyProfilesForUser({ user, userSettings: state.userSettings })
-          : publicApiKeyProfiles(state.settings.apiKeyProfiles || []),
+        ...customerServiceProfilesForAccess(access),
       });
     } catch (error) {
       return badRequest(res, error instanceof Error ? error.message : String(error));
@@ -5150,7 +5677,7 @@ async function handleCustomerServiceScheduler(req, res, url) {
     const payload = parseJsonSafe(await readBody(req)) || {};
     const requestedProfileId = String(payload.profileId || "");
     const profiles = auth.enabled
-      ? apiKeyProfilesForUser({ user, userSettings: state.userSettings })
+      ? apiKeyProfilesForUser({ user: access.user, userSettings: state.userSettings })
       : state.settings.apiKeyProfiles || [];
     const selectedProfiles = requestedProfileId
       ? profiles.filter((profile) => profile.id === requestedProfileId)
@@ -5159,13 +5686,13 @@ async function handleCustomerServiceScheduler(req, res, url) {
       .filter((profile) => profile.tenantApiKey)
       .map((profile) => {
         const profileLogin = loginForApiKeyProfile({
-          user: auth.enabled ? user : null,
+          user: auth.enabled ? access.user : null,
           userSettings: state.userSettings,
           legacySettings: state.settings,
           profileId: profile.id,
         });
         return {
-          userId: auth.enabled ? normalizeEmail(user.email) : "local",
+          userId: auth.enabled ? access.userEmail : "local",
           profileId: profile.id,
           label: profile.label,
           apiBase: profile.apiBase,
@@ -5201,15 +5728,22 @@ function updateLocalApiKeyProfile(profileId, updates = {}) {
     normalizeEmail(profile.login?.username || profile.label || "") === nextAccount
   ));
   if (duplicateAccount) throw new Error("该账号邮箱已绑定一个 API Key，请编辑原账号。");
+  const currentProfile = profiles[index];
+  const nextTenantApiKey = String(updates.tenantApiKey || currentProfile.tenantApiKey || "").trim();
   profiles[index] = {
     ...profiles[index],
-    label: updates.label === undefined ? profiles[index].label : String(updates.label || "").trim(),
+    label: updates.label === undefined
+      ? apiKeyLabelAfterRotation(currentProfile.label, currentProfile.tenantApiKey, nextTenantApiKey)
+      : apiKeySafeLabel(
+          apiKeyLabelAfterRotation(updates.label, currentProfile.tenantApiKey, nextTenantApiKey),
+          nextTenantApiKey,
+        ),
     remark: updates.remark === undefined ? String(profiles[index].remark || "") : String(updates.remark || "").trim(),
     tenantId: updates.tenantId === undefined
       ? String(profiles[index].tenantId || "")
       : String(updates.tenantId || "").trim(),
-    tenantApiKey: String(updates.tenantApiKey || profiles[index].tenantApiKey || "").trim(),
-    keyHint: apiKeyHint(updates.tenantApiKey || profiles[index].tenantApiKey),
+    tenantApiKey: nextTenantApiKey,
+    keyHint: apiKeyHint(nextTenantApiKey),
     login: updates.login && typeof updates.login === "object"
       ? {
           ...(profiles[index].login || {}),
@@ -5312,7 +5846,12 @@ async function handleAuthLogin(auth, req, res) {
     "Cache-Control": "no-store",
     "Set-Cookie": buildLoginCookie(auth, session.token),
   });
-  res.end(JSON.stringify({ ok: true, enabled: true, authenticated: true, user: session.user }));
+  res.end(JSON.stringify({
+    ok: true,
+    enabled: true,
+    authenticated: true,
+    user: authUserWithCurrentFeaturePermissions(auth, session.user),
+  }));
 }
 
 async function handleWebLogin(auth, req, res, url) {
@@ -5340,14 +5879,35 @@ function handleAuthMe(auth, req, res) {
     return json(res, 200, { enabled: false, authenticated: true, user: null });
   }
   const user = getAuthUserFromRequest(auth, req);
-  json(res, 200, { enabled: true, authenticated: Boolean(user), user });
+  json(res, 200, {
+    enabled: true,
+    authenticated: Boolean(user),
+    user: authUserWithCurrentFeaturePermissions(auth, user),
+  });
+}
+
+function publicAuthUsers(auth) {
+  return sanitizeUsers(auth.users || []).map((user) => ({
+    ...user,
+    accountProfiles: publicApiKeyProfilesForUser({
+      user,
+      userSettings: state.userSettings,
+      legacySettings: state.settings,
+    }).map((profile) => ({
+      id: profile.id,
+      label: profile.label,
+      remark: profile.remark,
+      keyHint: profile.keyHint,
+      current: profile.current,
+    })),
+  }));
 }
 
 async function handleAuthUsers(auth, req, res, url) {
   if (!requireAdmin(auth, req, res)) return;
 
   if (req.method === "GET" && url.pathname === "/api/auth/users") {
-    return json(res, 200, { users: sanitizeUsers(auth.users || []) });
+    return json(res, 200, { users: publicAuthUsers(auth) });
   }
 
   if (req.method === "POST" && url.pathname === "/api/auth/users") {
@@ -5358,7 +5918,55 @@ async function handleAuthUsers(auth, req, res, url) {
         password: payload.password,
       });
       await saveAuthUsers(auth);
-      return json(res, 200, { ok: true, user: sanitizeUsers([user])[0], users: sanitizeUsers(auth.users) });
+      return json(res, 200, { ok: true, user: publicAuthUsers(auth).find((item) => item.email === user.email), users: publicAuthUsers(auth) });
+    } catch (error) {
+      return badRequest(res, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  const memberAccountAccessMatch = url.pathname.match(
+    /^\/api\/auth\/users\/([^/]+)\/members\/([^/]+)\/account-profiles$/,
+  );
+  if (memberAccountAccessMatch) {
+    if (req.method !== "PATCH") return notFound(res);
+    const leaderEmail = decodeURIComponent(memberAccountAccessMatch[1]);
+    const memberEmail = decodeURIComponent(memberAccountAccessMatch[2]);
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    if (!Array.isArray(payload.profileIds)) return badRequest(res, "账号权限格式不正确。");
+    const leader = (auth.users || []).find((user) => normalizeEmail(user.email) === normalizeEmail(leaderEmail));
+    if (!leader) return notFound(res);
+    const availableProfileIds = new Set(apiKeyProfilesForUser({
+      user: leader,
+      userSettings: state.userSettings,
+      legacySettings: state.settings,
+    }).map((profile) => profile.id));
+    const profileIds = [...new Set(payload.profileIds.map((profileId) => String(profileId || "").trim()).filter(Boolean))];
+    if (profileIds.some((profileId) => !availableProfileIds.has(profileId))) {
+      return badRequest(res, "包含无效的组长账号，请刷新后重试。");
+    }
+    try {
+      const updatedLeader = setMemberAccountProfileAccess(auth, leaderEmail, memberEmail, profileIds);
+      if (!updatedLeader) return notFound(res);
+      const member = (auth.users || []).find((user) => normalizeEmail(user.email) === normalizeEmail(memberEmail));
+      const sharedSelection = member
+        ? sharedAutomationProfileSelection({ user: member, userSettings: state.userSettings })
+        : null;
+      const revokedCurrentSelection = Boolean(
+        member
+        && sharedSelection
+        && normalizeEmail(sharedSelection.ownerEmail) === normalizeEmail(leaderEmail)
+        && !profileIds.includes(sharedSelection.profileId),
+      );
+      if (revokedCurrentSelection) {
+        setSharedAutomationProfileSelection(state.userSettings, member, null);
+        await fs.writeFile(userSettingsPath, JSON.stringify(state.userSettings, null, 2), "utf8");
+      }
+      await saveAuthUsers(auth);
+      return json(res, 200, {
+        ok: true,
+        user: publicAuthUsers(auth).find((item) => item.email === normalizeEmail(leaderEmail)),
+        users: publicAuthUsers(auth),
+      });
     } catch (error) {
       return badRequest(res, error instanceof Error ? error.message : String(error));
     }
@@ -5371,30 +5979,65 @@ async function handleAuthUsers(auth, req, res, url) {
   if (req.method === "PATCH") {
     const payload = parseJsonSafe(await readBody(req)) || {};
     try {
+      const previousUser = (auth.users || []).find((item) => normalizeEmail(item.email) === normalizeEmail(email));
+      const previousMemberEmails = Array.isArray(previousUser?.memberEmails)
+        ? previousUser.memberEmails.map(normalizeEmail).filter(Boolean)
+        : [];
       const user = updateLocalUser(auth, email, {
         disabled: payload.disabled,
         password: payload.password,
+        featurePermissions: Object.hasOwn(payload, "featurePermissions") ? payload.featurePermissions : undefined,
         memberEmails: Object.hasOwn(payload, "memberEmails") ? payload.memberEmails : undefined,
       });
       if (!user) return notFound(res);
       if (payload.disabled === true) deleteSessionsForEmail(auth, email);
+      let userSettingsChanged = false;
+      if (Object.hasOwn(payload, "memberEmails")) {
+        const currentMemberEmails = new Set((user.memberEmails || []).map(normalizeEmail));
+        for (const removedMemberEmail of previousMemberEmails.filter((memberEmail) => !currentMemberEmails.has(memberEmail))) {
+          const removedMember = (auth.users || []).find((item) => normalizeEmail(item.email) === removedMemberEmail);
+          const selection = removedMember
+            ? sharedAutomationProfileSelection({ user: removedMember, userSettings: state.userSettings })
+            : null;
+          if (selection && normalizeEmail(selection.ownerEmail) === normalizeEmail(user.email)) {
+            setSharedAutomationProfileSelection(state.userSettings, removedMember, null);
+            userSettingsChanged = true;
+          }
+        }
+      }
       await saveAuthUsers(auth);
       await saveAuthSessions(auth);
-      return json(res, 200, { ok: true, user: sanitizeUsers([user])[0], users: sanitizeUsers(auth.users) });
+      if (userSettingsChanged) {
+        await fs.writeFile(userSettingsPath, JSON.stringify(state.userSettings, null, 2), "utf8");
+      }
+      return json(res, 200, { ok: true, user: publicAuthUsers(auth).find((item) => item.email === user.email), users: publicAuthUsers(auth) });
     } catch (error) {
       return badRequest(res, error instanceof Error ? error.message : String(error));
     }
   }
 
   if (req.method === "DELETE") {
+    const deletedUser = (auth.users || []).find((item) => normalizeEmail(item.email) === normalizeEmail(email));
+    const formerMemberEmails = Array.isArray(deletedUser?.memberEmails)
+      ? deletedUser.memberEmails.map(normalizeEmail).filter(Boolean)
+      : [];
     const deleted = deleteLocalUser(auth, email);
     if (!deleted) return notFound(res);
     deleteSessionsForEmail(auth, email);
+    for (const memberEmail of formerMemberEmails) {
+      const member = (auth.users || []).find((item) => normalizeEmail(item.email) === memberEmail);
+      const selection = member
+        ? sharedAutomationProfileSelection({ user: member, userSettings: state.userSettings })
+        : null;
+      if (selection && normalizeEmail(selection.ownerEmail) === normalizeEmail(email)) {
+        setSharedAutomationProfileSelection(state.userSettings, member, null);
+      }
+    }
     delete state.userSettings.users[normalizeEmail(email)];
     await saveAuthUsers(auth);
     await saveAuthSessions(auth);
     await fs.writeFile(userSettingsPath, JSON.stringify(state.userSettings, null, 2), "utf8");
-    return json(res, 200, { ok: true, users: sanitizeUsers(auth.users) });
+    return json(res, 200, { ok: true, users: publicAuthUsers(auth) });
   }
 
   return notFound(res);
@@ -5452,13 +6095,21 @@ async function handleTaskList(req, res) {
   if (requestUrl.searchParams.get("includeWorkflow") !== "1") {
     return json(res, 200, { tasks: visibleTasks });
   }
-  const detailedTasks = await Promise.all(visibleTasks.map((task) => (
-    runTaskState("get", { taskId: task.taskId })
-  )));
+  const requestedTaskIds = new Set(String(requestUrl.searchParams.get("taskIds") || "")
+    .split(",")
+    .map((taskId) => taskId.trim())
+    .filter(Boolean));
+  const workflowTasks = requestedTaskIds.size
+    ? visibleTasks.filter((task) => requestedTaskIds.has(task.taskId))
+    : visibleTasks;
+  const detailedTasks = await runTaskState("get_many", {
+    taskIds: workflowTasks.map((task) => task.taskId),
+  });
+  const detailedTasksById = new Map(detailedTasks.map((task) => [task.taskId, task]));
   return json(res, 200, {
-    tasks: visibleTasks.map((task, index) => ({
+    tasks: workflowTasks.map((task) => ({
       ...task,
-      operationWorkflowSummary: projectWorkflowSummary(detailedTasks[index] || task),
+      operationWorkflowSummary: projectWorkflowSummary(detailedTasksById.get(task.taskId) || task),
     })),
   });
 }
@@ -5617,6 +6268,59 @@ function candidateChangeCourseContext(task, session) {
     : Array.isArray(task?.config?.courses) ? task.config.courses : [];
 }
 
+function candidateChangeTrialSession(task, session) {
+  if (session?.sessionType !== "formal") return null;
+  const requirementIndex = Number(session?.requirementIndex || 0);
+  return (task?.sessions || []).find((candidate) => (
+    candidate?.sessionType === "trial"
+    && Number(candidate?.requirementIndex || 0) === requirementIndex
+    && String(candidate?.session_id || "").trim()
+  )) || null;
+}
+
+function candidateTrialSyncAvailability(task, session, candidateCount = session?.candidateCount) {
+  const trialSession = candidateChangeTrialSession(task, session);
+  const normalizedCandidateCount = Number(candidateCount || 0);
+  let reason = "";
+  if (session?.sessionType !== "formal") reason = "仅正式考试名单可以同步到试考。";
+  else if (!trialSession) reason = "当前正式考试没有对应试考场次。";
+  else if (normalizedCandidateCount <= 0) reason = "正式考试尚无已导入考生。";
+  else if (!candidateChangeSessionAllowsChanges(trialSession)) reason = "对应试考已经结束。";
+  return {
+    available: !reason,
+    reason,
+    formal_session_id: String(session?.session_id || ""),
+    candidate_count: normalizedCandidateCount,
+    trial_session: trialSession ? candidateChangeResponseSession(trialSession) : null,
+    course_code: DEFAULT_TRIAL_COURSE_CODE,
+  };
+}
+
+async function candidateChangeCoursesForSession(task, session, login = getYikaoLoginForTask(task)) {
+  if (session?.sessionType === "trial") {
+    return [{ code: DEFAULT_TRIAL_COURSE_CODE, name: "试考" }];
+  }
+  const sessionId = String(session?.session_id || "").trim();
+  const result = await fetchTenantCoursesForSession({
+    login,
+    apiBase: sessionChangeApiBase(login),
+    sessionId,
+    knownCourses: candidateChangeCourseContext(task, session),
+    requestJson: readTenantJsonWithLogin,
+  });
+  if (!result.complete) {
+    const error = new Error(`本场次科目读取不完整，${result.failedCourseCodes.length} 个科目关联查询失败，已停止考生变更。`);
+    error.status = 502;
+    throw error;
+  }
+  if (!result.courses.length) {
+    const error = new Error("未读取到属于本场次的科目，已停止考生变更。");
+    error.status = 409;
+    throw error;
+  }
+  return result.courses;
+}
+
 function candidateChangeRosterRows(tenantEntries = [], localCandidates = [], courses = []) {
   const preferCompleteValue = (liveValue, localValue) => {
     const liveText = String(liveValue || "").trim();
@@ -5662,7 +6366,12 @@ function candidateChangeRosterRows(tenantEntries = [], localCandidates = [], cou
   ).candidates;
 }
 
-async function readCandidateChangeRoster(task, session, localOverride = null) {
+async function readCandidateChangeRoster(
+  task,
+  session,
+  localOverride = null,
+  courses = candidateChangeCourseContext(task, session),
+) {
   const sessionId = String(session.session_id || "").trim();
   const login = getYikaoLoginForTask(task);
   const [tenantEntries, localCandidates] = await Promise.all([
@@ -5671,23 +6380,30 @@ async function readCandidateChangeRoster(task, session, localOverride = null) {
       ? Promise.resolve(localOverride)
       : runTaskState("list_candidates", { taskId: task.taskId, sessionId }).catch(() => []),
   ]);
-  if (!tenantEntries.length && Number(session.candidateCount || 0) > 0) {
+  const expectedEmptyRoster = Array.isArray(localOverride) && localOverride.length === 0;
+  if (!tenantEntries.length && Number(session.candidateCount || 0) > 0 && !expectedEmptyRoster) {
     const error = new Error("易考线上名单返回为空，已停止生成变更，避免使用过期本地名单。");
     error.status = 409;
     throw error;
   }
-  return candidateChangeRosterRows(tenantEntries, localCandidates, candidateChangeCourseContext(task, session));
+  return candidateChangeRosterRows(tenantEntries, localCandidates, courses);
 }
 
-async function candidateChangeEditorFieldsForSession(task, session, login = getYikaoLoginForTask(task)) {
+async function candidateChangeEditorFieldsForSession(
+  task,
+  session,
+  login = getYikaoLoginForTask(task),
+  courses = candidateChangeCourseContext(task, session),
+) {
   const sessionId = String(session.session_id || "").trim();
-  const [storedMappings, sessionConfig] = await Promise.all([
-    runTaskState("list_custom_fields", { taskId: task.taskId, sessionId }).catch(() => []),
-    getTenantSessionDetail(login, sessionId).catch(() => null),
-  ]);
+  const storedMappings = await runTaskState("list_custom_fields", {
+    taskId: task.taskId,
+    sessionId,
+  }).catch(() => []);
   return buildCandidateChangeEditorFields({
-    personal: sessionConfig?.detail?.personal || {},
+    personal: taskSessionPersonal(task, sessionId, storedMappings),
     storedMappings,
+    courses,
   });
 }
 
@@ -5709,10 +6425,11 @@ async function handleCandidateChangeRoster(taskId, sessionId, req, res) {
   if (!task || !session) return;
   try {
     const login = getYikaoLoginForTask(task);
+    const courses = await candidateChangeCoursesForSession(task, session, login);
     const [candidates, changes, editorFields] = await Promise.all([
-      readCandidateChangeRoster(task, session),
+      readCandidateChangeRoster(task, session, null, courses),
       runTaskState("list_candidate_changes", { taskId, sessionId }),
-      candidateChangeEditorFieldsForSession(task, session, login),
+      candidateChangeEditorFieldsForSession(task, session, login, courses),
     ]);
     const phase = candidateChangeSessionPhase(session);
     return json(res, 200, {
@@ -5725,6 +6442,10 @@ async function handleCandidateChangeRoster(taskId, sessionId, req, res) {
       checkedAt: new Date().toISOString(),
       onlineVerified: true,
       editorFields,
+      courses,
+      trialSession: candidateChangeTrialSession(task, session)
+        ? candidateChangeResponseSession(candidateChangeTrialSession(task, session))
+        : null,
       changes,
     });
   } catch (error) {
@@ -5740,38 +6461,93 @@ async function handleCandidateChangePreview(taskId, sessionId, req, res) {
   if (!task || !session) return;
   const payload = parseJsonSafe(await readBody(req));
   if (!payload || typeof payload !== "object") return badRequest(res, "请求内容不是合法 JSON。");
-  const sourceType = ["full_list", "manual"].includes(String(payload.sourceType || ""))
+  const sourceType = ["append_list", "full_list", "manual"].includes(String(payload.sourceType || ""))
     ? String(payload.sourceType)
     : "full_list";
   const reason = String(payload.reason || "").trim();
   if (!reason) return badRequest(res, "请填写变更原因。");
-  let proposedCandidates = normalizeCandidateRoster(payload.candidates || []).candidates;
+  const clearRoomsRequested = payload.clearRooms === true;
+  const syncAddedToTrial = payload.syncAddedToTrial === true;
+  const trialSession = candidateChangeTrialSession(task, session);
+  if (syncAddedToTrial && !trialSession) {
+    return badRequest(res, "当前正式考试没有对应试考场次，不能同步新增考生。");
+  }
+  const uploadedCandidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+  let proposedCandidates = normalizeCandidateRoster(uploadedCandidates).candidates;
   let currentCandidates;
+  let courses;
   try {
-    currentCandidates = await readCandidateChangeRoster(task, session);
+    const login = getYikaoLoginForTask(task);
+    courses = await candidateChangeCoursesForSession(task, session, login);
+    currentCandidates = await readCandidateChangeRoster(task, session, null, courses);
   } catch (error) {
     return json(res, Number(error?.status || 502), { error: error?.message || "易考线上名单读取失败。" });
+  }
+  const appendPlan = sourceType === "append_list"
+    ? buildAppendOnlyCandidateRoster(currentCandidates, uploadedCandidates)
+    : null;
+  if (appendPlan?.errors.length) {
+    return json(res, 400, { error: "只新增名单校验失败", errors: appendPlan.errors });
+  }
+  if (appendPlan) proposedCandidates = appendPlan.candidates;
+  if (clearRoomsRequested && proposedCandidates.length) {
+    return badRequest(res, "清空本场次考生及分班时，变更后名单必须为空。");
+  }
+  if (appendPlan && !appendPlan.additions.length) {
+    return json(res, 400, {
+      error: "名单中的考生在易考中均已存在，没有需要新增的考生。",
+      appendSummary: {
+        uploaded: appendPlan.uploadedCount,
+        added: 0,
+        skippedExisting: appendPlan.skippedExisting.length,
+      },
+    });
   }
   const preliminaryPreview = buildCandidateChangePreview(currentCandidates, proposedCandidates);
   if (preliminaryPreview.errors.length) {
     return json(res, 400, { error: "名单差异校验失败", errors: preliminaryPreview.errors });
   }
-  const validationCandidates = candidateRosterForValidation(proposedCandidates, currentCandidates);
+  const validationCandidates = appendPlan
+    ? appendPlan.additions
+    : candidateRosterForValidation(proposedCandidates, currentCandidates);
   const validationErrors = [
     ...validateCandidatePayload(validationCandidates),
     ...validateCandidateCustomFields(validationCandidates),
   ];
-  if (validationErrors.length) return json(res, 400, { error: "最新版名单校验失败", errors: validationErrors });
-  const courseAssignment = prepareCandidatesForCourseImport(proposedCandidates, task, { sessionId });
+  if (validationErrors.length) {
+    return json(res, 400, {
+      error: sourceType === "append_list" ? "只新增名单校验失败" : "最新版名单校验失败",
+      errors: validationErrors,
+    });
+  }
+  const candidatesForAssignment = appendPlan ? validationCandidates : proposedCandidates;
+  const courseAssignment = prepareCandidatesForCourseImport(candidatesForAssignment, task, { sessionId, courses });
   if (courseAssignment.errors.length) {
     return json(res, 400, { error: "考生科目分配失败", errors: courseAssignment.errors });
   }
-  proposedCandidates = normalizeCandidateRoster(courseAssignment.candidates).candidates;
+  proposedCandidates = appendPlan
+    ? buildAppendOnlyCandidateRoster(currentCandidates, courseAssignment.candidates).candidates
+    : normalizeCandidateRoster(courseAssignment.candidates).candidates;
   const preview = buildCandidateChangePreview(currentCandidates, proposedCandidates);
   if (preview.errors.length) return json(res, 400, { error: "名单差异校验失败", errors: preview.errors });
-  if (!preview.items.length) return json(res, 400, { error: "最新版名单与易考线上名单没有差异。" });
+  if (!preview.items.length && !(clearRoomsRequested && Number(session.roomCount || 0) > 0)) {
+    return json(res, 400, { error: "最新版名单与易考线上名单没有差异。" });
+  }
   const phase = candidateChangeSessionPhase(session);
-  const impact = candidateChangeImpact({ session, summary: preview.summary });
+  const impact = {
+    ...candidateChangeImpact({ session, summary: preview.summary }),
+    ...(clearRoomsRequested ? { room_assignment: "clear_all" } : {}),
+    ...(appendPlan ? {
+      append_upload: {
+        uploaded_count: appendPlan.uploadedCount,
+        added_count: preview.summary.add,
+        skipped_existing_count: appendPlan.skippedExisting.length,
+      },
+    } : {}),
+    trial_candidate_sync: syncAddedToTrial
+      ? { requested: true, session_id: String(trialSession.session_id || ""), course_code: DEFAULT_TRIAL_COURSE_CODE }
+      : { requested: false },
+  };
   const user = getAuthUserFromRequest(auth, req);
   const changeSet = await runTaskState("create_candidate_change", {
     id: `CC-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${randomUUID().slice(0, 8).toUpperCase()}`,
@@ -5888,6 +6664,311 @@ async function executeCandidateChangeItem(login, sessionId, item, mappings) {
   throw new Error(`不支持的考生变更类型：${item.operation}`);
 }
 
+async function candidateTrialSyncFieldMappings({ task, sourceSessionId, trialSession, courses, login }) {
+  const sourceMappings = sourceSessionId
+    ? await runTaskState("list_custom_fields", { taskId: task.taskId, sessionId: sourceSessionId }).catch(() => [])
+    : [];
+  if (sourceMappings.length) {
+    const personalFields = await ensureSessionCustomPersonalFields(
+      login,
+      trialSession.session_id,
+      sourceMappings,
+      taskSessionPersonal(task, trialSession.session_id),
+    );
+    await runTaskState("upsert_custom_fields", {
+      taskId: task.taskId,
+      sessionId: trialSession.session_id,
+      fields: personalFields.mappings,
+    });
+    await persistSessionPersonalSnapshot(task.taskId, trialSession.session_id, personalFields.personal);
+  }
+  const editorFields = await candidateChangeEditorFieldsForSession(task, trialSession, login, courses);
+  return candidateChangeFieldMappings(editorFields);
+}
+
+async function syncCandidateChangeAddsToTrial({ task, trialSessionId, candidates = [] }) {
+  const trialSession = taskSessionForId(task, trialSessionId);
+  if (!trialSession || trialSession.sessionType !== "trial") {
+    const error = new Error("对应试考场次不存在，新增考生未同步到试考。");
+    error.status = 409;
+    throw error;
+  }
+  const login = getYikaoLoginForTask(task);
+  const courses = await candidateChangeCoursesForSession(task, trialSession, login);
+  const currentRoster = await readCandidateChangeRoster(task, trialSession, null, courses);
+  const existingPermits = new Set(currentRoster.map((candidate) => String(candidate.permit || "").trim()));
+  const requested = (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => ({
+      ...normalizeCandidateChangeRow(candidate),
+      course_code: DEFAULT_TRIAL_COURSE_CODE,
+      exam_status: "",
+    }))
+    .filter((candidate) => candidate.permit);
+  const pending = requested.filter((candidate) => !existingPermits.has(candidate.permit));
+  if (!pending.length) {
+    return {
+      status: requested.length ? "already_present" : "not_needed",
+      requestedCount: requested.length,
+      addedCount: 0,
+      skippedCount: requested.length,
+      sessionId: String(trialSession.session_id || ""),
+    };
+  }
+  const editorFields = await candidateChangeEditorFieldsForSession(task, trialSession, login, courses);
+  const mappings = candidateChangeFieldMappings(editorFields);
+  for (const candidate of pending) {
+    await postCandidateChangeEntry(login, trialSession.session_id, candidate, mappings);
+  }
+  const afterRoster = await readCandidateChangeRoster(task, trialSession, null, courses);
+  const afterPermits = new Set(afterRoster.map((candidate) => String(candidate.permit || "").trim()));
+  const missing = pending.filter((candidate) => !afterPermits.has(candidate.permit));
+  if (missing.length) {
+    const error = new Error(`试考名单回读缺少 ${missing.length} 名新增考生，自动同步未确认完成。`);
+    error.status = 502;
+    throw error;
+  }
+  await runTaskState("replace_candidates", {
+    taskId: task.taskId,
+    sessionId: trialSession.session_id,
+    candidates: afterRoster,
+  });
+  await updateTaskSessionProgress(task, trialSession.session_id, { candidateCount: afterRoster.length });
+  return {
+    status: "synced",
+    requestedCount: requested.length,
+    addedCount: pending.length,
+    skippedCount: requested.length - pending.length,
+    sessionId: String(trialSession.session_id || ""),
+    courseCode: DEFAULT_TRIAL_COURSE_CODE,
+  };
+}
+
+async function syncFormalRosterToTrial({ task, formalSession, trialSession, candidates = [] }) {
+  const login = getYikaoLoginForTask(task);
+  const courses = await candidateChangeCoursesForSession(task, trialSession, login);
+  const currentRoster = await readCandidateChangeRoster(task, trialSession, null, courses);
+  const plan = buildTrialCandidateSyncPlan(candidates, currentRoster, DEFAULT_TRIAL_COURSE_CODE);
+  const { requested, pending, skippedExisting } = plan;
+  if (!pending.length) {
+    await runTaskState("replace_candidates", {
+      taskId: task.taskId,
+      sessionId: trialSession.session_id,
+      candidates: currentRoster,
+    });
+    await updateTaskSessionProgress(task, trialSession.session_id, { candidateCount: currentRoster.length });
+    return {
+      status: requested.length ? "already_present" : "not_needed",
+      requestedCount: requested.length,
+      addedCount: 0,
+      skippedCount: skippedExisting.length,
+      candidateCount: currentRoster.length,
+      sessionId: String(trialSession.session_id || ""),
+      courseCode: DEFAULT_TRIAL_COURSE_CODE,
+    };
+  }
+  const mappings = await candidateTrialSyncFieldMappings({
+    task,
+    sourceSessionId: formalSession.session_id,
+    trialSession,
+    courses,
+    login,
+  });
+  for (const candidate of pending) {
+    await postCandidateChangeEntry(login, trialSession.session_id, candidate, mappings);
+  }
+  const afterRoster = await readCandidateChangeRoster(task, trialSession, null, courses);
+  const afterPermits = new Set(afterRoster.map((candidate) => String(candidate.permit || "").trim()));
+  const missing = pending.filter((candidate) => !afterPermits.has(candidate.permit));
+  if (missing.length) {
+    const error = new Error(`试考名单回读缺少 ${missing.length} 名新增考生，同步结果未确认。`);
+    error.status = 502;
+    throw error;
+  }
+  await runTaskState("replace_candidates", {
+    taskId: task.taskId,
+    sessionId: trialSession.session_id,
+    candidates: afterRoster,
+  });
+  await updateTaskSessionProgress(task, trialSession.session_id, { candidateCount: afterRoster.length });
+  return {
+    status: "synced",
+    requestedCount: requested.length,
+    addedCount: pending.length,
+    skippedCount: skippedExisting.length,
+    candidateCount: afterRoster.length,
+    sessionId: String(trialSession.session_id || ""),
+    courseCode: DEFAULT_TRIAL_COURSE_CODE,
+  };
+}
+
+async function assignTrialRooms({ task, trialSession, candidateCount }) {
+  const login = getYikaoLoginForTask(task);
+  const trialRoomsPayload = await getRoomList(login, trialSession.session_id);
+  const targetSize = 30;
+  const existingTrialRooms = normalizeRooms(trialRoomsPayload).filter((room) => room?.id || room?.name);
+  if (existingTrialRooms.length) {
+    await updateTaskSessionProgress(task, trialSession.session_id, {
+      candidateCount,
+      roomCount: existingTrialRooms.length,
+    });
+    return {
+      status: "existing_rooms_preserved",
+      roomCount: existingTrialRooms.length,
+      targetSize,
+      roomSizes: existingTrialRooms
+        .map((room, index) => Number(normalizeMonitorRoom(room, index).num))
+        .filter((size) => Number.isInteger(size) && size > 0),
+    };
+  }
+
+  const roomSizes = calculateRoomSizes(candidateCount, targetSize);
+  const rooms = buildRooms(roomSizes);
+  const roomValidation = validateRooms(rooms, candidateCount);
+  if (!roomValidation.ok) {
+    const error = new Error("试考班级人数无效，已停止自动分班。");
+    error.status = 409;
+    error.detail = { candidateCount, targetSize, roomSizes };
+    throw error;
+  }
+
+  const base = normalizeApiBase(process.env.YIKAO_API_BASE);
+  const roomsUrl = new URL(`/tenant/api/session/${encodeURIComponent(trialSession.session_id)}/rooms/`, base);
+  const result = await readTenantJsonWithLogin(
+    login,
+    roomsUrl,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rooms: roomValidation.rooms }),
+    },
+    "试考自动分班",
+  );
+  const progressbarId = result?.id;
+  if (!progressbarId) {
+    const error = new Error("试考自动分班接口未返回 progressbar id");
+    error.status = 502;
+    error.detail = result;
+    throw error;
+  }
+  const progressbar = await pollProgressbar(login, progressbarId);
+  const createdRooms = normalizeRooms(await getRoomList(login, trialSession.session_id));
+  if (createdRooms.length !== roomValidation.rooms.length) {
+    const error = new Error(`试考自动分班回读为 ${createdRooms.length} 个班级，预期 ${roomValidation.rooms.length} 个。`);
+    error.status = 502;
+    throw error;
+  }
+
+  await updateTaskSessionProgress(task, trialSession.session_id, {
+    candidateCount,
+    roomCount: createdRooms.length,
+  });
+  const requirementIndex = Number(trialSession.requirementIndex || 0);
+  const roomsSubStatus = mergedRequirementStepSubStatus(
+    task,
+    "sessions_auto_rooms",
+    requirementIndex,
+    "trial",
+    "success",
+  );
+  const monitorSubStatus = mergedRequirementStepSubStatus(
+    task,
+    "sessions_invigilator_export",
+    requirementIndex,
+    "trial",
+    "success",
+  );
+  await updateTaskStep(task.taskId, "sessions_auto_rooms", "running", {
+    subStatus: roomsSubStatus,
+    message: `试考自动分班完成：${candidateCount} 人，${createdRooms.length} 个班级`,
+    result: {
+      sessionId: trialSession.session_id,
+      entriesNum: candidateCount,
+      roomCount: createdRooms.length,
+      progressbarId,
+      targetSize,
+      roomSizes,
+      rooms: roomValidation.rooms,
+    },
+  }, requirementIndex);
+  await updateTaskStep(task.taskId, "sessions_invigilator_export", "running", {
+    subStatus: monitorSubStatus,
+    message: `试考监考账号已生成：${createdRooms.length} 个班级`,
+    result: { sessionId: trialSession.session_id, roomCount: createdRooms.length, rooms: roomValidation.rooms },
+  }, requirementIndex);
+  return {
+    status: "assigned",
+    roomCount: createdRooms.length,
+    targetSize,
+    roomSizes,
+    rooms: roomValidation.rooms,
+    progressbarId,
+    progressbar,
+  };
+}
+
+async function handleCandidateTrialSync(formalSessionId, req, res) {
+  const task = await findVisibleTaskBySessionId(req, formalSessionId);
+  if (!task) return notFound(res);
+  const formalSession = taskSessionForId(task, formalSessionId);
+  if (formalSession?.sessionType !== "formal") {
+    return badRequest(res, "请选择正式考试场次后再同步名单至试考。");
+  }
+  const availability = candidateTrialSyncAvailability(task, formalSession);
+  if (!availability.available) {
+    return json(res, 409, { error: availability.reason, trial_sync: availability });
+  }
+  const trialSession = candidateChangeTrialSession(task, formalSession);
+  try {
+    const formalRoster = await readCandidateChangeRoster(
+      task,
+      formalSession,
+      null,
+      candidateChangeCourseContext(task, formalSession),
+    );
+    if (!formalRoster.length) {
+      return json(res, 409, { error: "正式考试线上名单为空，无法同步到试考。" });
+    }
+    const result = await syncFormalRosterToTrial({
+      task,
+      formalSession,
+      trialSession,
+      candidates: formalRoster,
+    });
+    const roomAssignment = await assignTrialRooms({
+      task,
+      trialSession,
+      candidateCount: result.candidateCount,
+    });
+    await updateTaskStep(task.taskId, taskSessionImportStepKey("trial"), "success", {
+      message: result.addedCount
+        ? `正式名单已同步到试考：新增 ${result.addedCount} 人，跳过 ${result.skippedCount} 人，自动分班 ${roomAssignment.roomCount} 个`
+        : `试考名单已是最新：跳过 ${result.skippedCount} 人，班级 ${roomAssignment.roomCount} 个`,
+      result: {
+        formalSessionId: formalSession.session_id,
+        trialSessionId: trialSession.session_id,
+        courseCode: DEFAULT_TRIAL_COURSE_CODE,
+        requestedCount: result.requestedCount,
+        addedCount: result.addedCount,
+        skippedCount: result.skippedCount,
+        candidateCount: result.candidateCount,
+        roomAssignment,
+      },
+    }, Number(trialSession.requirementIndex || 0));
+    return json(res, 200, {
+      ok: true,
+      formal_session: candidateChangeResponseSession(formalSession),
+      trial_session: candidateChangeResponseSession(trialSession),
+      ...result,
+      room_assignment: roomAssignment,
+    });
+  } catch (error) {
+    return json(res, Number(error?.status || 502), {
+      error: error?.message || "正式考试名单同步到试考失败。",
+      detail: error?.detail || null,
+    });
+  }
+}
+
 async function handleCandidateChangeApply(taskId, sessionId, changeSetId, req, res) {
   const { task, session } = await visibleTaskSession(taskId, sessionId, req, res);
   if (!task || !session) return;
@@ -5910,7 +6991,9 @@ async function handleCandidateChangeApply(taskId, sessionId, changeSetId, req, r
   }
   state.candidateChangeInFlight.add(changeSetId);
   try {
-    const currentCandidates = await readCandidateChangeRoster(task, session);
+    const login = getYikaoLoginForTask(task);
+    const courses = await candidateChangeCoursesForSession(task, session, login);
+    const currentCandidates = await readCandidateChangeRoster(task, session, null, courses);
     const currentHash = candidateRosterHash(currentCandidates);
     if (currentHash !== changeSet.baselineHash) {
       const conflicted = await runTaskState("update_candidate_change", {
@@ -5920,9 +7003,16 @@ async function handleCandidateChangeApply(taskId, sessionId, changeSetId, req, r
       });
       return json(res, 409, { error: "易考线上名单已变化，请重新生成差异。", changeSet: conflicted });
     }
+    const proposedRoster = proposedRosterFromCandidateChange(changeSet);
+    const courseValidation = prepareCandidatesForCourseImport(proposedRoster, task, { sessionId, courses });
+    if (courseValidation.errors.length) {
+      return json(res, 409, {
+        error: "变更草稿中存在不属于本场次的科目编号，请重新生成差异。",
+        errors: courseValidation.errors,
+      });
+    }
     await runTaskState("update_candidate_change", { changeSetId, status: "applying", error: "" });
-    const login = getYikaoLoginForTask(task);
-    const editorFields = await candidateChangeEditorFieldsForSession(task, session, login);
+    const editorFields = await candidateChangeEditorFieldsForSession(task, session, login, courses);
     const mappings = candidateChangeFieldMappings(editorFields);
     const itemResults = [];
     for (const operation of ["add", "edit", "delete"]) {
@@ -5935,18 +7025,30 @@ async function handleCandidateChangeApply(taskId, sessionId, changeSetId, req, r
         }
       }
     }
-    const proposedRoster = proposedRosterFromCandidateChange(changeSet);
-    const afterRoster = await readCandidateChangeRoster(task, session, proposedRoster);
+    const afterRoster = await readCandidateChangeRoster(task, session, proposedRoster, courses);
     const afterHash = candidateRosterHash(afterRoster);
     const failedItems = itemResults.filter((item) => item.status === "failed");
     const readbackMatches = afterHash === changeSet.proposedHash;
     let roomAssignment = { status: "not_needed", assignedCount: 0, assignments: [] };
     let roomAssignmentError = "";
+    const clearRoomsRequested = changeSet.impact?.room_assignment === "clear_all";
     const addedPermits = (changeSet.items || [])
       .filter((item) => item.operation === "add" && itemResults.some((result) => result.id === item.id && result.status === "success"))
       .map((item) => String(item.permit || item.after?.permit || "").trim())
       .filter(Boolean);
-    if (!failedItems.length && readbackMatches && addedPermits.length) {
+    if (!failedItems.length && readbackMatches && clearRoomsRequested) {
+      try {
+        roomAssignment = await clearCandidateChangeRooms({
+          login,
+          apiBase: sessionChangeApiBase(login),
+          sessionId,
+          requestJson: readTenantJsonWithLogin,
+        });
+      } catch (error) {
+        roomAssignmentError = error?.message || String(error);
+        roomAssignment = { status: "failed", removedCount: 0, error: roomAssignmentError };
+      }
+    } else if (!failedItems.length && readbackMatches && addedPermits.length) {
       try {
         roomAssignment = await assignAddedCandidatesToExistingRooms({ login, sessionId, permits: addedPermits });
       } catch (error) {
@@ -5959,14 +7061,43 @@ async function handleCandidateChangeApply(taskId, sessionId, changeSetId, req, r
     const roomAssignmentFailed = roomAssignment.status === "failed"
       || (["assigned", "already_assigned"].includes(roomAssignment.status)
         && (coveredRoomPermits !== addedPermits.length || (roomAssignment.pendingPermits || []).length > 0));
-    const finalStatus = !failedItems.length && readbackMatches && !roomAssignmentFailed ? "applied" : "partial_failed";
+    let trialSync = { status: "not_requested", requestedCount: 0, addedCount: 0, skippedCount: 0 };
+    let trialSyncError = "";
+    if (changeSet.impact?.trial_candidate_sync?.requested) {
+      if (!failedItems.length && readbackMatches && !roomAssignmentFailed) {
+        const addedCandidates = (changeSet.items || [])
+          .filter((item) => item.operation === "add" && itemResults.some((result) => result.id === item.id && result.status === "success"))
+          .map((item) => item.after)
+          .filter(Boolean);
+        try {
+          trialSync = await syncCandidateChangeAddsToTrial({
+            task,
+            trialSessionId: changeSet.impact.trial_candidate_sync.session_id,
+            candidates: addedCandidates,
+          });
+        } catch (error) {
+          trialSyncError = error?.message || String(error);
+          trialSync = { status: "failed", requestedCount: addedCandidates.length, addedCount: 0, error: trialSyncError };
+        }
+      } else {
+        trialSync = { status: "skipped_formal_failed", requestedCount: 0, addedCount: 0 };
+      }
+    }
+    const trialSyncFailed = trialSync.status === "failed";
+    const finalStatus = !failedItems.length && readbackMatches && !roomAssignmentFailed && !trialSyncFailed
+      ? "applied"
+      : "partial_failed";
     const errorText = [
       failedItems.length ? `${failedItems.length} 项执行失败` : "",
       !readbackMatches ? "线上回读结果与预览不一致" : "",
       roomAssignmentFailed ? roomAssignmentError || "新增考生分班未完全成功" : "",
+      trialSyncFailed ? trialSyncError || "新增考生同步到试考未完全成功" : "",
     ].filter(Boolean).join("；");
     await runTaskState("replace_candidates", { taskId, sessionId, candidates: afterRoster });
-    await updateTaskSessionProgress(task, sessionId, { candidateCount: afterRoster.length });
+    await updateTaskSessionProgress(task, sessionId, {
+      candidateCount: afterRoster.length,
+      ...(clearRoomsRequested && ["cleared", "already_empty"].includes(roomAssignment.status) ? { roomCount: 0 } : {}),
+    });
     const pendingBySession = task.config?.candidateChangePending && typeof task.config.candidateChangePending === "object"
       ? task.config.candidateChangePending
       : {};
@@ -5980,14 +7111,19 @@ async function handleCandidateChangeApply(taskId, sessionId, changeSetId, req, r
             updatedAt: new Date().toISOString(),
             impact: {
               ...(changeSet.impact || {}),
-              room_assignment: roomAssignment.status === "assigned" || roomAssignment.status === "already_assigned"
+              room_assignment: ["assigned", "already_assigned", "cleared", "already_empty"].includes(roomAssignment.status)
                 ? "completed"
                 : roomAssignment.status === "no_existing_rooms"
                   ? "needs_preview"
                   : changeSet.impact?.room_assignment || "unchanged",
+              trial_candidate_sync: {
+                ...(changeSet.impact?.trial_candidate_sync || {}),
+                result: trialSync,
+              },
             },
             status: finalStatus,
             roomAssignment,
+            trialSync,
           },
         },
       },
@@ -6004,6 +7140,7 @@ async function handleCandidateChangeApply(taskId, sessionId, changeSetId, req, r
       changeSet: updated,
       readback: { matched: readbackMatches, rosterHash: afterHash, candidateCount: afterRoster.length },
       roomAssignment,
+      trialSync,
     });
   } catch (error) {
     const failed = await runTaskState("update_candidate_change", {
@@ -6017,7 +7154,7 @@ async function handleCandidateChangeApply(taskId, sessionId, changeSetId, req, r
   }
 }
 
-async function buildTenantSessionSyncPreview(task, session, login, apiBase, checkedAt) {
+async function buildTenantSessionSyncPreview(task, session, login, apiBase, checkedAt, courseReadCache = {}) {
   const sessionId = String(session.session_id || "").trim();
   const detail = await fetchTenantSessionDetailWithListFallback({
     apiBase,
@@ -6036,6 +7173,7 @@ async function buildTenantSessionSyncPreview(task, session, login, apiBase, chec
         ? taskCoursesForChange(task, Number(session.requirementIndex || 0))
         : [],
       requestJson: readTenantJsonWithLogin,
+      courseReadCache,
     });
   } catch (error) {
     inventory = { readbackWarning: `科目和试卷读取失败：${sessionSyncErrorMessage(error)}` };
@@ -6052,11 +7190,12 @@ async function handleSessionSyncPreview(taskId, req, res, { persist = false, per
   const apiBase = sessionChangeApiBase(login);
   const checkedAt = new Date().toISOString();
   const sessions = [];
+  const courseReadCache = { courseDetails: new Map() };
   for (const session of task.sessions || []) {
     const sessionId = String(session.session_id || "").trim();
     if (!sessionId) continue;
     try {
-      sessions.push(await buildTenantSessionSyncPreview(task, session, login, apiBase, checkedAt));
+      sessions.push(await buildTenantSessionSyncPreview(task, session, login, apiBase, checkedAt, courseReadCache));
     } catch (error) {
       sessions.push({
         sessionId,
@@ -6508,6 +7647,19 @@ async function handleCourseChange(taskId, req, res) {
   if (!formalSession?.session_id) return badRequest(res, "正式考试场次尚未创建，不能修改科目信息。");
   const storedCourses = taskCoursesForChange(task, requirementIndex);
   if (!storedCourses.length) return badRequest(res, "未找到已创建的易考科目，不能修改科目信息。");
+  const requirementConfig = taskExamRequirements(task)[requirementIndex]?.config || task.config || {};
+  const storedByCode = new Map(storedCourses.map((course) => [String(course.code || ""), course]));
+  const configuredCourses = Array.isArray(requirementConfig.courses) ? requirementConfig.courses : [];
+  const configuredByName = new Map(configuredCourses.map((course) => [String(course.name || "").trim(), course]));
+  const mergeConfirmedCourses = (confirmedCourses) => confirmedCourses.map((course, index) => ({
+    ...(configuredByName.get(String(course.name || "").trim()) || {}),
+    ...(storedByCode.get(String(course.code || "")) || {}),
+    ...course,
+    name: course.name,
+    code: course.code,
+    form_codes: course.form_codes,
+    order: index + 1,
+  }));
 
   const login = getYikaoLoginForTask(task);
   const apiBase = sessionChangeApiBase(login);
@@ -6527,12 +7679,15 @@ async function handleCourseChange(taskId, req, res) {
       emitLog: (message) => apiLogs.push(message),
     });
     const plan = buildCourseChangePlan(snapshots, requestedNames);
-    if (!plan.some((item) => item.changed)) {
+    const hasMissingBinding = snapshots.some((course) => (
+      !(course.session_ids || []).includes(String(formalSession.session_id))
+    ));
+    if (!plan.some((item) => item.changed || item.reordered) && !hasMissingBinding) {
       return badRequest(res, "易考科目信息与提交内容一致，无需修改。");
     }
 
     await updateTaskStep(taskId, "session_change", "running", {
-      message: `开始修改正式考试场次 ${formalSession.session_id} 的科目信息`,
+      message: `开始同步正式考试场次 ${formalSession.session_id} 的科目信息`,
       result: { history: previousHistory, requirementIndex },
     });
     const result = await applyTenantCourseChanges({
@@ -6542,17 +7697,31 @@ async function handleCourseChange(taskId, req, res) {
       login,
       requestJson: readTenantJsonWithLogin,
       emitLog: (message) => apiLogs.push(message),
+      sessionId: formalSession.session_id,
+      creationConfig: requirementConfig,
+      onCoursesEnsured: async (partialCourses) => {
+        await persistTaskRequirementCourses(taskId, requirementIndex, mergeConfirmedCourses(partialCourses));
+      },
     });
     remoteModified = result.changed;
-    const courses = result.courses.map((course, index) => ({
-      ...storedCourses[index],
-      name: course.name,
-      code: course.code,
-      form_codes: course.form_codes,
-      order: Number(storedCourses[index]?.order || index + 1),
-    }));
+    const courses = mergeConfirmedCourses(result.courses);
     await persistTaskRequirementCourses(taskId, requirementIndex, courses);
     apiLogs.push("已同步本地科目信息记录");
+    await updateTaskStep(taskId, "course_create", "success", {
+      message: `科目同步完成，当前科目：${courses.map((course) => `${course.name}/${course.code}`).join("、")}`,
+      result: { courses },
+    }, requirementIndex);
+    await updateTaskStep(taskId, "paper_bind", "success", {
+      message: `已确认 ${courses.length} 个科目绑定到正式考试场次`,
+      result: {
+        sessionId: formalSession.session_id,
+        courseCount: courses.length,
+        bindResult: {
+          status: "success",
+          results: courses.map((course) => ({ course_code: course.code })),
+        },
+      },
+    }, requirementIndex);
 
     const courseRequirementChangeApplied = Boolean(
       requirementChange.pending
@@ -6575,13 +7744,13 @@ async function handleCourseChange(taskId, req, res) {
       courseRequirementChangeId: requestedRequirementChangeId,
       courseRequirementChangeApplied,
     });
-    const message = [`修改正式考试场次 ${formalSession.session_id}：科目信息`, ...apiLogs].join("\n");
+    const message = [`同步正式考试场次 ${formalSession.session_id}：科目信息`, ...apiLogs].join("\n");
     const loggedTask = await updateTaskStep(taskId, "session_change", "success", {
       message,
       result: {
         requirementIndex,
         sessionId: formalSession.session_id,
-        changedFields: ["course_name"],
+        changedFields: [...new Set(result.diff.map((item) => item.field))],
         diff: result.diff,
         courses,
         history,
@@ -6602,11 +7771,12 @@ async function handleCourseChange(taskId, req, res) {
       courseRequirementChangeApplied,
     });
   } catch (error) {
+    remoteModified = remoteModified || Boolean(error?.remoteModified);
     const errorMessage = tenantCourseChangeErrorMessage(error);
     let failedTask = null;
     try {
       failedTask = await updateTaskStep(taskId, "session_change", "failed", {
-        message: [`修改正式考试场次 ${formalSession.session_id} 的科目信息失败：${errorMessage}`, ...apiLogs].filter(Boolean).join("\n"),
+        message: [`同步正式考试场次 ${formalSession.session_id} 的科目信息失败：${errorMessage}`, ...apiLogs].filter(Boolean).join("\n"),
         errorMessage,
         result: {
           requirementIndex,
@@ -6694,43 +7864,6 @@ async function enrichTaskPaperUnitInfoForDetail(req, task) {
   };
 }
 
-function sharedSheetSessionFieldsFromDetail(detail = {}) {
-  const clientLoginLimit = positiveNumber(detail?.login_times ?? detail?.loginTimes);
-  const leaveLimit = positiveNumber(detail?.lock_screen_time ?? detail?.lockScreenTime);
-  const start = String(detail?.start ?? detail?.start_time ?? detail?.startTime ?? "").trim();
-  const end = String(detail?.end ?? detail?.end_time ?? detail?.endTime ?? "").trim();
-  return {
-    ...(start ? { start } : {}),
-    ...(end ? { end } : {}),
-    ...(clientLoginLimit !== undefined ? { clientLoginLimit, login_times: clientLoginLimit } : {}),
-    ...(leaveLimit !== undefined ? { leaveLimit, lock_screen_time: leaveLimit } : {}),
-    ...(detail?.client_required !== undefined ? { client_required: Boolean(detail.client_required) } : {}),
-  };
-}
-
-async function enrichSharedSheetSessions(login, sessions = [], logs = []) {
-  const enriched = [];
-  for (const session of sessions) {
-    const sessionId = String(session?.session_id || session?.id || "").trim();
-    if (!sessionId) {
-      enriched.push(session);
-      continue;
-    }
-    try {
-      const { detail } = await getTenantSessionDetail(login, sessionId);
-      const fields = sharedSheetSessionFieldsFromDetail(detail);
-      enriched.push({ ...session, ...fields });
-      const loginTimesText = fields.clientLoginLimit !== undefined ? `，login_times=${fields.clientLoginLimit}` : "";
-      logs.push(`[项目共享大表] 已同步场次详情，session_id=${sessionId}${loginTimesText}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      logs.push(`[项目共享大表] 场次详情同步失败，已停止写表，session_id=${sessionId}：${message}`);
-      throw new Error(`场次详情同步失败，无法保证 L 列与考试配置一致，session_id=${sessionId}：${message}`);
-    }
-  }
-  return enriched;
-}
-
 async function handleProjectSharedSheetFill(taskId, req, res) {
   const task = await runTaskState("get", { taskId });
   if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
@@ -6759,14 +7892,13 @@ async function handleProjectSharedSheetFill(taskId, req, res) {
     if (!sessions.some((session) => session.sessionType === "trial")) {
       logs.push("[项目共享大表] 当前任务无试考场次，跳过试考填写");
     }
-    const login = getYikaoLoginForTask(task);
-    const syncedSessions = await enrichSharedSheetSessions(login, sessions, logs);
+    logs.push("[项目共享大表] 考试类型、登录/离开次数及扣时规则使用易考需求单配置");
 
     const settings = tencentDocsSettingsFromEnv(process.env);
     if (!settings.enabled) throw new Error("腾讯文档授权未配置，无法填写项目共享大表");
     const syncResult = await syncExamConfigToTencentDocs({
       config: task.config || {},
-      created: syncedSessions,
+      created: sessions,
       settings,
       platformAccountEmail,
     });
@@ -7615,6 +8747,18 @@ async function handleTaskHide(taskId, req, res) {
   const task = await runTaskState("get", { taskId });
   if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
   if (requestUrl.searchParams.get("archive") === "1") {
+    if (task.hiddenAt) {
+      return json(res, 200, { ok: true, archived: true, task });
+    }
+    await runTaskState("update_config", {
+      taskId,
+      config: {
+        operationWorkflowArchiveSnapshot: {
+          capturedAt: new Date().toISOString(),
+          ...projectWorkflowSummary(task),
+        },
+      },
+    });
     const result = await runTaskState("hide", { taskId });
     if (!result?.hidden) return notFound(res);
     const archivedTask = await runTaskState("get", { taskId });
@@ -7700,6 +8844,7 @@ function getOperationPersonnelTaskService() {
     readTask: (taskId) => runTaskState("get", { taskId }),
     updateTaskConfig: (taskId, config) => runTaskState("update_config", { taskId, config }),
     readRequirement: (requestId) => requestId ? runRequirementState("get", { requestId }) : null,
+    canAccessTask: (task, actor) => canViewOwner(actor, task?.ownerEmail || "", auth.users || []),
     coordinator: operationPersonnelCoordinator,
     activeAttemptIds: operationPersonnelTaskActiveAttempts,
     runInspectionSession: operationPersonnelLocalExecutionRequired,
@@ -7797,6 +8942,7 @@ async function handleOperationPersonnelTaskPreview(taskId, req, res) {
         environment: current.state?.environment,
         batch: draft.batch,
         batchCode: draft.batch?.code,
+        recipients: draft.recipients,
         detailUrl: String(draft.batch?.detailUrl || "").trim(),
         allowUnpublishedPreview: true,
         directoryProbeSummary: String(
@@ -7879,7 +9025,7 @@ async function handleOperationPersonnelTaskSend(taskId, req, res) {
       localHelper: {
         path: "/operation-personnel/send",
         payload: {
-          requestId: result.attemptId,
+          requestId: result.localExecution.completionToken,
           baseUrl: DEFAULT_OPERATION_CONSOLE_BASE_URL,
           sessionToken: result.localExecution.sessionToken,
           instruction: result.localExecution.instruction,
@@ -8253,7 +9399,10 @@ async function refreshOperationArchiveActuals(task, login) {
       logs,
     }));
   }
-  return operationArchiveActualsFromScoreRows(rows);
+  return {
+    ...operationArchiveActualsFromScoreRows(rows),
+    assessment: operationArchiveAssessmentFromPapers(task),
+  };
 }
 
 async function refreshOperationArchiveEvidenceForTask(task, options = {}) {
@@ -8567,10 +9716,32 @@ function operationBatchPatchFromArchiveSchedule(task, scheduleSynchronization, n
 }
 
 async function operationArchiveResponse(task, options = {}) {
-  const archiveState = operationArchiveState(task, options);
+  let responseTask = task;
+  let archiveState = operationArchiveState(responseTask, options);
+  if (archiveState.timedOut) {
+    const timedOutAt = new Date().toISOString();
+    const current = responseTask.config?.operationArchive || {};
+    for (const [id, preparation] of operationArchivePreparations) {
+      if (preparation.taskId === responseTask.taskId) operationArchivePreparations.delete(id);
+    }
+    responseTask = await persistOperationArchive(responseTask, {
+      status: archiveState.status,
+      previewToken: "",
+      activePreparationId: "",
+      activeStartedAt: "",
+      errorCode: archiveState.errorCode,
+      errorMessage: archiveState.errorMessage,
+      events: [...(Array.isArray(current.events) ? current.events : []), {
+        type: "operation_archive_timeout",
+        actor: "system-timeout",
+        createdAt: timedOutAt,
+      }],
+    });
+    archiveState = operationArchiveState(responseTask, options);
+  }
   archiveState.screenshot = operationArchiveScreenshotState(task);
   return {
-    task,
+    task: responseTask,
     state: archiveState,
   };
 }
@@ -8626,22 +9797,27 @@ async function handleOperationArchiveInspect(taskId, req, res) {
         throw error;
       }
       const id = randomUUID();
+      const activeStartedAt = new Date().toISOString();
       const preparation = {
         kind: "inspect",
         taskId,
         actorEmail,
+        recheckingUnknownResult: state.status === "result_unknown",
         draft: structuredClone(state.draft),
         draftVersion: state.draftVersion,
         draftFingerprint: state.draftFingerprint,
         batchDetailUrl: String(task.config?.operationBatch?.detailUrl || ""),
         scheduleInstruction: operationArchiveScheduleInstruction(task),
         actuals,
+        activeStartedAt,
         expiresAt: Date.now() + OPERATION_ARCHIVE_PREPARATION_TTL_MS,
       };
       operationArchivePreparations.set(id, preparation);
       task = await persistOperationArchive(task, {
         status: "inspecting",
         previewToken: "",
+        activePreparationId: id,
+        activeStartedAt,
         errorCode: "",
         errorMessage: "",
       });
@@ -8668,6 +9844,8 @@ async function handleOperationArchiveInspect(taskId, req, res) {
       task = await persistOperationArchive(task, {
         status: "inspection_failed",
         previewToken: "",
+        activePreparationId: "",
+        activeStartedAt: "",
         errorCode: String(helperResult.errorCode || "OPERATION_ARCHIVE_INSPECTION_FAILED"),
         errorMessage: String(helperResult.errorMessage || "归档检查失败"),
       });
@@ -8686,13 +9864,18 @@ async function handleOperationArchiveInspect(taskId, req, res) {
       task = await persistOperationArchive(task, {
         status: "inspection_failed",
         previewToken: "",
+        activePreparationId: "",
+        activeStartedAt: "",
         errorCode: String(error?.code || "OPERATION_ARCHIVE_BATCH_IDENTITY_MISMATCH"),
         errorMessage: String(error?.message || "归档批次身份校验失败"),
       });
       operationArchivePreparations.delete(preparationId);
       return json(res, 200, { ok: false, ...await operationArchiveResponse(task, { actuals: preparation.actuals }) });
     }
-    const alreadyArchived = helperResult.status === "already_archived";
+    const transition = operationArchiveInspectionTransition(helperResult.status, {
+      recheckingUnknownResult: preparation.recheckingUnknownResult,
+    });
+    const alreadyArchived = transition.status === "already_archived";
     const operationBatchPatch = operationBatchPatchFromArchiveSchedule(
       task,
       helperResult.scheduleSynchronization,
@@ -8702,17 +9885,19 @@ async function handleOperationArchiveInspect(taskId, req, res) {
     preparation.expiresAt = Date.now() + OPERATION_ARCHIVE_PREPARATION_TTL_MS;
     preparation.inspection = structuredClone(helperResult);
     task = await persistOperationArchive(task, {
-      status: alreadyArchived ? "already_archived" : "ready",
-      previewToken: alreadyArchived ? "" : preparationId,
+      status: transition.status,
+      previewToken: transition.issuePreview ? preparationId : "",
+      activePreparationId: "",
+      activeStartedAt: "",
       inspectedAt: now,
       ...(alreadyArchived ? { lastSubmittedFingerprint: preparation.draftFingerprint } : {}),
       externalStatus: String(helperResult.externalStatus || (alreadyArchived ? "已提交" : "待提交")),
       detailUrl: String(helperResult.detailUrl || ""),
       lastInspection: structuredClone(helperResult),
-      errorCode: "",
-      errorMessage: "",
+      errorCode: transition.errorCode,
+      errorMessage: transition.errorMessage,
     }, operationBatchPatch ? { operationBatch: { ...operationBatchPatch, status: "success" } } : {});
-    if (alreadyArchived) operationArchivePreparations.delete(preparationId);
+    if (!transition.issuePreview) operationArchivePreparations.delete(preparationId);
     return json(res, 200, { ok: true, ...await operationArchiveResponse(task, { actuals: preparation.actuals }) });
   } catch (error) {
     return json(res, Number(error?.status || 500), {
@@ -8744,6 +9929,7 @@ async function handleOperationArchiveSubmit(taskId, req, res) {
       }
       const attachments = await operationArchiveAttachmentPayloads(task, { required: true });
       const id = randomUUID();
+      const activeStartedAt = new Date().toISOString();
       const preparation = {
         ...inspected,
         kind: "submit",
@@ -8752,12 +9938,14 @@ async function handleOperationArchiveSubmit(taskId, req, res) {
         scheduleInstruction: operationArchiveScheduleInstruction(task),
         reusePreparedArchiveForm: inspected.inspection?.formPrepared === true
           && inspected.inspection?.scheduleSynchronization?.verified === true,
+        activeStartedAt,
         expiresAt: Date.now() + OPERATION_ARCHIVE_PREPARATION_TTL_MS,
       };
       operationArchivePreparations.set(id, preparation);
       task = await persistOperationArchive(task, {
         status: "submitting",
         activePreparationId: id,
+        activeStartedAt,
         errorCode: "",
         errorMessage: "",
       });
@@ -8796,6 +9984,7 @@ async function handleOperationArchiveSubmit(taskId, req, res) {
       status,
       previewToken: "",
       activePreparationId: "",
+      activeStartedAt: "",
       submittedAt: ["submitted", "already_archived"].includes(status) ? now : "",
       ...(["submitted", "already_archived"].includes(status)
         ? { lastSubmittedFingerprint: preparation.draftFingerprint }
@@ -9256,16 +10445,9 @@ async function handleOperationBatchReconciliation(taskId, req, res) {
   const actorEmail = normalizeEmail(getAuthUserFromRequest(auth, req)?.email || "local-admin");
   const existingOperationBatchCode = task.config?.operationBatchCode || task.config?.operationBatch?.code || "";
   const currentOperationBatch = task.config?.operationBatch || {};
-  if (!operationBatchCodeIsValid(existingOperationBatchCode)) {
+  if (existingOperationBatchCode && !operationBatchCodeIsValid(existingOperationBatchCode)) {
     return json(res, 409, {
-      error: "添加日程必须先有有效的批次代码，请先补录批次代码和批次名称。",
-      task,
-    });
-  }
-  if (!String(currentOperationBatch.batchName || "").trim()) {
-    return json(res, 409, {
-      error: "未取得实际批次名，请先重新同步批次信息。",
-      code: "OPERATION_BATCH_ACTUAL_NAME_MISSING",
+      error: "已记录的批次代码格式无效，请先核对批次信息。",
       task,
     });
   }
@@ -9294,6 +10476,7 @@ async function handleOperationBatchReconciliation(taskId, req, res) {
       draft,
       desired: buildDesiredOperationBatchSnapshot(task),
       mode: "reconciliation",
+      syncOnly: !existingOperationBatchCode,
       expiresAt: Date.now() + OPERATION_BATCH_LOCAL_PREPARATION_TTL_MS,
     };
     operationBatchLocalPreparations.set(nextPreparationId, preparation);
@@ -9310,8 +10493,9 @@ async function handleOperationBatchReconciliation(taskId, req, res) {
           draft,
           desired: operationBatchDesiredForLocalHelper(preparation.desired),
           operationBatchCode: existingOperationBatchCode,
-          publishRequired: !existingOperationBatchCode || currentOperationBatch.status !== "published",
+          publishRequired: Boolean(existingOperationBatchCode),
           publishAfterCreate: false,
+          syncOnly: preparation.syncOnly,
         },
       },
     });
@@ -9339,9 +10523,12 @@ async function handleOperationBatchReconciliation(taskId, req, res) {
     if (!created.operationBatchCode && !created.code) {
       throw new Error("本机助手回查结果缺少运营批次代码");
     }
-    if (helperResult.status !== "success"
+    const syncOnlyCompleted = preparation.syncOnly === true
+      && helperResult.syncOnly === true
+      && helperResult.status === "success";
+    if (!syncOnlyCompleted && (helperResult.status !== "success"
       || helperResult.publishStatus !== "published"
-      || created.status !== "published") {
+      || created.status !== "published")) {
       const error = new Error(helperResult.errorMessage || "运营批次发布结果未确认");
       error.code = String(helperResult.errorCode || "OPERATION_BATCH_PUBLISH_NOT_VERIFIED");
       error.status = 409;
@@ -9534,6 +10721,29 @@ async function handleContentRequirementEmail(taskId, req, res) {
   }
 }
 
+async function handleOperationContentRecipientDraft(taskId, req, res) {
+  const task = await runTaskState("get", { taskId });
+  if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+  const payload = parseJsonSafe(await readBody(req)) || {};
+  const actorEmail = getAuthUserFromRequest(auth, req)?.email || "";
+  const delivery = contentEmailDeliveryForTask(
+    task,
+    actorEmail,
+    { recipients: payload.recipients, cc: payload.cc },
+  );
+  const operationContentRecipientDraft = {
+    recipients: delivery.recipients,
+    cc: delivery.cc,
+    updatedAt: new Date().toISOString(),
+    updatedBy: actorEmail,
+  };
+  const updated = await runTaskState("update_config", {
+    taskId,
+    config: { operationContentRecipientDraft },
+  });
+  return json(res, 200, { ok: true, task: updated, draft: operationContentRecipientDraft });
+}
+
 async function handleContentTaskRemark(taskId, req, res) {
   const task = await runTaskState("get", { taskId });
   if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
@@ -9624,6 +10834,945 @@ function taskFormalSession(task = {}, requirementIndex = 0) {
   return (task.sessions || []).find((session) => (
     session.sessionType === "formal" && Number(session.requirementIndex || 0) === normalizedIndex
   ));
+}
+
+const MESSAGE_CENTER_PREPARATION_TTL_MS = 10 * 60 * 1000;
+const MESSAGE_CENTER_DEFAULT_API_BASE = "https://yygl.ata.net.cn";
+const MESSAGE_CENTER_DEFAULT_WEB_BASE = "https://yygl.ata.net.cn/#/MessageCampaigns";
+const MESSAGE_CENTER_SMS_SIGNATURE = "【全美在线北京】";
+const SMS_NOTIFICATION_TOTAL_LENGTH_LIMIT = 500;
+const SMS_NOTIFICATION_BODY_LENGTH_LIMIT = SMS_NOTIFICATION_TOTAL_LENGTH_LIMIT - MESSAGE_CENTER_SMS_SIGNATURE.length;
+const SMS_NOTIFICATION_TEMPLATE_KEYS = new Set(["shudao_written", "shudao_assessment"]);
+const messageCenterPreparations = new Map();
+const messageCenterImportsInFlight = new Set();
+const candidateChangeTouchPreparations = new Map();
+const smsNotificationUpdatesInFlight = new Set();
+
+function normalizeMessageCenterSettings(input = {}, existing = {}) {
+  const clearCredential = input.clearCredential === true || input.clearJwt === true;
+  const requestedAuthScheme = String(input.authScheme ?? existing.authScheme ?? "").trim().toLowerCase();
+  const authScheme = requestedAuthScheme === "apikey" ? "ApiKey" : requestedAuthScheme === "bearer" ? "Bearer" : "";
+  return {
+    apiBase: String(input.apiBase ?? existing.apiBase ?? MESSAGE_CENTER_DEFAULT_API_BASE).trim(),
+    webBaseUrl: String(input.webBaseUrl ?? existing.webBaseUrl ?? MESSAGE_CENTER_DEFAULT_WEB_BASE).trim(),
+    batchUrlTemplate: String(input.batchUrlTemplate ?? existing.batchUrlTemplate ?? "").trim(),
+    allowInsecureHttp: input.allowInsecureHttp === undefined
+      ? existing.allowInsecureHttp === true
+      : input.allowInsecureHttp === true,
+    authScheme,
+    credential: clearCredential
+      ? ""
+      : String(input.credential || input.apiKey || input.jwt || existing.credential || existing.apiKey || existing.jwt || "")
+        .replace(/\s+/g, ""),
+    verifiedAt: String(input.verifiedAt ?? existing.verifiedAt ?? ""),
+  };
+}
+
+async function readMessageCenterSettings() {
+  try {
+    const raw = await fs.readFile(messageCenterSettingsPath, "utf8");
+    return normalizeMessageCenterSettings(JSON.parse(raw));
+  } catch {
+    return normalizeMessageCenterSettings();
+  }
+}
+
+async function writeMessageCenterSettings(settings) {
+  await fs.writeFile(messageCenterSettingsPath, JSON.stringify(settings, null, 2), { encoding: "utf8", mode: 0o600 });
+  await fs.chmod(messageCenterSettingsPath, 0o600);
+}
+
+function publicMessageCenterSettings(settings = {}, env = process.env) {
+  const credential = settings.credential
+    || settings.apiKey
+    || settings.jwt
+    || env.MESSAGE_CENTER_CREDENTIAL
+    || env.MESSAGE_CENTER_API_KEY
+    || env.MESSAGE_CENTER_JWT;
+  const authScheme = settings.authScheme
+    || env.MESSAGE_CENTER_AUTH_SCHEME
+    || ((settings.jwt || env.MESSAGE_CENTER_JWT) ? "Bearer" : "ApiKey");
+  return {
+    apiBase: settings.apiBase || String(env.MESSAGE_CENTER_API_BASE || ""),
+    webBaseUrl: settings.webBaseUrl || String(env.MESSAGE_CENTER_WEB_BASE || ""),
+    batchUrlTemplate: settings.batchUrlTemplate || String(env.MESSAGE_CENTER_BATCH_URL_TEMPLATE || ""),
+    allowInsecureHttp: settings.allowInsecureHttp === true
+      || String(env.MESSAGE_CENTER_ALLOW_INSECURE_HTTP || "") === "1",
+    authScheme,
+    credentialConfigured: Boolean(credential),
+    jwtConfigured: Boolean(credential),
+    verifiedAt: String(settings.verifiedAt || ""),
+  };
+}
+
+async function messageCenterRuntimeConfig() {
+  return messageCenterConfigFromEnv(process.env, await readMessageCenterSettings());
+}
+
+async function handleMessageCenterSettings(req, res) {
+  const existing = await readMessageCenterSettings();
+  if (req.method === "GET") {
+    return json(res, 200, { ok: true, messageCenter: publicMessageCenterSettings(existing) });
+  }
+  try {
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    const settings = normalizeMessageCenterSettings(payload.messageCenter || payload, existing);
+    const config = messageCenterConfigFromEnv(process.env, settings);
+    const client = createMessageCenterClient(config);
+    const [capabilities] = await Promise.all([client.capabilities(), client.listImports()]);
+    const verified = { ...settings, verifiedAt: new Date().toISOString() };
+    await writeMessageCenterSettings(verified);
+    return json(res, 200, {
+      ok: true,
+      messageCenter: publicMessageCenterSettings(verified),
+      capabilities,
+    });
+  } catch (error) {
+    return json(res, Number(error?.status || 400), {
+      error: error?.message || String(error),
+      errorCode: String(error?.code || "MESSAGE_CENTER_CONNECTION_FAILED"),
+    });
+  }
+}
+
+function messageCenterRequestError(message, status = 409, code = "MESSAGE_CENTER_REQUEST_FAILED") {
+  const error = new Error(message);
+  error.status = status;
+  error.code = code;
+  return error;
+}
+
+function messageCenterActorEmail(req) {
+  return normalizeEmail(getAuthUserFromRequest(auth, req)?.email || "local-admin");
+}
+
+function smsNotificationConfigForTask(task = {}, requirementIndex = 0) {
+  const normalizedIndex = Number(requirementIndex);
+  if (!Number.isInteger(normalizedIndex) || normalizedIndex < 0) return null;
+  const requirements = task?.config?.examRequirements;
+  if (Array.isArray(requirements) && requirements.length) {
+    const requirement = requirements[normalizedIndex];
+    if (!requirement || typeof requirement !== "object") return null;
+    return requirement.config && typeof requirement.config === "object" ? requirement.config : {};
+  }
+  if (normalizedIndex !== 0) return null;
+  const rootConfig = task?.config || {};
+  const legacyRequirementConfig = rootConfig.examRequirement?.config;
+  return legacyRequirementConfig && typeof legacyRequirementConfig === "object"
+    ? { ...rootConfig, ...legacyRequirementConfig }
+    : rootConfig;
+}
+
+function taskSmsNotification(task = {}, requirementIndex = 0) {
+  const config = smsNotificationConfigForTask(task, requirementIndex);
+  if (!config) return null;
+  const rawVersion = Number(config.notificationContentVersion || 0);
+  return {
+    requirementIndex: Number(requirementIndex),
+    templateKey: String(config.notificationTemplateKey || "").trim(),
+    content: String(config.notificationContent || "").trim(),
+    version: Number.isInteger(rawVersion) && rawVersion >= 0 ? rawVersion : 0,
+    updatedAt: String(config.notificationContentUpdatedAt || ""),
+    updatedBy: String(config.notificationContentUpdatedBy || ""),
+  };
+}
+
+function normalizeSmsNotificationBody(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^(?:【全美在线北京】|【ATA】)+/, "")
+    .trimStart();
+}
+
+function normalizeSignedSmsContent(value) {
+  const body = normalizeSmsNotificationBody(value);
+  return body ? `${MESSAGE_CENTER_SMS_SIGNATURE}${body}` : "";
+}
+
+function signedTaskSmsContent(task = {}, requirementIndex = 0) {
+  const notification = taskSmsNotification(task, requirementIndex);
+  if (!notification) {
+    throw messageCenterRequestError(
+      "需求单序号无效，无法读取已保存的短信内容。",
+      400,
+      "SMS_NOTIFICATION_REQUIREMENT_INVALID",
+    );
+  }
+  if (!notification.content) {
+    throw messageCenterRequestError(
+      "请先选择短信模板并保存短信内容后再进行触达。",
+      409,
+      "SMS_NOTIFICATION_REQUIRED",
+    );
+  }
+  const smsContent = normalizeSignedSmsContent(notification.content);
+  if (!smsContent || smsContent.length > SMS_NOTIFICATION_TOTAL_LENGTH_LIMIT) {
+    throw messageCenterRequestError(
+      "已保存的短信内容无有效正文，或加上【全美在线北京】签名后超过 500 个字符，请重新编辑并保存。",
+      409,
+      "SMS_NOTIFICATION_CONTENT_INVALID",
+    );
+  }
+  return {
+    notification,
+    smsContent,
+  };
+}
+
+async function handleSmsNotificationUpdate(taskId, requirementIndexValue, req, res) {
+  const requirementIndex = Number(requirementIndexValue);
+  if (!Number.isInteger(requirementIndex) || requirementIndex < 0) {
+    return json(res, 400, {
+      error: "需求单序号无效。",
+      errorCode: "SMS_NOTIFICATION_REQUIREMENT_INVALID",
+    });
+  }
+  const lockKey = `${taskId}:${requirementIndex}`;
+  if (smsNotificationUpdatesInFlight.has(lockKey)) {
+    return json(res, 409, {
+      error: "短信内容正在保存，请稍后重试。",
+      errorCode: "SMS_NOTIFICATION_UPDATE_IN_FLIGHT",
+    });
+  }
+  smsNotificationUpdatesInFlight.add(lockKey);
+  try {
+    const task = await runTaskState("get", { taskId });
+    if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+    const current = taskSmsNotification(task, requirementIndex);
+    if (!current) {
+      return json(res, 400, {
+        error: "需求单序号无效。",
+        errorCode: "SMS_NOTIFICATION_REQUIREMENT_INVALID",
+      });
+    }
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    const templateKey = String(payload.templateKey || "").trim();
+    const submittedContent = String(payload.content || "").trim();
+    const content = normalizeSmsNotificationBody(submittedContent);
+    const expectedVersion = Number(payload.expectedVersion);
+    if (!SMS_NOTIFICATION_TEMPLATE_KEYS.has(templateKey)) {
+      return json(res, 400, {
+        error: "短信模板无效，请重新选择。",
+        errorCode: "SMS_NOTIFICATION_TEMPLATE_INVALID",
+      });
+    }
+    if (!submittedContent) {
+      return json(res, 400, {
+        error: `短信正文不能为空且不能超过 ${SMS_NOTIFICATION_BODY_LENGTH_LIMIT} 个字符。`,
+        errorCode: "SMS_NOTIFICATION_CONTENT_INVALID",
+      });
+    }
+    if (!content) {
+      return json(res, 400, {
+        error: "短信内容不能只包含短信签名。",
+        errorCode: "SMS_NOTIFICATION_CONTENT_INVALID",
+      });
+    }
+    if (content.length > SMS_NOTIFICATION_BODY_LENGTH_LIMIT) {
+      return json(res, 400, {
+        error: `短信正文不能超过 ${SMS_NOTIFICATION_BODY_LENGTH_LIMIT} 个字符（平台签名另计）。`,
+        errorCode: "SMS_NOTIFICATION_CONTENT_INVALID",
+      });
+    }
+    if (!Object.hasOwn(payload, "expectedVersion") || !Number.isInteger(expectedVersion) || expectedVersion < 0) {
+      return json(res, 400, {
+        error: "短信内容版本无效，请刷新后重试。",
+        errorCode: "SMS_NOTIFICATION_VERSION_INVALID",
+      });
+    }
+    if (expectedVersion !== current.version) {
+      return json(res, 409, {
+        error: "短信内容已被其他人更新，请刷新后再保存。",
+        errorCode: "SMS_NOTIFICATION_VERSION_CONFLICT",
+        smsNotification: current,
+      });
+    }
+
+    const now = new Date().toISOString();
+    const actorEmail = messageCenterActorEmail(req);
+    const nextConfigFields = {
+      notificationTemplateKey: templateKey,
+      notificationContent: content,
+      notificationContentVersion: current.version + 1,
+      notificationContentUpdatedAt: now,
+      notificationContentUpdatedBy: actorEmail,
+    };
+    const requirements = task.config?.examRequirements;
+    let configPatch;
+    if (Array.isArray(requirements) && requirements.length) {
+      const examRequirements = [...requirements];
+      const requirement = examRequirements[requirementIndex];
+      const nextRequirement = {
+        ...requirement,
+        config: {
+          ...(requirement.config || {}),
+          ...nextConfigFields,
+        },
+      };
+      examRequirements[requirementIndex] = nextRequirement;
+      configPatch = {
+        examRequirements,
+        ...(requirementIndex === 0 ? { examRequirement: nextRequirement } : {}),
+      };
+    } else if (requirementIndex === 0 && task.config?.examRequirement && typeof task.config.examRequirement === "object") {
+      const examRequirement = {
+        ...task.config.examRequirement,
+        config: {
+          ...(task.config.examRequirement.config || {}),
+          ...nextConfigFields,
+        },
+      };
+      configPatch = {
+        ...nextConfigFields,
+        examRequirement,
+      };
+    } else {
+      configPatch = nextConfigFields;
+    }
+    const updatedTask = await runTaskState("update_config", { taskId, config: configPatch });
+    return json(res, 200, {
+      ok: true,
+      task: updatedTask,
+      smsNotification: taskSmsNotification(updatedTask, requirementIndex),
+    });
+  } catch (error) {
+    return json(res, Number(error?.status || 500), {
+      error: error?.message || String(error),
+      errorCode: String(error?.code || "SMS_NOTIFICATION_SAVE_FAILED"),
+    });
+  } finally {
+    smsNotificationUpdatesInFlight.delete(lockKey);
+  }
+}
+
+function cleanupMessageCenterPreparations(now = Date.now()) {
+  for (const [preparationId, preparation] of messageCenterPreparations) {
+    if (preparation.expiresAt <= now) messageCenterPreparations.delete(preparationId);
+  }
+}
+
+function messageCenterRequirementState(task = {}, requirementIndex = 0) {
+  return task.config?.messageCenter?.requirements?.[String(Number(requirementIndex || 0))] || {};
+}
+
+async function updateMessageCenterRequirementState(taskId, requirementIndex, patch = {}) {
+  const task = await runTaskState("get", { taskId });
+  const current = task?.config?.messageCenter || {};
+  const key = String(Number(requirementIndex || 0));
+  const requirements = {
+    ...(current.requirements || {}),
+    [key]: {
+      ...(current.requirements?.[key] || {}),
+      ...patch,
+      requirementIndex: Number(requirementIndex || 0),
+      updatedAt: new Date().toISOString(),
+    },
+  };
+  return await runTaskState("update_config", {
+    taskId,
+    config: { messageCenter: { ...current, requirements } },
+  });
+}
+
+function messageCenterImportBatch(result = {}) {
+  return result?.batch || result?.import_batch || result;
+}
+
+function messageCenterValidationSummary(batch = {}) {
+  const counts = { valid: 0, invalid: 0, duplicate: 0 };
+  for (const item of Array.isArray(batch.validation_summary) ? batch.validation_summary : []) {
+    const status = String(item?.validation_status || "").trim();
+    if (Object.hasOwn(counts, status)) counts[status] = Number(item?.count || 0);
+  }
+  return counts;
+}
+
+function publicMessageCenterState(config, state = {}) {
+  const batchId = state.batchId || state.id || "";
+  return {
+    ...state,
+    batchId,
+    batchUrl: batchId ? messageCenterBatchUrl(config, batchId) : config.webBaseUrl,
+    exactBatchLinkConfigured: Boolean(config.batchUrlTemplate),
+  };
+}
+
+async function messageCenterPreparationInput(task, requirementIndex, templateInput = {}) {
+  const { smsContent } = signedTaskSmsContent(task, requirementIndex);
+  const batch = messageCenterOperationBatch(task);
+  if (!operationBatchCodeIsValid(batch.code) || !batch.name) {
+    throw messageCenterRequestError(
+      "请先完成运营批次创建，信息触达将直接引用已有批次名称。",
+      409,
+      "MESSAGE_CENTER_OPERATION_BATCH_REQUIRED",
+    );
+  }
+  const formalSession = taskFormalSession(task, requirementIndex);
+  const sessionId = String(formalSession?.session_id || "").trim();
+  if (!sessionId) {
+    throw messageCenterRequestError(
+      `需求单 ${requirementIndex + 1} 尚未创建正式场次，无法确认考生范围。`,
+      409,
+      "MESSAGE_CENTER_FORMAL_SESSION_REQUIRED",
+    );
+  }
+  const { candidates } = await readCompleteTaskSessionCandidates(
+    task,
+    formalSession,
+    getYikaoLoginForTask(task),
+  );
+  const roster = buildMessageCenterRoster(candidates, { sessionId });
+  if (!roster.rows.length) {
+    throw messageCenterRequestError(
+      "当前正式场次没有可导入的考生联系方式。",
+      409,
+      "MESSAGE_CENTER_EMPTY_ROSTER",
+    );
+  }
+  const hasLegacyEmailTemplate = Boolean(
+    String(templateInput.emailSubject || "").trim()
+    || String(templateInput.emailContent || "").trim(),
+  );
+  const emailTemplates = (Array.isArray(templateInput.emailTemplates)
+    ? templateInput.emailTemplates
+    : hasLegacyEmailTemplate
+      ? [{
+          kind: "standard",
+          subject: templateInput.emailSubject,
+          content: templateInput.emailContent,
+        }]
+      : [])
+    .map((template) => ({
+      kind: String(template?.kind || "").trim(),
+      subject: String(template?.subject || "").trim(),
+      content: String(template?.content || "").trim(),
+    }));
+  if (emailTemplates.some((template) => !template.subject || !template.content)) {
+    throw messageCenterRequestError(
+      "已提供的邮件模板内容不完整，请刷新考试详情后重新操作。",
+      400,
+      "MESSAGE_CENTER_TEMPLATE_CONTENT_REQUIRED",
+    );
+  }
+  return {
+    operationBatchCode: batch.code,
+    operationBatchName: batch.name,
+    externalBatchName: batch.name,
+    requirementIndex,
+    sessionId,
+    smsContent,
+    emailTemplates,
+    taskUpdatedAt: String(task.updatedAt || ""),
+    roster: roster.rows,
+    summary: roster.summary,
+  };
+}
+
+async function handleMessageCenterPreview(taskId, req, res) {
+  try {
+    const task = await runTaskState("get", { taskId });
+    if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    const requirementIndex = Number(payload.requirementIndex || 0);
+    if (!Number.isInteger(requirementIndex) || requirementIndex < 0) {
+      throw messageCenterRequestError("需求单序号无效。", 400, "MESSAGE_CENTER_REQUIREMENT_INVALID");
+    }
+    const input = await messageCenterPreparationInput(task, requirementIndex, payload);
+    const config = await messageCenterRuntimeConfig();
+    const client = createMessageCenterClient(config);
+    await client.capabilities();
+    const fingerprint = messageCenterPreparationFingerprint(input);
+    const existing = messageCenterRequirementState(task, requirementIndex);
+    if (existing.batchId) {
+      return json(res, 200, {
+        ok: true,
+        alreadyCreated: true,
+        state: publicMessageCenterState(config, existing),
+      });
+    }
+    cleanupMessageCenterPreparations();
+    const preparationId = randomUUID();
+    const expiresAt = Date.now() + MESSAGE_CENTER_PREPARATION_TTL_MS;
+    messageCenterPreparations.set(preparationId, {
+      taskId,
+      actorEmail: messageCenterActorEmail(req),
+      input,
+      fingerprint,
+      expiresAt,
+    });
+    return json(res, 200, {
+      ok: true,
+      preparationId,
+      expiresAt: new Date(expiresAt).toISOString(),
+      operationBatchCode: input.operationBatchCode,
+      operationBatchName: input.operationBatchName,
+      externalBatchName: input.externalBatchName,
+      templates: messageCenterTemplatesForPreparation(input).map(({ channel, name }) => ({ channel, name })),
+      summary: input.summary,
+    });
+  } catch (error) {
+    return json(res, Number(error?.status || 500), {
+      error: error?.message || String(error),
+      errorCode: String(error?.code || "MESSAGE_CENTER_PREVIEW_FAILED"),
+    });
+  }
+}
+
+async function handleMessageCenterImport(taskId, req, res) {
+  let tempRoot = "";
+  let createdBatchId = "";
+  let requirementIndex = 0;
+  try {
+    const task = await runTaskState("get", { taskId });
+    if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    const preparationId = String(payload.preparationId || "").trim();
+    cleanupMessageCenterPreparations();
+    const preparation = messageCenterPreparations.get(preparationId);
+    if (
+      !preparation
+      || preparation.taskId !== taskId
+      || preparation.actorEmail !== messageCenterActorEmail(req)
+    ) {
+      throw messageCenterRequestError(
+        "信息触达创建确认已失效，请重新预览。",
+        409,
+        "MESSAGE_CENTER_PREPARATION_STALE",
+      );
+    }
+    requirementIndex = preparation.input.requirementIndex;
+    const currentInput = await messageCenterPreparationInput(task, requirementIndex, preparation.input);
+    const currentFingerprint = messageCenterPreparationFingerprint(currentInput);
+    if (currentFingerprint !== preparation.fingerprint) {
+      messageCenterPreparations.delete(preparationId);
+      throw messageCenterRequestError(
+        "运营批次或考生名单在确认后发生变化，请重新预览。",
+        409,
+        "MESSAGE_CENTER_PREPARATION_CHANGED",
+      );
+    }
+    const config = await messageCenterRuntimeConfig();
+    const existing = messageCenterRequirementState(task, requirementIndex);
+    if (existing.batchId) {
+      if (existing.fingerprint !== preparation.fingerprint) {
+        throw messageCenterRequestError(
+          "该需求单已创建信息触达批次，但当前名单已变化；请在信息触达平台核对后增量导入。",
+          409,
+          "MESSAGE_CENTER_BATCH_ROSTER_CHANGED",
+        );
+      }
+      messageCenterPreparations.delete(preparationId);
+      return json(res, 200, {
+        ok: true,
+        alreadyCreated: true,
+        task,
+        state: publicMessageCenterState(config, existing),
+      });
+    }
+    const inFlightKey = `${taskId}:${requirementIndex}`;
+    if (messageCenterImportsInFlight.has(inFlightKey)) {
+      throw messageCenterRequestError(
+        "信息触达批次正在创建，请勿重复提交。",
+        409,
+        "MESSAGE_CENTER_IMPORT_IN_FLIGHT",
+      );
+    }
+    messageCenterImportsInFlight.add(inFlightKey);
+    try {
+      tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "yikao-message-center-"));
+      const payloadPath = path.join(tempRoot, "roster.json");
+      const workbookPath = path.join(tempRoot, "roster.xlsx");
+      await fs.writeFile(payloadPath, JSON.stringify({ rows: preparation.input.roster }), { mode: 0o600 });
+      await runPythonJson([messageCenterRosterScript, payloadPath, workbookPath]);
+      const client = createMessageCenterClient(config);
+      const templates = [];
+      for (const template of messageCenterTemplatesForPreparation(preparation.input)) {
+        templates.push(await ensureMessageCenterTemplate(client, template));
+      }
+      const created = await client.createImport({
+        name: preparation.input.externalBatchName,
+        fileBuffer: await fs.readFile(workbookPath),
+        fileName: `${preparation.input.externalBatchName}-考生名单.xlsx`,
+      });
+      const batch = messageCenterImportBatch(created);
+      createdBatchId = batch?.id;
+      if (!createdBatchId) throw new Error("信息触达平台创建成功响应缺少批次 ID，请人工核对后再操作");
+      const now = new Date().toISOString();
+      let updatedTask = await updateMessageCenterRequirementState(taskId, requirementIndex, {
+        operationBatchCode: preparation.input.operationBatchCode,
+        operationBatchName: preparation.input.operationBatchName,
+        externalBatchName: preparation.input.externalBatchName,
+        templates: templates.map((template) => ({
+          id: template?.id,
+          channel: String(template?.channel || ""),
+          name: String(template?.name || ""),
+          reused: template?.reused === true,
+        })),
+        smsContent: preparation.input.smsContent,
+        sessionId: preparation.input.sessionId,
+        fingerprint: preparation.fingerprint,
+        batchId: createdBatchId,
+        batchName: String(batch?.name || preparation.input.operationBatchName),
+        batchUrl: messageCenterBatchUrl(config, createdBatchId),
+        exactBatchLinkConfigured: Boolean(config.batchUrlTemplate),
+        status: String(batch?.status || "pending"),
+        summary: preparation.input.summary,
+        createdAt: now,
+        createdBy: preparation.actorEmail,
+        lastError: "",
+      });
+      let completed;
+      try {
+        completed = await waitForMessageCenterImport(client, batch);
+      } catch (error) {
+        const pending = error?.code === "MESSAGE_CENTER_IMPORT_PENDING";
+        updatedTask = await updateMessageCenterRequirementState(taskId, requirementIndex, {
+          status: pending ? String(error?.batch?.status || "processing") : "unknown",
+          lastError: error?.message || String(error),
+        });
+        messageCenterPreparations.delete(preparationId);
+        return json(res, pending ? 202 : Number(error?.status || 502), {
+          ok: pending,
+          pending,
+          ...(pending ? {} : { error: error?.message || String(error) }),
+          task: updatedTask,
+          state: publicMessageCenterState(config, messageCenterRequirementState(updatedTask, requirementIndex)),
+        });
+      }
+      const validation = messageCenterValidationSummary(completed);
+      updatedTask = await updateMessageCenterRequirementState(taskId, requirementIndex, {
+        status: String(completed?.status || "completed"),
+        totalRows: Number(completed?.total_rows ?? preparation.input.summary.prepared),
+        validation,
+        lastError: "",
+        completedAt: new Date().toISOString(),
+      });
+      messageCenterPreparations.delete(preparationId);
+      return json(res, 201, {
+        ok: true,
+        task: updatedTask,
+        state: publicMessageCenterState(config, messageCenterRequirementState(updatedTask, requirementIndex)),
+      });
+    } finally {
+      messageCenterImportsInFlight.delete(inFlightKey);
+    }
+  } catch (error) {
+    if (createdBatchId) {
+      await updateMessageCenterRequirementState(taskId, requirementIndex, {
+        status: "unknown",
+        lastError: error?.message || String(error),
+      }).catch(() => {});
+    }
+    return json(res, Number(error?.status || 500), {
+      error: error?.message || String(error),
+      errorCode: String(error?.code || "MESSAGE_CENTER_IMPORT_FAILED"),
+      batchCreated: Boolean(createdBatchId),
+      ...(createdBatchId ? { batchId: createdBatchId } : {}),
+    });
+  } finally {
+    if (tempRoot) await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function handleMessageCenterSendPreview(taskId, req, res) {
+  try {
+    const task = await runTaskState("get", { taskId });
+    if (!task || !visibleByOwner(auth, req, task)) return notFound(res);
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    const requirementIndex = Number(payload.requirementIndex || 0);
+    if (!Number.isInteger(requirementIndex) || requirementIndex < 0) {
+      throw messageCenterRequestError("需求单序号无效。", 400, "MESSAGE_CENTER_REQUIREMENT_INVALID");
+    }
+    const { smsContent } = signedTaskSmsContent(task, requirementIndex);
+    const state = messageCenterRequirementState(task, requirementIndex);
+    if (!state.batchId) {
+      throw messageCenterRequestError(
+        "请先创建信息触达批次并导入考生。",
+        409,
+        "MESSAGE_CENTER_BATCH_REQUIRED",
+      );
+    }
+    if (String(state.status || "").toLowerCase() !== "completed") {
+      throw messageCenterRequestError(
+        "信息触达批次尚未完成导入，请稍后刷新后重试。",
+        409,
+        "MESSAGE_CENTER_BATCH_NOT_READY",
+      );
+    }
+    const formalSession = taskFormalSession(task, requirementIndex);
+    const sessionId = String(formalSession?.session_id || state.sessionId || "").trim();
+    if (!formalSession || !sessionId) {
+      throw messageCenterRequestError(
+        "当前需求单没有可核验的正式考试场次。",
+        409,
+        "MESSAGE_CENTER_FORMAL_SESSION_REQUIRED",
+      );
+    }
+    const { candidates } = await readCompleteTaskSessionCandidates(
+      task,
+      formalSession,
+      getYikaoLoginForTask(task),
+    );
+    const roster = buildMessageCenterRoster(candidates, { sessionId });
+    if (!roster.rows.length || !roster.summary.availableSms) {
+      throw messageCenterRequestError(
+        "当前正式场次没有可用于短信发送的考生手机号。",
+        409,
+        "MESSAGE_CENTER_SMS_RECIPIENTS_REQUIRED",
+      );
+    }
+    const expectedImported = Number(state.validation?.valid ?? state.totalRows ?? state.summary?.prepared ?? 0);
+    if (expectedImported && expectedImported !== roster.rows.length) {
+      throw messageCenterRequestError(
+        "自动配置台考生名单与已导入触达批次人数不一致，请先核对或重新导入。",
+        409,
+        "MESSAGE_CENTER_ROSTER_CHANGED",
+      );
+    }
+    const config = await messageCenterRuntimeConfig();
+    const operationBatchCode = String(state.operationBatchCode || "").trim();
+    const operationBatchName = String(state.operationBatchName || "").trim();
+    const taskName = (operationBatchCode && operationBatchName
+      ? `${operationBatchCode}_${operationBatchName}`
+      : String(state.batchName || state.externalBatchName || "").trim()).slice(0, 80);
+    return json(res, 200, {
+      ok: true,
+      summary: roster.summary,
+      localHelper: {
+        path: "/message-center/prepare-send",
+        payload: {
+          requestId: randomUUID(),
+          baseUrl: config.webBaseUrl,
+          batchId: state.batchId,
+          batchName: String(state.batchName || state.externalBatchName || "").trim(),
+          taskName,
+          expectedCount: roster.rows.length,
+          expectedPhones: roster.rows.map((row) => row.phone).filter(Boolean),
+          smsContent,
+        },
+      },
+    });
+  } catch (error) {
+    return json(res, Number(error?.status || 500), {
+      error: error?.message || String(error),
+      errorCode: String(error?.code || "MESSAGE_CENTER_SEND_PREVIEW_FAILED"),
+    });
+  }
+}
+
+async function candidateChangeTouchInput(task, session, changeSetId) {
+  const changeSet = await runTaskState("get_candidate_change", { changeSetId });
+  if (!changeSet || changeSet.taskId !== task.taskId || changeSet.sessionId !== String(session.session_id || "")) {
+    throw messageCenterRequestError("找不到当前场次的考生变更单。", 404, "CANDIDATE_TOUCH_CHANGE_NOT_FOUND");
+  }
+  const requirementIndex = Number(session.requirementIndex || 0);
+  const { smsContent } = signedTaskSmsContent(task, requirementIndex);
+  const login = getYikaoLoginForTask(task);
+  const courses = await candidateChangeCoursesForSession(task, session, login);
+  const onlineCandidates = await readCandidateChangeRoster(task, session, null, courses);
+  let roster;
+  try {
+    roster = buildCandidateChangeTouchRoster(changeSet, onlineCandidates);
+  } catch (error) {
+    throw messageCenterRequestError(error.message, 409, "CANDIDATE_TOUCH_ROSTER_CHANGED");
+  }
+  const batch = messageCenterOperationBatch(task);
+  if (!operationBatchCodeIsValid(batch.code) || !batch.name) {
+    throw messageCenterRequestError("请先完成运营批次创建。", 409, "MESSAGE_CENTER_OPERATION_BATCH_REQUIRED");
+  }
+  return {
+    changeSet,
+    roster,
+    requirementIndex,
+    smsContent,
+    batchName: `${batch.code}_${batch.name}_新增考生_${changeSetId}`.slice(0, 200),
+  };
+}
+
+function candidateChangeTouchPreparationFingerprint(input = {}) {
+  return createHash("sha256").update(JSON.stringify({
+    rosterFingerprint: String(input.roster?.fingerprint || ""),
+    requirementIndex: Number(input.requirementIndex || 0),
+    smsContent: String(input.smsContent || ""),
+    batchName: String(input.batchName || ""),
+  })).digest("hex");
+}
+
+function candidateChangeTouchState(task, changeSetId) {
+  return task.config?.messageCenter?.candidateChanges?.[changeSetId] || {};
+}
+
+async function updateCandidateChangeTouchState(taskId, changeSetId, patch) {
+  const task = await runTaskState("get", { taskId });
+  const current = task.config?.messageCenter || {};
+  const candidateChanges = current.candidateChanges || {};
+  await runTaskState("update_config", {
+    taskId,
+    config: {
+      messageCenter: {
+        ...current,
+        candidateChanges: {
+          ...candidateChanges,
+          [changeSetId]: { ...candidateChanges[changeSetId], ...patch, updatedAt: new Date().toISOString() },
+        },
+      },
+    },
+  });
+}
+
+async function handleCandidateChangeTouch(taskId, sessionId, changeSetId, action, req, res) {
+  const { task, session } = await visibleTaskSession(taskId, sessionId, req, res);
+  if (!task || !session) return;
+  let tempRoot = "";
+  let createdBatchId = "";
+  try {
+    const payload = parseJsonSafe(await readBody(req)) || {};
+    const input = await candidateChangeTouchInput(task, session, changeSetId);
+    const preparationFingerprint = candidateChangeTouchPreparationFingerprint(input);
+    const config = await messageCenterRuntimeConfig();
+    const existing = candidateChangeTouchState(task, changeSetId);
+    if (action === "preview") {
+      if (existing.batchId) {
+        if (existing.status === "processing" && existing.fingerprint === input.roster.fingerprint) {
+          const detail = await createMessageCenterClient(config).importDetail(existing.batchId);
+          if (["completed", "failed"].includes(String(detail?.status || ""))) {
+            const validation = messageCenterValidationSummary(detail);
+            const valid = detail.status === "completed" && validation.valid === input.roster.rows.length
+              && !validation.invalid && !validation.duplicate;
+            await updateCandidateChangeTouchState(taskId, changeSetId, {
+              status: valid ? "completed" : "unknown", validation,
+              lastError: valid ? "" : "触达平台导入结果异常，请人工核对。",
+            });
+            return json(res, 200, {
+              ok: true, alreadyCreated: true,
+              state: candidateChangeTouchState(await runTaskState("get", { taskId }), changeSetId),
+            });
+          }
+        }
+        return json(res, 200, { ok: true, alreadyCreated: true, state: existing });
+      }
+      await createMessageCenterClient(config).capabilities();
+      for (const [key, value] of candidateChangeTouchPreparations) {
+        if (value.expiresAt <= Date.now()) candidateChangeTouchPreparations.delete(key);
+      }
+      const preparationId = randomUUID();
+      candidateChangeTouchPreparations.set(preparationId, {
+        taskId, sessionId, changeSetId,
+        actorEmail: messageCenterActorEmail(req),
+        fingerprint: preparationFingerprint,
+        batchName: input.batchName,
+        expiresAt: Date.now() + MESSAGE_CENTER_PREPARATION_TTL_MS,
+      });
+      return json(res, 200, {
+        ok: true, preparationId, batchName: input.batchName, summary: input.roster.summary,
+      });
+    }
+    if (action === "send-preview") {
+      if (!existing.batchId || existing.status !== "completed") {
+        throw messageCenterRequestError("新增考生触达批次尚未完成导入。", 409, "CANDIDATE_TOUCH_BATCH_NOT_READY");
+      }
+      if (existing.fingerprint !== input.roster.fingerprint
+        || Number(existing.validation?.valid) !== input.roster.rows.length) {
+        throw messageCenterRequestError("触达批次与当前新增考生名单不一致，请先核对平台批次。", 409, "CANDIDATE_TOUCH_ROSTER_CHANGED");
+      }
+      return json(res, 200, {
+        ok: true, summary: input.roster.summary,
+        localHelper: {
+          path: "/message-center/prepare-send",
+          payload: {
+            requestId: randomUUID(), baseUrl: config.webBaseUrl,
+            batchId: existing.batchId, batchName: existing.batchName,
+            taskName: input.batchName.slice(0, 80),
+            expectedCount: input.roster.rows.length,
+            expectedPhones: input.roster.rows.map((row) => row.phone),
+            smsContent: input.smsContent,
+          },
+        },
+      });
+    }
+    for (const [key, value] of candidateChangeTouchPreparations) {
+      if (value.expiresAt <= Date.now()) candidateChangeTouchPreparations.delete(key);
+    }
+    const preparationId = String(payload.preparationId || "");
+    const preparation = candidateChangeTouchPreparations.get(preparationId);
+    if (!preparation || preparation.taskId !== taskId || preparation.sessionId !== sessionId
+      || preparation.changeSetId !== changeSetId || preparation.actorEmail !== messageCenterActorEmail(req)
+      || preparation.fingerprint !== preparationFingerprint || preparation.batchName !== input.batchName) {
+      throw messageCenterRequestError("新增考生触达预览已失效，名单、批次名或短信内容可能已变化，请重新预览。", 409, "CANDIDATE_TOUCH_PREVIEW_STALE");
+    }
+    if (existing.batchId) return json(res, 200, { ok: true, alreadyCreated: true, state: existing });
+    const inFlightKey = `candidate-change:${changeSetId}`;
+    if (messageCenterImportsInFlight.has(inFlightKey)) {
+      throw messageCenterRequestError("本次新增考生触达批次正在创建，请勿重复提交。", 409, "CANDIDATE_TOUCH_IMPORT_IN_FLIGHT");
+    }
+    messageCenterImportsInFlight.add(inFlightKey);
+    try {
+      tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "yikao-candidate-touch-"));
+      const payloadPath = path.join(tempRoot, "roster.json");
+      const workbookPath = path.join(tempRoot, "roster.xlsx");
+      await fs.writeFile(payloadPath, JSON.stringify({ rows: input.roster.rows }), { mode: 0o600 });
+      await runPythonJson([messageCenterRosterScript, payloadPath, workbookPath]);
+      const client = createMessageCenterClient(config);
+      const created = await client.createImport({
+        name: input.batchName,
+        fileBuffer: await fs.readFile(workbookPath),
+        fileName: `${changeSetId}-新增考生.xlsx`,
+      });
+      const batch = messageCenterImportBatch(created);
+      createdBatchId = batch?.id;
+      if (!createdBatchId) throw new Error("触达批次创建响应缺少 ID，请在平台核对后再操作。");
+      await updateCandidateChangeTouchState(taskId, changeSetId, {
+        batchId: createdBatchId,
+        batchName: String(batch?.name || input.batchName),
+        batchUrl: messageCenterBatchUrl(config, createdBatchId),
+        fingerprint: input.roster.fingerprint,
+        count: input.roster.rows.length,
+        status: String(batch?.status || "pending"),
+        createdAt: new Date().toISOString(),
+        createdBy: preparation.actorEmail,
+      });
+      let completed;
+      try {
+        completed = await waitForMessageCenterImport(client, batch);
+      } catch (error) {
+        await updateCandidateChangeTouchState(taskId, changeSetId, {
+          status: error?.code === "MESSAGE_CENTER_IMPORT_PENDING" ? "processing" : "unknown",
+          lastError: error?.message || String(error),
+        });
+        candidateChangeTouchPreparations.delete(preparationId);
+        return json(res, error?.code === "MESSAGE_CENTER_IMPORT_PENDING" ? 202 : 502, {
+          error: error?.message || String(error), pending: error?.code === "MESSAGE_CENTER_IMPORT_PENDING",
+          state: candidateChangeTouchState(await runTaskState("get", { taskId }), changeSetId),
+        });
+      }
+      const validation = messageCenterValidationSummary(completed);
+      const valid = validation.valid === input.roster.rows.length && !validation.invalid && !validation.duplicate;
+      await updateCandidateChangeTouchState(taskId, changeSetId, {
+        status: valid ? "completed" : "unknown", validation,
+        lastError: valid ? "" : "触达平台导入人数或校验结果与本次新增名单不一致，请人工核对。",
+      });
+      candidateChangeTouchPreparations.delete(preparationId);
+      return json(res, valid ? 201 : 409, {
+        ok: valid,
+        ...(!valid ? { error: "触达平台导入人数与本次新增名单不一致，请人工核对。" } : {}),
+        state: candidateChangeTouchState(await runTaskState("get", { taskId }), changeSetId),
+      });
+    } finally {
+      messageCenterImportsInFlight.delete(inFlightKey);
+    }
+  } catch (error) {
+    if (createdBatchId) await updateCandidateChangeTouchState(taskId, changeSetId, {
+      status: "unknown", lastError: error?.message || String(error),
+    }).catch(() => {});
+    return json(res, Number(error?.status || 500), {
+      error: error?.message || String(error),
+      errorCode: String(error?.code || "CANDIDATE_TOUCH_FAILED"),
+      batchCreated: Boolean(createdBatchId),
+      ...(createdBatchId ? { batchId: createdBatchId } : {}),
+    });
+  } finally {
+    if (tempRoot) await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 function paperFormBindState(task = {}, requirementIndex = 0) {
@@ -9764,6 +11913,7 @@ async function runPaperFormBindForTask(task, login, {
       courses,
       workflowSerial,
       examDate: formalSession?.start,
+      examName: formalSession?.name,
       paperSearchScope: normalizedPaperSearchScope,
       managerFetch: fetch,
       requestJson: readTenantJsonWithLogin,
@@ -10203,7 +12353,7 @@ function handleEvents(job, req, res) {
   res.write("\n");
 
   const send = (evt) => {
-    res.write(`data: ${JSON.stringify(evt)}\n\n`);
+    res.write(`data: ${stringifyPublicJson(evt)}\n\n`);
   };
 
   job.events.forEach(send);
@@ -10259,6 +12409,7 @@ async function handleWebModule(urlPath, res) {
 
 async function requestHandler(req, res) {
   const url = new URL(req.url, "http://127.0.0.1");
+  rememberCurrentTenantApiKeys();
   try {
     if (req.method === "POST" && url.pathname === "/api/auth/login") {
       return await handleAuthLogin(auth, req, res);
@@ -10312,6 +12463,13 @@ async function requestHandler(req, res) {
     }
     if (req.method === "POST" && url.pathname === "/api/settings") {
       return await handleSaveSettings(req, res);
+    }
+    if (req.method === "GET" && url.pathname === "/api/message-center/settings") {
+      return await handleMessageCenterSettings(req, res);
+    }
+    if (req.method === "POST" && url.pathname === "/api/message-center/settings") {
+      if (!requireAdmin(auth, req, res)) return;
+      return await handleMessageCenterSettings(req, res);
     }
     if ((req.method === "GET" || req.method === "POST") && url.pathname === "/api/email/settings") {
       if (!requireAdmin(auth, req, res)) return;
@@ -10403,6 +12561,30 @@ async function requestHandler(req, res) {
     const taskRetryMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/steps\/([^/]+)\/retry$/);
     if (req.method === "POST" && taskRetryMatch) {
       return await handleTaskStepRetry(decodeURIComponent(taskRetryMatch[1]), decodeURIComponent(taskRetryMatch[2]), req, res);
+    }
+    const smsNotificationMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/requirements\/(\d+)\/sms-notification$/);
+    if (req.method === "PUT" && smsNotificationMatch) {
+      return await handleSmsNotificationUpdate(
+        decodeURIComponent(smsNotificationMatch[1]),
+        Number(smsNotificationMatch[2]),
+        req,
+        res,
+      );
+    }
+    const messageCenterPreviewMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/message-center\/preview$/);
+    if (req.method === "POST" && messageCenterPreviewMatch) {
+      if (!requireFeaturePermission(auth, req, res, FEATURE_PERMISSION_MESSAGE_CENTER_DIRECT_SEND, "触达直发")) return;
+      return await handleMessageCenterPreview(decodeURIComponent(messageCenterPreviewMatch[1]), req, res);
+    }
+    const messageCenterImportMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/message-center\/import$/);
+    if (req.method === "POST" && messageCenterImportMatch) {
+      if (!requireFeaturePermission(auth, req, res, FEATURE_PERMISSION_MESSAGE_CENTER_DIRECT_SEND, "触达直发")) return;
+      return await handleMessageCenterImport(decodeURIComponent(messageCenterImportMatch[1]), req, res);
+    }
+    const messageCenterSendPreviewMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/message-center\/send-preview$/);
+    if (req.method === "POST" && messageCenterSendPreviewMatch) {
+      if (!requireFeaturePermission(auth, req, res, FEATURE_PERMISSION_MESSAGE_CENTER_DIRECT_SEND, "触达直发")) return;
+      return await handleMessageCenterSendPreview(decodeURIComponent(messageCenterSendPreviewMatch[1]), req, res);
     }
     const operationBatchDraftMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-batch\/draft$/);
     if ((req.method === "GET" || req.method === "POST") && operationBatchDraftMatch) {
@@ -10520,6 +12702,14 @@ async function requestHandler(req, res) {
     if (req.method === "POST" && contentRequirementEmailMatch) {
       return await handleContentRequirementEmail(decodeURIComponent(contentRequirementEmailMatch[1]), req, res);
     }
+    const operationContentRecipientDraftMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/operation-content\/recipient-draft$/);
+    if (req.method === "PATCH" && operationContentRecipientDraftMatch) {
+      return await handleOperationContentRecipientDraft(
+        decodeURIComponent(operationContentRecipientDraftMatch[1]),
+        req,
+        res,
+      );
+    }
     const contentTaskRemarksMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/content-task-remarks$/);
     if (req.method === "PATCH" && contentTaskRemarksMatch) {
       return await handleContentTaskRemark(decodeURIComponent(contentTaskRemarksMatch[1]), req, res);
@@ -10605,6 +12795,16 @@ async function requestHandler(req, res) {
     if (req.method === "POST" && courseChangeMatch) {
       return await handleCourseChange(decodeURIComponent(courseChangeMatch[1]), req, res);
     }
+    const candidateChangeTouchMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/sessions\/([^/]+)\/candidate-changes\/([^/]+)\/message-center\/(preview|import|send-preview)$/);
+    if (req.method === "POST" && candidateChangeTouchMatch) {
+      if (!requireFeaturePermission(auth, req, res, FEATURE_PERMISSION_MESSAGE_CENTER_DIRECT_SEND, "触达直发")) return;
+      return await handleCandidateChangeTouch(
+        decodeURIComponent(candidateChangeTouchMatch[1]),
+        decodeURIComponent(candidateChangeTouchMatch[2]),
+        decodeURIComponent(candidateChangeTouchMatch[3]),
+        candidateChangeTouchMatch[4], req, res,
+      );
+    }
     const candidateChangeApplyMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/sessions\/([^/]+)\/candidate-changes\/([^/]+)\/apply$/);
     if (req.method === "POST" && candidateChangeApplyMatch) {
       return await handleCandidateChangeApply(
@@ -10660,6 +12860,10 @@ async function requestHandler(req, res) {
     }
     if (req.method === "POST" && url.pathname === "/api/candidates/import") {
       return await handleCandidateImport(req, res);
+    }
+    const candidateTrialSyncMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/candidates\/sync-to-trial$/);
+    if (req.method === "POST" && candidateTrialSyncMatch) {
+      return await handleCandidateTrialSync(decodeURIComponent(candidateTrialSyncMatch[1]), req, res);
     }
     if (req.method === "POST" && url.pathname === "/api/rooms/monitor-accounts/excel") {
       return await handleMonitorAccountsExcel(req, res);

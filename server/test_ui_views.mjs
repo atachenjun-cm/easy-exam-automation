@@ -551,6 +551,7 @@ test("account and customer service settings render as separate collapsed cards",
 });
 
 test("exam list is task-aggregated and exam detail owns dual session cards", () => {
+  assert.ok(html.includes('<tbody id="examListRows"><tr><td colspan="7">正在加载考试列表...</td></tr></tbody>'));
   assert.ok(
     html.includes(
       'import { aggregateExamSessions, isExamTaskEnded, matchesExamTask, resolveCandidateTaskContext, sortTaskLogsNewestFirst } from "/web/exam_task_view_model.mjs"',
@@ -652,6 +653,10 @@ test("exam list is task-aggregated and exam detail owns dual session cards", () 
   assert.equal(html.includes("<th>session_id</th>"), false);
   assert.equal(html.includes(">session_id<"), false);
   assert.equal(html.includes('id="examTypeFilter"'), false);
+});
+
+test("exam list shows a loading state before its first response", () => {
+  assert.ok(html.includes('<tbody id="examListRows"><tr><td colspan="7">正在加载考试列表...</td></tr></tbody>'));
 });
 
 test("requirement center remains present while exam views change", () => {
@@ -1065,16 +1070,20 @@ test("operation batch create calls automation and exposes progress in the dialog
   assert.ok(html.includes("setOperationBatchActionState(message, true)"));
   assert.ok(html.includes('id="operationBatchSyncBtn"'));
   assert.ok(html.includes("/operation-batch/reconcile"));
-  assert.ok(html.includes('id="operationBatchSyncBtn" type="button">添加日程</button>'));
-  assert.ok(html.includes('operationBatchSyncBtn.textContent = "添加日程"'));
+  assert.ok(html.includes('id="operationBatchSyncBtn" type="button">重新同步运控状态</button>'));
+  assert.ok(html.includes('operationBatchSyncBtn.textContent = recoveryPending ? "重新同步运控状态" : "添加日程"'));
   assert.ok(handler.includes("正在按批次代码定位，并核对批次代码和批次名称"));
+  assert.ok(handler.includes("正在按批次名称唯一定位，并同步批次信息"));
+  assert.ok(handler.includes("批次信息已同步到平台"));
+  assert.ok(html.includes("批次信息已同步；发布和日程仍待完成"));
+  assert.ok(handler.includes("existingCode ? schedulePending : false"));
   assert.ok(handler.includes("批次日程已添加，发布状态和批次信息已同步"));
   assert.ok(html.includes("批次已发布；日程仍待添加"));
   assert.ok(html.includes('id="operationBatchHelperUpdateBtn"'));
   assert.ok(html.includes("helper_update_required"));
-  assert.ok(html.includes("operationBatchCreate: 19"));
+  assert.ok(html.includes("operationBatchCreate: 33"));
   assert.ok(html.includes("operationBatchReconcile: 16"));
-  assert.ok(html.includes("operationBatchUpdate: 16"));
+  assert.ok(html.includes("operationBatchUpdate: 42"));
   assert.ok(html.includes("Number(health.helperVersion || 0) < minimumVersion"));
   assert.ok(html.includes("health.capabilities?.selfUpdate === true"));
   assert.ok(html.includes("/api/fanwei/helper-update-manifest"));
@@ -1102,6 +1111,30 @@ test("automatic helper updates are opt-in by helper capability so legacy v8 stay
   assert.ok(helperGate.includes("currentVersionUsable"));
   assert.ok(helperGate.includes("onUpdateStatus"));
   assert.ok(html.includes('confirmText: isContentSync ? "继续同步运控" : "继续添加日程"'));
+});
+
+test("helper updates use a staged progress dialog and legacy Windows helpers require reinstall", () => {
+  const updater = sourceBetween(
+    "      function setFanweiHelperUpdateDialog({",
+    "\n      async function updateFanweiLocalHelper()",
+  );
+  const helperGate = sourceBetween(
+    "      async function ensureScoreStampLocalHelper(requiredCapability = \"\", { onUpdateStatus } = {}) {",
+    "\n      async function submitScoreStampApplicationResult",
+  );
+  assert.ok(html.includes('id="fanweiHelperUpdateModal"'));
+  assert.ok(html.includes('id="fanweiHelperUpdateProgress" role="progressbar"'));
+  assert.ok(html.includes('id="fanweiHelperUpdateDownloadBtn"'));
+  assert.ok(html.includes('id="fanweiHelperUpdateCheckBtn"'));
+  assert.ok(html.includes(".helper-update-progress-track.is-indeterminate"));
+  assert.ok(updater.includes('phase: "installing"'));
+  assert.ok(updater.includes('stage: "等待助手重启"'));
+  assert.ok(updater.includes('phase: "complete"'));
+  assert.ok(updater.includes("FANWEI_HELPER_RELIABLE_SELF_UPDATE_VERSION"));
+  assert.ok(updater.includes('error.code = "helper_reinstall_required"'));
+  assert.ok(updater.includes("timeoutMs: 45000"));
+  assert.equal(updater.includes("timeoutMs: 130000"), false);
+  assert.ok(helperGate.includes("capabilityUpdateRequired"));
 });
 
 test("Fanwei read stays available without a forced helper update and exposes stuck-update recovery", () => {
@@ -1805,18 +1838,31 @@ test("project management archives cards and exposes an archived filter", () => {
   assert.ok(html.includes("Boolean(task.hiddenAt)"));
 });
 
-test("project management loads cards without per-project detail synchronization", () => {
+test("project management renders cards before workflow synchronization", () => {
   const source = sourceBetween(
-    "async function runProjectListLoad()",
+    "const runProjectListLoad = createStagedListLoader({",
     "async function deleteProjectCard",
   );
   assert.ok(source.includes("Promise.all(["));
   assert.ok(source.includes("fetchJson(`/api/tasks?includeArchived=1&_=${Date.now()}`)"));
   assert.ok(source.includes("fetchJson(`/api/exams?_=${Date.now()}`)"));
-  assert.ok(source.includes("projectTasksWithSessions(taskData.tasks || [], sessions)"));
+  assert.ok(source.includes(".filter((task) => hasConfiguredExam(task) && !task.hiddenAt && !isExamTaskEnded(task))"));
+  assert.ok(source.includes("taskIds=${encodeURIComponent(taskIds.join(\",\"))}"));
+  assert.ok(source.includes("applyInitial:"));
+  assert.ok(source.includes("applyDetails:"));
+  assert.ok(source.includes("operationWorkflowRefreshPending"));
+  assert.ok(source.includes("detailByTaskId"));
   assert.ok(source.includes("setProjectListRefreshState();"));
   assert.equal(source.includes("fetchJson(`/api/tasks/${encodeURIComponent"), false);
-  assert.equal(source.includes("createStagedListLoader"), false);
+});
+
+test("project cards show a neutral state until workflow synchronization finishes", () => {
+  const source = sourceBetween(
+    "function projectOperationProgressHtml(task = {})",
+    "function statusCountText",
+  );
+  assert.ok(source.includes("const workflowLoaded = Boolean(task.operationWorkflowSummary?.steps);"));
+  assert.ok(source.includes('task.operationWorkflowRefreshPending ? "加载中" : "--"'));
 });
 
 test("project management renders projects as soon as auto config creates an exam", () => {
@@ -1885,13 +1931,34 @@ test("project list enters with a fresh load while retaining existing cards durin
   assert.equal(source.includes("正在刷新项目"), false);
 });
 
-test("project cards sort by formal then trial exam start time descending", () => {
-  const source = sourceBetween("function projectExamStartTimestamp(task)", "async function runProjectListLoad()");
+test("archived project cards put earlier exam dates below later dates", () => {
+  const source = sourceBetween("function projectExamStartTimestamp(task)", "const runProjectListLoad = createStagedListLoader({");
   assert.ok(source.includes('session.sessionType === "formal"'));
   assert.ok(source.includes('session.sessionType === "trial"'));
-  assert.ok(source.includes("Number.NEGATIVE_INFINITY"));
-  assert.ok(source.includes("rightExamTime > leftExamTime ? 1 : -1"));
+  assert.ok(source.includes("Number.POSITIVE_INFINITY"));
+  assert.ok(source.includes('compareProjectListTasks(left, right, status === "archived")'));
   assert.ok(source.includes('Date.parse(right.updatedAt || "")'));
+
+  const compareProjectListTasks = compileInlineFunction(
+    "function compareProjectListTasks(left, right, archived = false)",
+    "\n      function renderProjectList()",
+    { projectExamStartTimestamp: (task) => task.examTime },
+  );
+  const projects = [
+    { taskId: "early", examTime: 100, updatedAt: "2026-08-01T00:00:00Z" },
+    { taskId: "late", examTime: 300, updatedAt: "2026-08-01T00:00:00Z" },
+    { taskId: "middle", examTime: 200, updatedAt: "2026-08-01T00:00:00Z" },
+    { taskId: "undated", examTime: Number.POSITIVE_INFINITY, updatedAt: "2026-08-31T00:00:00Z" },
+  ];
+
+  assert.deepEqual(
+    [...projects].sort((left, right) => compareProjectListTasks(left, right, true)).map((task) => task.taskId),
+    ["late", "middle", "early", "undated"],
+  );
+  assert.deepEqual(
+    [...projects].sort((left, right) => compareProjectListTasks(left, right, false)).map((task) => task.taskId),
+    ["early", "middle", "late", "undated"],
+  );
 });
 
 test("project card actions only expose archive and delete in a bounded grid", () => {
@@ -1899,7 +1966,7 @@ test("project card actions only expose archive and delete in a bounded grid", ()
   assert.match(html, /\.card-actions\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*max-height:\s*0[^}]*visibility:\s*hidden[^}]*pointer-events:\s*none/s);
   assert.match(html, /\.project-card\.is-actions-visible \.card-actions\s*\{[^}]*max-height:\s*140px[^}]*visibility:\s*visible[^}]*pointer-events:\s*auto/s);
   assert.match(html, /\.card-actions\s+button\s*\{[^}]*width:\s*100%[^}]*min-width:\s*0[^}]*text-overflow:\s*ellipsis/s);
-  const renderFunction = sourceBetween("function renderProjectList()", "async function runProjectListLoad()");
+  const renderFunction = sourceBetween("function renderProjectList()", "const runProjectListLoad = createStagedListLoader({");
   assert.ok(renderFunction.includes('data-action="toggle-actions"'));
   assert.ok(renderFunction.includes('aria-expanded="false"'));
   assert.ok(renderFunction.includes('aria-label="展开项目操作"'));
@@ -1941,6 +2008,7 @@ test("exam list renders session rows before detail synchronization", () => {
   assert.ok(source.includes("renderExamList();"));
   assert.ok(source.includes("loadDetail:"));
   assert.ok(source.includes("applyDetails:"));
+  assert.ok(source.includes(".filter((task) => !isExamTaskEnded(task))"));
 });
 
 test("list pages reuse visible data while refreshing", () => {
@@ -2166,6 +2234,46 @@ test("operation batch update button appears only for confirmed managed differenc
   taskViewState.currentOperationBatchBaselineRequired = true;
   updateOperationBatchActions(createdTask);
   assert.equal(operationBatchUpdateManagedBtn.hidden, true);
+});
+
+test("operation batch recovery stays available when an existing batch was mistakenly confirmed missing", () => {
+  const taskViewState = {
+    currentProject: null,
+    currentOperationBatchUpdateStatus: "",
+    currentOperationBatchBaselineRequired: false,
+    currentOperationBatchManagedChanges: [],
+  };
+  const operationBatchCreateBtn = {};
+  const operationBatchUpdateManagedBtn = {};
+  const operationBatchSyncBtn = {};
+  const operationBatchRetryBtn = {};
+  const operationBatchRecordBtn = {};
+  const updateOperationBatchActions = compileInlineFunction(
+    "      function updateOperationBatchActions(task = taskViewState.currentProject) {",
+    "\n      function setOperationBatchActionState(message = \"\", isError = false) {",
+    {
+      taskViewState,
+      operationBatchCreateBtn,
+      operationBatchUpdateManagedBtn,
+      operationBatchSyncBtn,
+      operationBatchRetryBtn,
+      operationBatchRecordBtn,
+      operationBatchNeedsFollowUp: () => true,
+    },
+  );
+
+  updateOperationBatchActions({
+    config: {
+      operationBatch: {
+        status: "failed",
+        errorCode: "OPERATION_BATCH_CONFIRMED_NOT_CREATED",
+      },
+    },
+  });
+
+  assert.equal(operationBatchSyncBtn.disabled, false);
+  assert.equal(operationBatchSyncBtn.textContent, "重新同步运控状态");
+  assert.equal(operationBatchCreateBtn.disabled, false);
 });
 
 test("operation batch draft follows the operation console two-column field order", () => {
@@ -2414,7 +2522,7 @@ test("configuration progress comes from required progress cards", () => {
   assert.ok(html.includes('const failedStep = progressSteps.find((step) => step.status === "failed");'));
   assert.ok(html.includes("if (failedStep) return failedStep.stepName;"));
   assert.ok(html.includes('const currentStep = progressSteps.find((step) => step.status !== "success");'));
-  const projectListSource = sourceBetween("function renderProjectList()", "async function runProjectListLoad()");
+  const projectListSource = sourceBetween("function renderProjectList()", "const runProjectListLoad = createStagedListLoader({");
   assert.equal(projectListSource.includes("currentTaskProgress(task)"), false);
   assert.equal(projectListSource.includes("当前进度"), false);
   assert.equal(projectListSource.includes("mini-progress"), false);
@@ -3493,7 +3601,7 @@ test("project detail renders sourced operation workflow and keeps local archive 
   assert.ok(contentSync.includes('!["sent", "already_sent"].includes(dispatch.status)'));
   assert.ok(contentSync.includes('dispatch.status === "already_sent"'));
   assert.ok(html.includes('localHelper.path !== "/operation-content/sync"'));
-  assert.ok(html.includes("operationContentSync: 26"));
+  assert.ok(html.includes("operationContentSync: 48"));
   assert.ok(html.includes('confirmText: isContentSync ? "继续同步并发送" : "继续添加日程"'));
   assert.ok(html.includes('id="operationContentSyncBtn" type="button">发送内容任务单</button>'));
   assert.ok(html.includes("function operationContentTaskHasSent(task = {})"));
@@ -4030,6 +4138,10 @@ test("exam detail aggregates EasyExam course changes into the session-change dia
     "      async function submitSessionChange() {",
     "\n      function formatSessionTime(session) {",
   );
+  const coursePlan = compileInlineFunction(
+    "      function sessionChangeCoursePlan(courses = [], names = []) {",
+    "\n      function renderSessionChangeCourseFields(courses = [], names = []) {",
+  );
   const courseEntries = compileInlineFunction(
     "      function sessionChangeCourseEntries() {",
     "\n      function sessionChangeDisplayTimeValue(value) {",
@@ -4038,6 +4150,7 @@ test("exam detail aggregates EasyExam course changes into the session-change dia
       sessionChangeCourseSection: { hidden: false },
       taskViewState: { sessionChange: { courses: [{ code: "20260803-01-01", name: "原科目" }] } },
       sessionChangeCourseInputNames: () => ["新科目"],
+      sessionChangeCoursePlan: coursePlan,
     },
   );
 
@@ -4049,16 +4162,31 @@ test("exam detail aggregates EasyExam course changes into the session-change dia
   assert.ok(sessionOpener.includes("/courses/change-preview?requirementIndex="));
   assert.ok(sessionOpener.includes("courseRequirementChange.pending && courses.length"));
   assert.ok(sessionOpener.includes("sessionChangeCourseSection.hidden = false"));
-  assert.match(html, /data-course-change-name="\$\{index\}"[^>]*readonly/);
+  assert.match(html, /data-course-change-name="\$\{item\.desiredIndex\}"[^>]*readonly/);
   assert.ok(sessionSubmitter.includes("/courses/change"));
   assert.ok(sessionSubmitter.includes("names: sessionChangeCourseInputNames()"));
   assert.ok(sessionSubmitter.includes("keepSessionChangePanel: true"));
   assert.deepEqual(courseEntries(), [{
     label: "科目信息",
+    code: "20260803-01-01",
     before: "原科目",
     after: "新科目",
     beforeCaption: "当前科目",
   }]);
+  const increasePlan = coursePlan(
+    [{ code: "C1", name: "原科目" }],
+    ["新增科目", "原科目"],
+  );
+  assert.equal(increasePlan[0].added, true);
+  assert.equal(increasePlan[1].course.code, "C1");
+  const decreasePlan = coursePlan(
+    [{ code: "C1", name: "科目一" }, { code: "C2", name: "科目二" }],
+    ["科目二"],
+  );
+  assert.equal(decreasePlan[0].course.code, "C2");
+  assert.equal(decreasePlan[1].removed, true);
+  assert.equal(decreasePlan[1].course.code, "C1");
+  assert.ok(html.includes('item.course?.code || "自动生成"'));
   assert.ok(html.includes("科目信息") && html.includes("修改记录已写入下方执行日志。"));
   assert.ok(taskRenderer.includes("(task.steps || []).flatMap((step) => (step.logs || [])"));
   assert.ok(sessionSubmitter.includes("/sessions/${encodeURIComponent(sessionId)}/change"));

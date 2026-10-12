@@ -57,3 +57,19 @@ test("a newer refresh rejects an older detail completion", async () => {
     ["details", ["full-2"]],
   ]);
 });
+
+test("a background detail failure keeps the initial list visible", async () => {
+  const renders = [];
+  const load = createStagedListLoader({
+    loadInitial: async () => ["summary"],
+    getDetailItems: (initial) => initial,
+    loadDetail: async () => { throw new Error("detail unavailable"); },
+    applyInitial: (initial) => renders.push(["initial", initial]),
+    applyDetails: (details) => renders.push(["details", details]),
+  });
+
+  await load();
+  await flushBackgroundWork();
+
+  assert.deepEqual(renders, [["initial", ["summary"]]]);
+});

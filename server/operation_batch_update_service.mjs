@@ -351,20 +351,6 @@ export function createOperationBatchUpdateService(dependencies = {}) {
             },
           );
         }
-        if (
-          (applied.schedules || []).length
-          > (freshDesired.schedules || []).length
-        ) {
-          throw serviceError(
-            "OPERATION_BATCH_UPDATE_CONFLICT",
-            409,
-            "不允许减少已同步的运营批次日程数量",
-            {
-              differingFields: differingManagedFields(freshDesired, applied),
-              inspectedCurrent: structuredClone(inspectedCurrent),
-            },
-          );
-        }
       }
       const baseline = applied || inspectedCurrent;
       const changes = operationBatchManagedDiff(baseline, freshDesired);

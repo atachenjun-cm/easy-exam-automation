@@ -221,6 +221,24 @@ test("evidence refresh reuses submitted fields but recalculates attendance", () 
   assert.deepEqual(refreshed.draft.warnings, []);
 });
 
+test("evidence refresh keeps the paper assessment after transient unit info is dropped", () => {
+  const enrichedTask = taskFixture("only_opa");
+  const actuals = {
+    candidateSubjects: "5",
+    completedSubjects: "5",
+    assessment: operationArchiveAssessmentFromPapers(enrichedTask),
+  };
+  const persistedTask = structuredClone(enrichedTask);
+  delete persistedTask.config.paperFormBinds[0].result.bindResult.results[0].unit_info;
+
+  assert.equal(operationArchiveAssessmentFromPapers(persistedTask).complete, false);
+  const refreshed = refreshOperationArchiveEvidenceDraft(persistedTask, { actuals });
+
+  assert.equal(refreshed.draft.fields.personalityAssessment.value, "是");
+  assert.equal(refreshed.draft.fields.personalityAssessmentScope.value, "仅考OPA");
+  assert.equal(refreshed.draft.warnings.some((item) => item.code === "ARCHIVE_PAPER_STRUCTURE_REQUIRED"), false);
+});
+
 test("archive normalizes the legacy only-OPA label to the current operation-console option", () => {
   const task = taskFixture("only_opa");
   task.config.operationArchive = {

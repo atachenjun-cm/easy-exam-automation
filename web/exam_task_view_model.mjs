@@ -133,11 +133,15 @@ export function aggregateExamSessions(sessions = []) {
         projectName: session.projectName || session.name || "未命名考试",
         sourceAccount: session.sourceAccount || "",
         config: session.config || {},
+        steps: Array.isArray(session.steps) ? session.steps : [],
+        statusSnapshot: session.statusSnapshot || null,
         sessions: [],
       });
     }
     const task = tasks.get(session.taskId);
     if (!Object.keys(task.config || {}).length && session.config) task.config = session.config;
+    if (!task.steps.length && Array.isArray(session.steps)) task.steps = session.steps;
+    if (!task.statusSnapshot && session.statusSnapshot) task.statusSnapshot = session.statusSnapshot;
     task.sessions.push(session);
   }
   return [...tasks.values()]
@@ -197,6 +201,13 @@ function examTaskRequirementConfig(task = {}, requirementIndex = 0) {
   return task?.config?.examRequirements?.[requirementIndex]?.config || task?.config || {};
 }
 
+function examTaskRequirementCourseCount(task = {}, requirementIndex = 0) {
+  const config = examTaskRequirementConfig(task, requirementIndex);
+  if (Array.isArray(config?.courses) && config.courses.length) return config.courses.length;
+  const compactCount = Number(config?.courseCount);
+  return Number.isInteger(compactCount) && compactCount > 0 ? compactCount : 1;
+}
+
 function examTaskSession(task = {}, sessionType = "formal", requirementIndex = 0) {
   return (task?.sessions || []).find((session) => (
     session?.sessionType === sessionType &&
@@ -232,6 +243,7 @@ function summarizeExamTaskProgress(statuses = []) {
 }
 
 export function examTaskTypeProgress(task = {}, sessionType = "formal") {
+  if (task.statusSnapshot) task = { ...task, ...task.statusSnapshot, statusSnapshot: null };
   const indexes = examTaskTypeRequirementIndexes(task, sessionType);
   if (!indexes.length) {
     const disabled = summarizeExamTaskProgress([]);
@@ -249,10 +261,13 @@ export function examTaskTypeProgress(task = {}, sessionType = "formal") {
     examTaskStepStatus(task, candidateStepKey, index, requirementCount)
   )));
   const paperBinding = sessionType === "formal"
-    ? summarizeExamTaskProgress(indexes.map((index) => {
+    ? summarizeExamTaskProgress(indexes.flatMap((index) => {
         const saved = Array.isArray(task?.config?.paperFormBinds) ? task.config.paperFormBinds[index] : null;
         const paperState = saved || (index === 0 ? task?.config?.paperFormBind : null) || {};
-        return paperState.status || "pending";
+        return Array.from(
+          { length: examTaskRequirementCourseCount(task, index) },
+          () => paperState.status || "pending",
+        );
       }))
     : summarizeExamTaskProgress(indexes.map((index) => (
         examTaskStepStatus(task, "trial_paper_bind", index, requirementCount)
@@ -297,7 +312,7 @@ export function examTaskSyncDifference(task = {}, sessionType = "formal", enable
     : Array.isArray(item?.diff) ? item.diff.length : 0;
   const differences = sessions.filter((item) => !item?.error && differenceCountForSession(item) > 0);
   const differenceCount = differences.reduce((count, item) => count + differenceCountForSession(item), 0);
-  const failures = sessions.filter((item) => item?.error);
+  const failures = sessions.filter((item) => item?.error || item?.readbackWarning);
   if (differenceCount) {
     return {
       label: String(differenceCount),

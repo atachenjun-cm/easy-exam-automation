@@ -29,6 +29,39 @@ export function userSettingsKey(user) {
   return normalizeEmail(user?.email || "");
 }
 
+export function sharedAutomationProfileSelection({ user, userSettings = defaultUserSettings() } = {}) {
+  const key = userSettingsKey(user);
+  const selection = key ? userSettings?.users?.[key]?.sharedAutomationProfile : null;
+  const ownerEmail = normalizeEmail(selection?.ownerEmail || "");
+  const profileId = String(selection?.profileId || "").trim();
+  return ownerEmail && profileId ? { ownerEmail, profileId } : null;
+}
+
+export function setSharedAutomationProfileSelection(
+  userSettings,
+  user,
+  selection = null,
+  now = new Date().toISOString(),
+) {
+  const key = userSettingsKey(user);
+  if (!key) throw new Error("请先登录后再选择自动配置账号。");
+  const nextSettings = normalizeUserSettings(userSettings);
+  const existing = nextSettings.users[key];
+  const ownerEmail = normalizeEmail(selection?.ownerEmail || "");
+  const profileId = String(selection?.profileId || "").trim();
+  if (!existing && !(ownerEmail && profileId)) return null;
+  const record = {
+    ...(existing || {}),
+    userId: key,
+    updatedAt: now,
+    createdAt: existing?.createdAt || now,
+  };
+  if (ownerEmail && profileId) record.sharedAutomationProfile = { ownerEmail, profileId };
+  else delete record.sharedAutomationProfile;
+  nextSettings.users[key] = record;
+  return record.sharedAutomationProfile || null;
+}
+
 export function sanitizeLoginSettings(login = {}) {
   const defaults = defaultLoginSettings();
   return {
@@ -54,7 +87,22 @@ export function apiKeyProfileId({ apiBase = DEFAULT_TENANT_API_BASE, tenantApiKe
 
 export function apiKeyHint(value = "") {
   const text = String(value || "").trim();
-  return text ? `末尾 ${text.slice(-4)}` : "未配置";
+  if (!text) return "未配置";
+  return text.length >= 8 ? `末尾 ${text.slice(-4)}` : "已配置";
+}
+
+export function apiKeySafeLabel(value = "", tenantApiKey = "", replacement = apiKeyHint(tenantApiKey)) {
+  const label = String(value || "").trim();
+  const secret = String(tenantApiKey || "").trim();
+  return secret && label.includes(secret) ? label.split(secret).join(replacement) : label;
+}
+
+export function apiKeyLabelAfterRotation(value = "", currentApiKey = "", nextApiKey = "") {
+  const label = String(value || "").trim();
+  const currentHint = apiKeyHint(currentApiKey);
+  const nextHint = apiKeyHint(nextApiKey);
+  if (label === currentHint) return nextHint;
+  return apiKeySafeLabel(label, currentApiKey, nextHint);
 }
 
 export function defaultCustomerServiceSchedulerSettings(overrides = {}) {
@@ -111,7 +159,7 @@ export function apiKeyProfileCredentialsForUser({
     username: login.username,
     tenantId: login.tenantId,
     password: login.password,
-    tenantApiKey: profile.tenantApiKey,
+    tenantApiKeyConfigured: Boolean(profile.tenantApiKey),
   };
 }
 
@@ -125,6 +173,7 @@ export function updateApiKeyProfileForUser(userSettings, user, profileId, update
   if (index < 0) throw new Error("未找到 API Key 配置。");
   const now = new Date().toISOString();
   const currentProfile = profiles[index];
+  const nextTenantApiKey = String(updates.tenantApiKey || currentProfile.tenantApiKey || "").trim();
   const nextAccount = normalizeEmail(
     updates.login?.username || updates.label || currentProfile.login?.username || currentProfile.label || "",
   );
@@ -135,13 +184,18 @@ export function updateApiKeyProfileForUser(userSettings, user, profileId, update
   if (duplicateAccount) throw new Error("该账号邮箱已绑定一个 API Key，请编辑原账号。");
   const nextProfile = {
     ...currentProfile,
-    label: updates.label === undefined ? currentProfile.label : String(updates.label || "").trim(),
+    label: updates.label === undefined
+      ? apiKeyLabelAfterRotation(currentProfile.label, currentProfile.tenantApiKey, nextTenantApiKey)
+      : apiKeySafeLabel(
+          apiKeyLabelAfterRotation(updates.label, currentProfile.tenantApiKey, nextTenantApiKey),
+          nextTenantApiKey,
+        ),
     remark: updates.remark === undefined ? String(currentProfile.remark || "") : String(updates.remark || "").trim(),
     tenantId: updates.tenantId === undefined
       ? String(currentProfile.tenantId || "")
       : String(updates.tenantId || "").trim(),
-    tenantApiKey: String(updates.tenantApiKey || currentProfile.tenantApiKey || "").trim(),
-    keyHint: apiKeyHint(updates.tenantApiKey || currentProfile.tenantApiKey),
+    tenantApiKey: nextTenantApiKey,
+    keyHint: apiKeyHint(nextTenantApiKey),
     login: updates.login && typeof updates.login === "object"
       ? {
           ...(currentProfile.login || {}),
@@ -298,7 +352,7 @@ export function saveUserLogin(userSettings, user, login) {
       apiBase: login.apiBase || DEFAULT_TENANT_API_BASE,
       tenantId: record.login.tenantId,
       tenantApiKey: record.login.tenantApiKey,
-      label: login.profileLabel || record.login.username || record.login.tenantApiKey,
+      label: login.profileLabel || record.login.username || apiKeyHint(record.login.tenantApiKey),
       login: record.login,
     }, { now, current: true });
   }
@@ -329,6 +383,7 @@ export function upsertApiKeyProfileInRecord(record, input = {}, { now = new Date
       profile.current = false;
     });
   }
+  const requestedLabel = input.label || existing.label || apiKeyHint(tenantApiKey);
   const profile = {
     ...existing,
     id,
@@ -336,7 +391,7 @@ export function upsertApiKeyProfileInRecord(record, input = {}, { now = new Date
     tenantId,
     tenantApiKey,
     keyHint: apiKeyHint(tenantApiKey),
-    label: String(input.label || existing.label || apiKeyHint(tenantApiKey)).trim(),
+    label: apiKeySafeLabel(requestedLabel, tenantApiKey),
     remark: String(input.remark || existing.remark || "").trim(),
     login: {
       url: String(submittedLogin.url || existingProfileLogin.url || fallbackLogin.url || DEFAULT_LOGIN_URL).trim(),
@@ -359,7 +414,7 @@ export function upsertApiKeyProfileInRecord(record, input = {}, { now = new Date
 export function publicApiKeyProfiles(profiles = []) {
   return normalizeApiKeyProfiles(profiles).map((profile) => ({
     id: profile.id,
-    label: profile.label,
+    label: apiKeySafeLabel(profile.label, profile.tenantApiKey),
     remark: profile.remark,
     apiBase: profile.apiBase,
     keyHint: profile.keyHint,
@@ -376,7 +431,7 @@ function normalizeApiKeyProfile(profile = {}) {
   const apiBase = normalizeTenantApiBase(profile.apiBase || DEFAULT_TENANT_API_BASE);
   return {
     id: String(profile.id || apiKeyProfileId({ apiBase, tenantApiKey })),
-    label: String(profile.label || profile.name || apiKeyHint(tenantApiKey)).trim(),
+    label: apiKeySafeLabel(profile.label || profile.name || apiKeyHint(tenantApiKey), tenantApiKey),
     remark: String(profile.remark || "").trim(),
     apiBase,
     tenantId: String(profile.tenantId || profile.tenant_id || "").trim(),

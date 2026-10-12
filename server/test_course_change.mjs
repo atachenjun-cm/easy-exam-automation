@@ -143,6 +143,12 @@ test("tenant course query reads session and form details through EasyExam APIs",
     name: "旧科目",
     form_codes: ["FORM-A", "FORM-B"],
     session_count: 1,
+    session_ids: ["432821"],
+    session_bindings: [{
+      session_id: "432821",
+      entries_count: null,
+      course_entries: null,
+    }],
   });
   assert.deepEqual(calls, [
     { url: "https://eztest.cn/tenant/api/courses/20260803-01-01/?apply=session", method: "GET" },
@@ -197,14 +203,288 @@ test("course update preserves queried form codes and verifies the result without
   assert.equal(result.courses[0].name, "新科目");
 });
 
-test("course count changes are rejected before any update", () => {
-  assert.throws(
-    () => buildCourseChangePlan([
-      { code: "C1", name: "科目一", form_codes: [] },
-      { code: "C2", name: "科目二", form_codes: [] },
-    ], ["只剩一个科目"]),
-    /仅支持科目数量不变时修改名称/,
+test("course increase preserves matching courses even when a new subject is inserted first", () => {
+  const plan = buildCourseChangePlan([
+    { code: "C1", name: "原科目", form_codes: [] },
+  ], ["新增科目", "原科目"]);
+
+  assert.equal(plan.length, 2);
+  assert.equal(plan[0].added, true);
+  assert.equal(plan[0].afterName, "新增科目");
+  assert.equal(plan[1].before.code, "C1");
+  assert.equal(plan[1].changed, false);
+});
+
+test("course decrease preserves matching courses and marks only the remainder for deletion", () => {
+  const plan = buildCourseChangePlan([
+    { code: "C1", name: "科目一", form_codes: [] },
+    { code: "C2", name: "科目二", form_codes: [] },
+  ], ["科目二"]);
+
+  assert.equal(plan.length, 2);
+  assert.equal(plan[0].before.code, "C2");
+  assert.equal(plan[0].removed, false);
+  assert.equal(plan[1].before.code, "C1");
+  assert.equal(plan[1].removed, true);
+});
+
+test("course increase creates only the missing course and binds it to the formal session", async () => {
+  const calls = [];
+  const state = new Map([
+    ["20260904-01-01", {
+      name: "基础物业岗",
+      forms: ["FORM-A"],
+      sessions: ["437214"],
+    }],
+  ]);
+  const requestJson = async (_login, url, options) => {
+    const method = options.method;
+    const body = options.body ? JSON.parse(options.body) : null;
+    calls.push({ url, method, body });
+    if (url.endsWith("/tenant/api/courses/?apply=session")) {
+      return { results: [...state].map(([code, value]) => ({ code, name: value.name })) };
+    }
+    const courseMatch = url.match(/\/tenant\/api\/courses\/([^/]+)\/\?apply=(session|form)$/);
+    if (courseMatch) {
+      const code = decodeURIComponent(courseMatch[1]);
+      const course = state.get(code);
+      if (!course) {
+        const error = new Error("not found");
+        error.status = 404;
+        throw error;
+      }
+      return courseMatch[2] === "session"
+        ? {
+          code,
+          name: course.name,
+          res: course.sessions.map((id) => ({ id, entries_count: 0, course_entries: 0 })),
+        }
+        : { code, name: course.name, res: course.forms.map((formCode) => ({ code: formCode })) };
+    }
+    if (url.endsWith("/tenant/api/course/") && method === "POST") {
+      state.set(body.code, { name: body.name, forms: body.form_codes, sessions: [] });
+      return { code: body.code, name: body.name };
+    }
+    if (url.endsWith("/tenant/api/course/session/437214/") && method === "POST") {
+      state.get(body.course_code).sessions.push("437214");
+      return { ok: true };
+    }
+    throw new Error(`unexpected request: ${method} ${url}`);
+  };
+  const snapshots = await fetchTenantCourseSnapshots({
+    apiBase: "https://eztest.cn",
+    courses: [{ code: "20260904-01-01", name: "基础物业岗" }],
+    login: {},
+    requestJson,
+  });
+  const persisted = [];
+  const result = await applyTenantCourseChanges({
+    apiBase: "https://eztest.cn",
+    snapshots,
+    requestedNames: ["基础物业岗", "物业运营管理岗"],
+    sessionId: "437214",
+    creationConfig: { startTimeDisplay: "2026/09/04 09:00" },
+    login: {},
+    requestJson,
+    onCoursesEnsured: async (courses) => persisted.push(courses.map((course) => course.code)),
+  });
+
+  assert.deepEqual(result.courses.map((course) => course.name), ["基础物业岗", "物业运营管理岗"]);
+  assert.deepEqual(result.createdCourseCodes, ["20260904-01-02"]);
+  assert.deepEqual(result.boundCourseCodes, ["20260904-01-02"]);
+  assert.deepEqual(result.diff, [{
+    field: "course_add",
+    label: "科目信息",
+    code: "20260904-01-02",
+    before: "",
+    after: "物业运营管理岗",
+  }]);
+  assert.equal(calls.filter((call) => call.method === "POST" && call.url.endsWith("/tenant/api/course/")).length, 1);
+  assert.deepEqual(
+    calls.filter((call) => call.url.endsWith("/tenant/api/course/session/437214/")).map((call) => call.body.course_code),
+    ["20260904-01-02"],
   );
+  assert.ok(persisted.some((codes) => codes.includes("20260904-01-02")));
+});
+
+test("course decrease deletes only an unused course bound to the current formal session", async () => {
+  const calls = [];
+  const deleted = new Set();
+  const requestJson = async (_login, url, options) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    calls.push({ url, method: options.method, body });
+    if (url.endsWith("/tenant/api/course/") && options.method === "DELETE") {
+      body.codes.forEach((code) => deleted.add(code));
+      return { ok: true };
+    }
+    const courseMatch = url.match(/\/tenant\/api\/courses\/([^/]+)\/\?apply=(session|form)$/);
+    if (courseMatch) {
+      const code = decodeURIComponent(courseMatch[1]);
+      if (deleted.has(code)) {
+        const error = new Error("not found");
+        error.status = 404;
+        throw error;
+      }
+      return courseMatch[2] === "session"
+        ? { code, name: "保留科目", res: [{ id: "S1", entries_count: 0, course_entries: 0 }] }
+        : { code, name: "保留科目", res: [] };
+    }
+    throw new Error(`unexpected request: ${options.method} ${url}`);
+  };
+  const snapshots = [
+    {
+      code: "C1",
+      name: "保留科目",
+      form_codes: [],
+      session_ids: ["S1"],
+      session_bindings: [{ session_id: "S1", entries_count: 0, course_entries: 0 }],
+    },
+    {
+      code: "C2",
+      name: "删除科目",
+      form_codes: ["FORM-B"],
+      session_ids: ["S1"],
+      session_bindings: [{ session_id: "S1", entries_count: 0, course_entries: 0 }],
+    },
+  ];
+  const persisted = [];
+  const result = await applyTenantCourseChanges({
+    apiBase: "https://eztest.cn",
+    snapshots,
+    requestedNames: ["保留科目"],
+    sessionId: "S1",
+    login: {},
+    requestJson,
+    onCoursesEnsured: async (courses) => persisted.push(courses.map((course) => course.code)),
+  });
+
+  assert.deepEqual(result.deletedCourseCodes, ["C2"]);
+  assert.deepEqual(result.courses.map((course) => course.code), ["C1"]);
+  assert.deepEqual(result.diff, [{
+    field: "course_remove",
+    label: "科目信息",
+    code: "C2",
+    before: "删除科目",
+    after: "",
+  }]);
+  assert.deepEqual(calls.find((call) => call.method === "DELETE").body, { codes: ["C2"] });
+  assert.deepEqual(persisted.at(-1), ["C1"]);
+});
+
+test("course decrease stops before deletion when the course is shared or has candidates", async () => {
+  const baseCourse = {
+    code: "C1",
+    name: "保留科目",
+    form_codes: [],
+    session_ids: ["S1"],
+    session_bindings: [{ session_id: "S1", entries_count: 0, course_entries: 0 }],
+  };
+  const sharedCourse = {
+    code: "C2",
+    name: "共享科目",
+    form_codes: [],
+    session_ids: ["S1", "S2"],
+    session_bindings: [
+      { session_id: "S1", entries_count: 0, course_entries: 0 },
+      { session_id: "S2", entries_count: 0, course_entries: 0 },
+    ],
+  };
+  let requested = false;
+  await assert.rejects(
+    applyTenantCourseChanges({
+      apiBase: "https://eztest.cn",
+      snapshots: [baseCourse, sharedCourse],
+      requestedNames: ["保留科目"],
+      sessionId: "S1",
+      login: {},
+      requestJson: async () => { requested = true; },
+    }),
+    /还绑定了其他场次/,
+  );
+  assert.equal(requested, false);
+
+  const assignedCourse = {
+    ...sharedCourse,
+    name: "有考生科目",
+    session_ids: ["S1"],
+    session_bindings: [{ session_id: "S1", entries_count: 3, course_entries: 2 }],
+  };
+  await assert.rejects(
+    applyTenantCourseChanges({
+      apiBase: "https://eztest.cn",
+      snapshots: [baseCourse, assignedCourse],
+      requestedNames: ["保留科目"],
+      sessionId: "S1",
+      login: {},
+      requestJson: async () => { requested = true; },
+    }),
+    /已有 2 名考生/,
+  );
+});
+
+test("course decrease persists confirmed deletions so a later failure can be retried", async () => {
+  const snapshots = [
+    {
+      code: "C1",
+      name: "保留科目",
+      form_codes: [],
+      session_ids: ["S1"],
+      session_bindings: [{ session_id: "S1", entries_count: 0, course_entries: 0 }],
+    },
+    {
+      code: "C2",
+      name: "删除科目一",
+      form_codes: [],
+      session_ids: ["S1"],
+      session_bindings: [{ session_id: "S1", entries_count: 0, course_entries: 0 }],
+    },
+    {
+      code: "C3",
+      name: "删除科目二",
+      form_codes: [],
+      session_ids: ["S1"],
+      session_bindings: [{ session_id: "S1", entries_count: 0, course_entries: 0 }],
+    },
+  ];
+  const deleted = new Set();
+  const persisted = [];
+  const requestJson = async (_login, url, options) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    if (url.endsWith("/tenant/api/course/") && options.method === "DELETE") {
+      if (body.codes[0] === "C3") {
+        const error = new Error("temporary failure");
+        error.status = 503;
+        throw error;
+      }
+      deleted.add(body.codes[0]);
+      return { ok: true };
+    }
+    const courseMatch = url.match(/\/tenant\/api\/courses\/([^/]+)\/\?apply=(session|form)$/);
+    if (!courseMatch) throw new Error(`unexpected request: ${options.method} ${url}`);
+    const code = decodeURIComponent(courseMatch[1]);
+    if (deleted.has(code)) {
+      const error = new Error("not found");
+      error.status = 404;
+      throw error;
+    }
+    return courseMatch[2] === "session"
+      ? { code, name: "保留科目", res: [{ id: "S1", entries_count: 0, course_entries: 0 }] }
+      : { code, name: "保留科目", res: [] };
+  };
+
+  await assert.rejects(
+    applyTenantCourseChanges({
+      apiBase: "https://eztest.cn",
+      snapshots,
+      requestedNames: ["保留科目"],
+      sessionId: "S1",
+      login: {},
+      requestJson,
+      onCoursesEnsured: async (courses) => persisted.push(courses.map((course) => course.code)),
+    }),
+    (error) => error.status === 503 && error.remoteModified === true,
+  );
+  assert.deepEqual(persisted.at(-1), ["C1", "C3"]);
 });
 
 test("missing form binding shape stops updates to avoid clearing papers", async () => {

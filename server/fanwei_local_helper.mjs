@@ -28,6 +28,7 @@ import {
   FanweiHelperUpdateError,
   runFanweiHelperUpdate,
 } from "./fanwei_local_helper_update.mjs";
+import { openMessageCenterSendConfirmation } from "./message_center_send_runner.mjs";
 import { FANWEI_LOCAL_HELPER_VERSION } from "./fanwei_local_helper_version.mjs";
 
 export { FANWEI_LOCAL_HELPER_VERSION } from "./fanwei_local_helper_version.mjs";
@@ -48,6 +49,7 @@ const KNOWN_PATHS = new Set([
   "/operation-personnel/preview",
   "/operation-personnel/send",
   "/operation-personnel/recheck",
+  "/message-center/prepare-send",
   "/update",
 ]);
 const OPERATION_PATHS = new Set([
@@ -63,6 +65,7 @@ const OPERATION_PATHS = new Set([
   "/operation-personnel/preview",
   "/operation-personnel/send",
   "/operation-personnel/recheck",
+  "/message-center/prepare-send",
 ]);
 const DEFAULT_JSON_BODY_LIMIT_BYTES = 64 * 1024;
 const SCORE_STAMP_JSON_BODY_LIMIT_BYTES = 160 * 1024 * 1024;
@@ -83,6 +86,7 @@ export const FANWEI_LOCAL_HELPER_CAPABILITIES = Object.freeze({
   operationArchive: true,
   operationContentSync: true,
   operationPersonnelTask: true,
+  messageCenterSendPreparation: true,
   selfUpdate: true,
 });
 
@@ -243,6 +247,7 @@ export function createFanweiLocalHelperServer({
   runOperationPersonnelAttemptImpl,
   runOperationPersonnelRecheckImpl,
   closeOperationPersonnelBrowserSessionImpl,
+  openMessageCenterSendConfirmationImpl,
   runHelperUpdateImpl = runFanweiHelperUpdate,
 } = {}) {
   if (!LOOPBACK_HOSTS.has(host)) {
@@ -371,6 +376,32 @@ export function createFanweiLocalHelperServer({
       throw error;
     });
     return await operationBrowserPromise;
+  }
+
+  async function executeMessageCenterSendPreparation(payload = {}) {
+    const baseUrl = String(payload?.baseUrl || "").trim();
+    await ensureChromeOnce(baseUrl);
+    const browser = await connectOperationBrowser();
+    const context = browser?.contexts?.()[0];
+    if (!context) {
+      throw new HelperError(
+        "message_center_chrome_context_missing",
+        "未取得本机专用 Chrome 登录环境，请关闭专用 Chrome 后重试。",
+        503,
+      );
+    }
+    const prepare = typeof openMessageCenterSendConfirmationImpl === "function"
+      ? openMessageCenterSendConfirmationImpl
+      : openMessageCenterSendConfirmation;
+    try {
+      return await prepare(payload, { context });
+    } catch (error) {
+      throw new HelperError(
+        String(error?.code || "message_center_send_preparation_failed"),
+        error?.message || String(error),
+        Number(error?.status || 409),
+      );
+    }
   }
 
   async function operationBatchRunners() {
@@ -1012,13 +1043,7 @@ export function createFanweiLocalHelperServer({
       throw new HelperError("operation_batch_payload_invalid", "缺少有效的运控批次回查参数。", 400);
     }
     const operationBatchCode = String(payload.operationBatchCode || "").trim();
-    if (!operationBatchCode) {
-      throw new HelperError(
-        "operation_batch_code_required",
-        "添加日程必须先有批次代码，请先补录批次代码和批次名称。",
-        409,
-      );
-    }
+    const syncOnly = payload.syncOnly === true && !operationBatchCode;
     const baseUrl = operationConsoleBaseUrl(payload?.baseUrl);
     await ensureChromeOnce(baseUrl);
     const browser = await connectOperationBrowser();
@@ -1035,6 +1060,7 @@ export function createFanweiLocalHelperServer({
         headless: false,
         operationBatchCode,
         publishAfterCreate: false,
+        readOnlyBatchLookup: syncOnly,
       });
       if (!located?.operationBatchCode) throw new Error("运营批次回查没有返回批次代码");
       let published = located.status === "published" ? located : null;
@@ -1058,6 +1084,23 @@ export function createFanweiLocalHelperServer({
       let scheduleStatus = "synced";
       let scheduleFailure;
       const actualBatchName = String(located.batchName || "").trim();
+      if (syncOnly) {
+        if (!actualBatchName) {
+          const error = new Error("未取得实际批次名");
+          error.code = "OPERATION_BATCH_ACTUAL_NAME_MISSING";
+          throw error;
+        }
+        return {
+          status: "success",
+          publishStatus: located.status === "published" ? "published" : "unpublished",
+          operationBatchCode: located.operationBatchCode,
+          created: located,
+          initialCreated: located,
+          scheduleStatus: "pending",
+          reconciled: true,
+          syncOnly: true,
+        };
+      }
       if (!payload.desired?.complete) {
         scheduleStatus = "waiting_schedule";
         scheduleFailure = {
@@ -1674,6 +1717,12 @@ export function createFanweiLocalHelperServer({
           executeOperationPersonnelRecheck,
         );
         sendJson(res, 200, { ok: true, operationPersonnelRecheck }, origin);
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/message-center/prepare-send") {
+        const payload = await readJsonBody(req);
+        const messageCenterSendPreparation = await executeMessageCenterSendPreparation(payload);
+        sendJson(res, 200, { ok: true, messageCenterSendPreparation }, origin);
         return;
       }
 

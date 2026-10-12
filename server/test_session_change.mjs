@@ -6,6 +6,7 @@ import {
   buildSessionChangeDiff,
   editableSessionFieldsFromDetail,
   enrichTaskSessionRequirementChanges,
+  ensureSessionCreationOptions,
   featureEnabledForRuntime,
   fetchTenantSessionDetailWithListFallback,
   localSessionFieldsForChange,
@@ -123,6 +124,123 @@ test("name-only tenant update cannot carry candidate or other session configurat
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: "新场次名称" }),
+  });
+});
+
+test("creation option verification includes the parent options required by the tenant API", async () => {
+  const calls = [];
+  const result = await ensureSessionCreationOptions({
+    apiBase: "https://eztest.cn",
+    sessionId: "438606",
+    login: { tenantApiKey: "test" },
+    sessionPayload: {
+      manual_score: true,
+      new_mark: true,
+      monitor: true,
+      monitor_replay: true,
+    },
+    requestJson: async (_login, url, options) => {
+      calls.push({ url, options });
+      if (options.method === "PUT") return {};
+      return {
+        sessions: [{
+          id: 438606,
+          extra: {
+            new_mark: true,
+            monitor_replay: true,
+          },
+        }],
+      };
+    },
+  });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    manual_score: true,
+    new_mark: true,
+    monitor: true,
+    monitor_replay: true,
+  });
+  assert.deepEqual(result.expected, {
+    new_mark: true,
+    monitor_replay: true,
+  });
+});
+
+test("creation option verification accepts disabled parent options omitted by tenant readback", async () => {
+  const calls = [];
+  const result = await ensureSessionCreationOptions({
+    apiBase: "https://eztest.cn",
+    sessionId: "438608",
+    login: { tenantApiKey: "test" },
+    sessionPayload: {
+      manual_score: false,
+      new_mark: false,
+      monitor: false,
+      monitor_replay: false,
+    },
+    requestJson: async (_login, url, options) => {
+      calls.push({ url, options });
+      if (options.method === "PUT") return { id: 438608 };
+      return {
+        sessions: [{
+          id: 438608,
+          extra: {
+            new_mark: false,
+            monitor_replay: false,
+          },
+        }],
+      };
+    },
+  });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    manual_score: false,
+    new_mark: false,
+    monitor: false,
+    monitor_replay: false,
+  });
+  assert.deepEqual(result.expected, {
+    new_mark: false,
+    monitor_replay: false,
+  });
+});
+
+test("legacy marking submits the manual-score parent with new marking disabled", async () => {
+  const calls = [];
+  const result = await ensureSessionCreationOptions({
+    apiBase: "https://eztest.cn",
+    sessionId: "438607",
+    login: { tenantApiKey: "test" },
+    sessionPayload: {
+      manual_score: true,
+      new_mark: false,
+      monitor: false,
+      monitor_replay: false,
+    },
+    requestJson: async (_login, url, options) => {
+      calls.push({ url, options });
+      if (options.method === "PUT") return { id: 438607 };
+      return {
+        sessions: [{
+          id: 438607,
+          extra: {
+            new_mark: false,
+            monitor_replay: false,
+          },
+        }],
+      };
+    },
+  });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    manual_score: true,
+    new_mark: false,
+    monitor: false,
+    monitor_replay: false,
+  });
+  assert.deepEqual(result.expected, {
+    new_mark: false,
+    monitor_replay: false,
   });
 });
 
@@ -400,7 +518,7 @@ test("tenant session change errors use operator friendly messages", () => {
   assert.equal(tenantSessionChangeErrorMessage({ status: 500 }), "租户 API 修改场次失败：500");
 });
 
-test("session preview keeps the direct detail response when it succeeds", async () => {
+test("session preview reads the matching item from the standard session list endpoint", async () => {
   const requests = [];
   const detail = await fetchTenantSessionDetailWithListFallback({
     apiBase: "https://eztest.cn/",
@@ -408,15 +526,15 @@ test("session preview keeps the direct detail response when it succeeds", async 
     login: { tenantApiKey: "test" },
     requestJson: async (_login, url) => {
       requests.push(url);
-      return { id: 432821, name: "正式考试" };
+      return { sessions: [{ id: 432820 }, { id: 432821, name: "正式考试" }] };
     },
   });
 
   assert.equal(detail.name, "正式考试");
-  assert.deepEqual(requests, ["https://eztest.cn/tenant/api/session/432821/"]);
+  assert.deepEqual(requests, ["https://eztest.cn/tenant/api/session/?session_ids=432821"]);
 });
 
-test("session preview reads the matching list item when the detail endpoint fails", async () => {
+test("session preview supports a nested session list response without using a detail URL", async () => {
   const requests = [];
   const detail = await fetchTenantSessionDetailWithListFallback({
     apiBase: "https://eztest.cn",
@@ -424,20 +542,12 @@ test("session preview reads the matching list item when the detail endpoint fail
     login: { tenantApiKey: "test" },
     requestJson: async (_login, url) => {
       requests.push(url);
-      if (url.endsWith("/432821/")) {
-        const error = new Error("detail failed");
-        error.status = 500;
-        throw error;
-      }
-      return { sessions: [{ id: 432820 }, { id: 432821, name: "正式考试" }] };
+      return { data: { list: [{ id: 432820 }, { id: 432821, name: "正式考试" }] } };
     },
   });
 
   assert.equal(detail.name, "正式考试");
-  assert.deepEqual(requests, [
-    "https://eztest.cn/tenant/api/session/432821/",
-    "https://eztest.cn/tenant/api/session/?session_ids=432821",
-  ]);
+  assert.deepEqual(requests, ["https://eztest.cn/tenant/api/session/?session_ids=432821"]);
 });
 
 test("session change history appends newest record without losing older records", () => {

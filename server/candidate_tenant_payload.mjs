@@ -5,9 +5,10 @@ const TENANT_FIXED_ENTRY_KEYS = new Set([
   "course_code",
   "email",
   "phone",
+  "gender",
   "custom_fields",
 ]);
-const PROTECTED_ENTRY_KEYS = new Set(["permit", "full_name", "identity_id", "course_code", "custom_fields"]);
+const PROTECTED_ENTRY_KEYS = new Set(["permit", "full_name", "identity_id", "course_code", "gender", "custom_fields"]);
 
 function normalizeCustomFields(customFields = {}) {
   if (!customFields || typeof customFields !== "object" || Array.isArray(customFields)) return {};
@@ -85,10 +86,12 @@ export function buildTenantCandidateEntry(candidate = {}, customFieldMappings = 
     mappedValues.phone,
     customFieldAliasValue(candidate.custom_fields, ["手机号码", "手机号", "手机", "联系电话", "电话", "mobile", "phone"]),
   );
+  const gender = firstNonEmpty(candidate.gender);
   if (!entry.course_code) delete entry.course_code;
   const result = { ...entry, ...mappedValues };
   if (email) result.email = email;
   if (phone) result.phone = phone;
+  if (gender) result.gender = gender;
   return result;
 }
 

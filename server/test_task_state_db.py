@@ -63,6 +63,26 @@ class TaskStoreTest(unittest.TestCase):
         self.assertEqual(len(updated["sessions"]), 6)
         self.assertEqual(updated["sessions"][2]["session_id"], "51003")
 
+    def test_gets_multiple_task_details_in_requested_order(self):
+        first = self.store.create_task("项目甲", "account-a", {})
+        second = self.store.create_task("项目乙", "account-b", {})
+        self.store.upsert_session(first["taskId"], "formal", {
+            "session_id": "10001", "name": "项目甲正式考试",
+        })
+        self.store.upsert_session(second["taskId"], "formal", {
+            "session_id": "10002", "name": "项目乙正式考试",
+        })
+
+        details = self.store.get_tasks([
+            second["taskId"],
+            "missing-task",
+            first["taskId"],
+            second["taskId"],
+        ])
+
+        self.assertEqual([item["taskId"] for item in details], [second["taskId"], first["taskId"]])
+        self.assertEqual([item["sessions"][0]["session_id"] for item in details], ["10002", "10001"])
+
     def test_project_card_summary_exposes_identity_without_raw_fanwei_payload(self):
         task = self.store.create_task("项目卡测试", "account-a", {
             "customerName": "四川省公路设计院",
@@ -89,19 +109,58 @@ class TaskStoreTest(unittest.TestCase):
         self.assertNotIn("仅详情可见", json.dumps(summary, ensure_ascii=False))
         self.assertEqual(detail["config"]["fanweiSource"]["raw"]["fields"]["其他说明"], "仅详情可见")
 
-    def test_list_sessions_includes_task_config_for_unified_exam_display(self):
+    def test_list_sessions_keeps_only_config_needed_for_exam_list_display(self):
         task = self.store.create_task("统一项目", "account-a", {
+            "examName": "统一考试",
             "unifiedExamAddress": True,
             "examUrl": "https://eztest.cn/exam/1234/uniform/login/",
+            "pledgeContent": "不应进入考试列表" * 1000,
+            "examRequirements": [{
+                "fields": {"考试名称": "需求单考试名称", "其他字段": "不应进入考试列表"},
+                "config": {
+                    "examName": "需求单考试名称",
+                    "mockExamEnabled": True,
+                    "courses": [
+                        {"name": "基础物业岗", "code": "COURSE-1"},
+                        {"name": "物业运营管理岗", "code": "COURSE-2"},
+                    ],
+                },
+            }],
+            "paperFormBinds": [{"status": "success", "result": {"raw": "不应进入考试列表"}}],
+            "examListSyncPreviewCache": {
+                "checkedAt": "2026-09-02T01:00:00.000Z",
+                "sessions": [{
+                    "sessionId": "30001",
+                    "sessionType": "formal",
+                    "diff": [{"field": "name", "before": "旧名称", "after": "新名称"}],
+                }],
+            },
         })
         self.store.upsert_session(task["taskId"], "formal", {
             "session_id": "30001", "name": "统一项目正式考试"
         })
 
         sessions = self.store.list_sessions()
+        full_sessions = self.store.list_sessions_full()
 
         self.assertEqual(sessions[0]["config"]["unifiedExamAddress"], True)
         self.assertEqual(sessions[0]["config"]["examUrl"], "https://eztest.cn/exam/1234/uniform/login/")
+        self.assertEqual(sessions[0]["config"]["examRequirements"], [{
+            "fields": {"考试名称": "需求单考试名称"},
+            "config": {"examName": "需求单考试名称", "mockExamEnabled": True, "courseCount": 2},
+        }])
+        self.assertEqual(sessions[0]["config"]["paperFormBinds"], [{"status": "success"}])
+        self.assertEqual(
+            sessions[0]["config"]["examListSyncPreviewCache"]["sessions"][0]["differenceCount"],
+            1,
+        )
+        self.assertNotIn("pledgeContent", sessions[0]["config"])
+        self.assertNotIn("courses", sessions[0]["config"]["examRequirements"][0]["config"])
+        self.assertIn("pledgeContent", full_sessions[0]["config"])
+        self.assertLess(
+            len(json.dumps(sessions[0], ensure_ascii=False)),
+            len(json.dumps(full_sessions[0], ensure_ascii=False)) / 10,
+        )
 
     def test_persists_task_owner_email_to_tasks_and_sessions(self):
         task = self.store.create_task("同事项目", "account-a", {}, owner_email="mate@example.com")

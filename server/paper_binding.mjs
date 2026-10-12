@@ -501,7 +501,7 @@ function mergeSessionSubjectPaperSnapshots(detailSnapshot, matchedSnapshot) {
     papers: uniquePaperRecords([...(detailSnapshot?.papers || []), ...(matchedSnapshot?.papers || [])]),
     unmatchedPapers: Array.isArray(matchedSnapshot?.unmatchedPapers) ? matchedSnapshot.unmatchedPapers : [],
     courseReadMode: detailSnapshot?.courses?.length
-      ? "session_detail"
+      ? detailSnapshot?.courseReadMode || "session_detail"
       : matchedSnapshot?.courseReadMode || "not_returned",
   };
 }
@@ -524,34 +524,94 @@ function courseSessionAssociations(payload = {}) {
   return [];
 }
 
-async function fetchKnownCoursesForSession({ login, apiBase, sessionId, knownCourses, requestJson, emitLog }) {
+async function fetchCoursesForSession({
+  login,
+  apiBase,
+  sessionId,
+  courseCandidates,
+  requestJson,
+  emitLog,
+  courseDetailsCache = new Map(),
+}) {
   const courses = [];
-  for (const knownCourse of uniqueCourseCandidates(knownCourses)) {
-    const courseCode = normalizeCourseCode(knownCourse);
-    if (!courseCode) continue;
-    try {
-      const payload = await requestJson(
-        login,
-        `${apiBase}/tenant/api/courses/${encodeURIComponent(courseCode)}/?apply=session`,
-        { method: "GET" },
-        `查询科目场次 ${courseCode}`,
-      );
-      const associated = courseSessionAssociations(payload).some((session) => (
-        String(session?.id ?? session?.session_id ?? session?.sessionId ?? session).trim() === String(sessionId).trim()
-      ));
-      if (!associated) continue;
-      const detail = unwrapCourseDetail(payload);
-      courses.push({
-        code: String(detail.code || detail.course_code || courseCode).trim(),
-        name: String(detail.name || detail.course_name || normalizeCourseName(knownCourse)).trim(),
-        form_codes: [],
-        paper_names: [],
-      });
-    } catch (error) {
-      emitLog(`[易考信息同步] 科目 ${courseCode} 的场次关联读取失败`, "warning");
+  const failedCourseCodes = [];
+  const candidates = uniqueCourseCandidates(courseCandidates);
+  const batchSize = 8;
+
+  for (let index = 0; index < candidates.length; index += batchSize) {
+    const batch = candidates.slice(index, index + batchSize);
+    const results = await Promise.all(batch.map(async (candidate) => {
+      const courseCode = normalizeCourseCode(candidate);
+      if (!courseCode) return { failedCourseCode: normalizeCourseName(candidate) || "未编号科目" };
+      try {
+        let detailPromise = courseDetailsCache.get(courseCode);
+        if (!detailPromise) {
+          detailPromise = requestJson(
+            login,
+            `${apiBase}/tenant/api/courses/${encodeURIComponent(courseCode)}/?apply=session`,
+            { method: "GET" },
+            `查询科目场次 ${courseCode}`,
+          );
+          courseDetailsCache.set(courseCode, detailPromise);
+        }
+        const payload = await detailPromise;
+        const associated = courseSessionAssociations(payload).some((session) => (
+          String(session?.id ?? session?.session_id ?? session?.sessionId ?? session).trim() === String(sessionId).trim()
+        ));
+        if (!associated) return {};
+        const detail = unwrapCourseDetail(payload);
+        return {
+          course: {
+            code: String(detail.code || detail.course_code || courseCode).trim(),
+            name: String(detail.name || detail.course_name || normalizeCourseName(candidate)).trim(),
+            form_codes: [],
+            paper_names: [],
+          },
+        };
+      } catch (error) {
+        emitLog(`[易考信息同步] 科目 ${courseCode} 的场次关联读取失败`, "warning");
+        return { failedCourseCode: courseCode };
+      }
+    }));
+    for (const result of results) {
+      if (result.course) courses.push(result.course);
+      if (result.failedCourseCode) failedCourseCodes.push(result.failedCourseCode);
     }
   }
-  return courses;
+  return {
+    courses,
+    complete: failedCourseCodes.length === 0,
+    failedCourseCodes,
+  };
+}
+
+async function fetchTenantCoursesForSession({
+  login,
+  apiBase,
+  sessionId,
+  knownCourses = [],
+  requestJson,
+  emitLog = () => {},
+  courseDetailsCache = new Map(),
+}) {
+  const courseListPayload = await requestJson(
+    login,
+    `${apiBase}/tenant/api/course_list/1/1000/`,
+    { method: "GET" },
+    "查询租户科目列表",
+  );
+  return await fetchCoursesForSession({
+    login,
+    apiBase,
+    sessionId,
+    courseCandidates: [
+      ...normalizeCourseList(courseListPayload),
+      ...(Array.isArray(knownCourses) ? knownCourses : []),
+    ],
+    requestJson,
+    emitLog,
+    courseDetailsCache,
+  });
 }
 
 async function fetchSessionSubjectPaperSnapshot({
@@ -562,6 +622,7 @@ async function fetchSessionSubjectPaperSnapshot({
   knownCourses = [],
   requestJson,
   emitLog = () => {},
+  courseReadCache = {},
 }) {
   const formsPath = `/tenant/api/session/${encodeURIComponent(sessionId)}/forms/`;
   let formsPayload = {};
@@ -571,19 +632,21 @@ async function fetchSessionSubjectPaperSnapshot({
     if (!sessionDetail) throw error;
     emitLog("[易考信息同步] 场次试卷列表读取失败，继续使用场次详情回读科目和试卷", "warning");
   }
-  const papers = normalizeFormList(formsPayload);
   let courseListPayload = null;
-  if (papers.length) {
-    try {
-      courseListPayload = await requestJson(
+  let courseListRead = false;
+  try {
+    if (!courseReadCache.courseListPromise) {
+      courseReadCache.courseListPromise = requestJson(
         login,
         `${apiBase}/tenant/api/course_list/1/1000/`,
         { method: "GET" },
         "查询租户科目列表",
       );
-    } catch (error) {
-      emitLog("[易考信息同步] 租户科目列表读取失败，继续使用平台已有科目匹配已绑试卷", "warning");
     }
+    courseListPayload = await courseReadCache.courseListPromise;
+    courseListRead = true;
+  } catch (error) {
+    emitLog("[易考信息同步] 租户科目列表读取失败，科目差异检查可能不完整", "warning");
   }
   let detailSnapshot = sessionDetailSubjectPaperSnapshot(sessionDetail, sessionId);
   if (!detailSnapshot.courses.length) {
@@ -599,23 +662,48 @@ async function fetchSessionSubjectPaperSnapshot({
       emitLog("[易考信息同步] 场次列表科目读取失败，继续使用已取得的试卷信息", "warning");
     }
   }
-  if (!detailSnapshot.courses.length && Array.isArray(knownCourses) && knownCourses.length) {
-    const associatedCourses = await fetchKnownCoursesForSession({
+  const courseDetailsCache = courseReadCache.courseDetails instanceof Map
+    ? courseReadCache.courseDetails
+    : new Map();
+  courseReadCache.courseDetails = courseDetailsCache;
+  const associationSnapshot = courseListRead
+    ? await fetchCoursesForSession({
       login,
       apiBase,
       sessionId,
-      knownCourses,
+      courseCandidates: [
+        ...normalizeCourseList(courseListPayload),
+        ...(Array.isArray(knownCourses) ? knownCourses : []),
+      ],
       requestJson,
       emitLog,
-    });
-    if (associatedCourses.length) detailSnapshot = { courses: associatedCourses, papers: [] };
-  }
+      courseDetailsCache,
+    })
+    : { courses: [], complete: false, failedCourseCodes: [] };
+  // Local/catalog courses are lookup candidates only; session-scoped API results determine membership.
+  const paperMatchKnownCourses = [
+    ...detailSnapshot.courses,
+    ...associationSnapshot.courses,
+  ];
   const matchedSnapshot = buildSessionSubjectPaperSnapshot({
     formsPayload,
-    courseListPayload,
-    knownCourses: [...detailSnapshot.courses, ...(Array.isArray(knownCourses) ? knownCourses : [])],
+    courseListPayload: null,
+    knownCourses: paperMatchKnownCourses,
   });
-  const snapshot = mergeSessionSubjectPaperSnapshots(detailSnapshot, matchedSnapshot);
+  const associatedSnapshot = {
+    courses: associationSnapshot.courses,
+    papers: [],
+    courseReadMode: associationSnapshot.complete ? "tenant_course_associations" : "partial_tenant_course_associations",
+  };
+  const snapshot = mergeSessionSubjectPaperSnapshots(
+    mergeSessionSubjectPaperSnapshots(detailSnapshot, associatedSnapshot),
+    matchedSnapshot,
+  );
+  snapshot.courseReadComplete = associationSnapshot.complete;
+  if (!courseListRead) snapshot.readbackWarning = "租户科目列表读取失败，科目差异检查可能不完整";
+  else if (!associationSnapshot.complete) {
+    snapshot.readbackWarning = `有 ${associationSnapshot.failedCourseCodes.length} 个科目的场次关联读取失败，科目差异检查可能不完整`;
+  }
   emitLog(`[易考信息同步] 已读取 ${snapshot.courses.length} 个科目、${snapshot.papers.length} 份试卷`);
   return snapshot;
 }
@@ -659,7 +747,7 @@ async function fetchSessionForms({ login, apiBase, sessionId, courses, workflowS
   return sessionFormResults(sessionId, papers);
 }
 
-function selectFormCodesForCourse({ courseCode, courseName, workflowSerial, examDate, formPapers, multiSubject = false }) {
+function selectFormCodesForCourse({ courseCode, courseName, workflowSerial, examDate, examName, formPapers, multiSubject = false }) {
   const papers = (Array.isArray(formPapers) ? formPapers : []).map(normalizePaperCandidate).filter((paper) => paper.code);
   const normalizedExamDate = normalizeExamDateIdentifier(examDate);
   const signalDefinitions = [
@@ -766,12 +854,24 @@ function selectFormCodesForCourse({ courseCode, courseName, workflowSerial, exam
       matchedValueOverride: `${normalizedExamDate} / ${courseName}`,
     });
   };
+  const selectExamNameMatch = () => {
+    if (!String(examName || "").trim()) return null;
+    const examNameMatches = withSignals.filter((item) => paperNameContainsCourseName(item.paper.name, examName));
+    if (!examNameMatches.length) return null;
+    return selectBestMatches(examNameMatches.map((item) => ({ ...item, signals: [] })), {
+      matchedByOverride: "exam_name",
+      matchedByLabelOverride: "考试名称",
+      matchedValueOverride: examName,
+    });
+  };
   if (multiSubject) {
     if (codeMatches.length) return selectBestMatches(codeMatches);
     const closestSerialNameMatch = selectClosestNameMatch(serialMatches, { requireSerial: true });
     if (closestSerialNameMatch) return closestSerialNameMatch;
     const dateAndNameMatch = selectDateAndNameMatch();
     if (dateAndNameMatch) return dateAndNameMatch;
+    const examNameMatch = selectExamNameMatch();
+    if (examNameMatch) return examNameMatch;
     return {
       status: "missing",
       formCodes: [],
@@ -791,6 +891,8 @@ function selectFormCodesForCourse({ courseCode, courseName, workflowSerial, exam
   }
   const closestNameMatch = selectClosestNameMatch(withSignals);
   if (closestNameMatch) return closestNameMatch;
+  const examNameMatch = selectExamNameMatch();
+  if (examNameMatch) return examNameMatch;
 
   return { status: "missing", formCodes: [], candidates: papers, matchedBy: "", matchedByLabel: "", matchedValue: "" };
 }
@@ -841,19 +943,12 @@ async function fetchSessionPaperBindingDetail({ login, apiBase, sessionId, cours
       return { source: "forms", results: formResults };
     }
   } catch (error) {
-    emitLog("[试卷绑定] 场次试卷列表回查失败，继续检查场次详情", "warning");
+    emitLog("[试卷绑定] 场次试卷列表回查失败，继续检查场次列表", "warning");
   }
 
-  const detailPath = `/tenant/api/session/${encodeURIComponent(sessionId)}/`;
-  try {
-    const payload = await requestJson(login, `${apiBase}${detailPath}`, { method: "GET" }, `回查正式场次试卷 ${sessionId}`);
-    return { source: "detail", payload };
-  } catch (error) {
-    emitLog("[试卷绑定] 正式场次详情回查失败，已改用场次列表继续检查", "warning");
-    const listPath = `/tenant/api/session/?session_ids=${encodeURIComponent(sessionId)}`;
-    const payload = await requestJson(login, `${apiBase}${listPath}`, { method: "GET" }, `回查正式场次列表试卷 ${sessionId}`);
-    return { source: "list", payload };
-  }
+  const listPath = `/tenant/api/session/?session_ids=${encodeURIComponent(sessionId)}`;
+  const payload = await requestJson(login, `${apiBase}${listPath}`, { method: "GET" }, `回查正式场次列表试卷 ${sessionId}`);
+  return { source: "list", payload };
 }
 
 async function detectSessionPaperBindings({
@@ -1021,6 +1116,7 @@ async function bindPapersToFormalSession({
   courses,
   workflowSerial = "",
   examDate = "",
+  examName = "",
   paperSearchScope = "active",
   managerFetch = null,
   requestJson,
@@ -1054,6 +1150,7 @@ async function bindPapersToFormalSession({
       courseName,
       workflowSerial,
       examDate,
+      examName,
       formPapers: tenantFormList,
       multiSubject: courses.length > 1,
     });
@@ -1065,7 +1162,7 @@ async function bindPapersToFormalSession({
         ? `${paperScopeLabel}中有 ${selected.candidates.length} 份试卷命中${selected.matchedByLabel}“${selected.matchedValue}”，需要人工确认`
         : selected.matchedBy === "workflow_serial_and_course_name"
           ? `${paperScopeLabel}中未找到同时包含泛微流水号“${workflowSerial}”和科目名称“${courseName}”的试卷`
-          : `${paperScopeLabel}中未找到包含科目编号“${requestedCourseCode}”或科目名称“${courseName}”${workflowSerial ? `或泛微流水号“${workflowSerial}”` : ""}的试卷`;
+          : `${paperScopeLabel}中未找到包含科目编号“${requestedCourseCode}”或科目名称“${courseName}”${workflowSerial ? `或泛微流水号“${workflowSerial}”` : ""}${examName ? `或考试名称“${examName}”` : ""}的试卷`;
     emitLog(`[试卷绑定] ${matchMessage}`, selected.status === "matched" ? "success" : "warning");
 
     if (!selectedFormCodes.length) {
@@ -1126,5 +1223,6 @@ export {
   buildSessionSubjectPaperSnapshot,
   detectSessionPaperBindings,
   fetchSessionSubjectPaperSnapshot,
+  fetchTenantCoursesForSession,
   validatePaperBinding,
 };

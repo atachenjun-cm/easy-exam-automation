@@ -1709,6 +1709,61 @@ test("POST /operation-batch/reconcile publishes a uniquely matched pending batch
   assert.deepEqual(sequence, ["locate", "schedule"]);
 });
 
+test("POST /operation-batch/reconcile locates and returns an existing batch without code or external writes", async (t) => {
+  const context = { name: "local-operation-context", pages: () => [] };
+  const sequence = [];
+  const { server, baseUrl } = await startHelper({
+    fetchImpl: async () => jsonResponse([]),
+    connectOperationBrowserImpl: async () => ({ contexts: () => [context], once() {} }),
+    runOperationBatchReconciliationImpl: async (draft, options) => {
+      sequence.push("locate");
+      assert.equal(draft.fields.batchName.value, "待找回批次");
+      assert.equal(options.operationBatchCode, "");
+      assert.equal(options.publishAfterCreate, false);
+      assert.equal(options.readOnlyBatchLookup, true);
+      return {
+        operationBatchCode: "EZT260010",
+        batchName: "运控实际批次名",
+        batchGuid: "batch-guid-10",
+        detailUrl: "https://dashboard.ata.net.cn/batch/batchDetail?batch_guid=batch-guid-10",
+        status: "created_unpublished",
+      };
+    },
+    synchronizeOperationBatchScheduleForArchiveImpl: async () => {
+      sequence.push("schedule");
+      throw new Error("只读同步不应写入日程");
+    },
+    clickOperationBatchPublishImpl: async () => {
+      sequence.push("publish");
+      throw new Error("只读同步不应发布批次");
+    },
+  });
+  t.after(() => stopHelper(server));
+
+  const response = await helperFetch(baseUrl, "/operation-batch/reconcile", {
+    method: "POST",
+    body: {
+      requestId: "88888888-9999-4aaa-8bbb-dddddddddddd",
+      baseUrl: "https://dashboard.ata.net.cn",
+      draft: { fields: { batchName: { value: "待找回批次" } } },
+      operationBatchCode: "",
+      desired: { complete: true, snapshot: { schedules: [{ name: "正式考试" }] } },
+      publishRequired: false,
+      publishAfterCreate: false,
+      syncOnly: true,
+    },
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.operationBatch.status, "success");
+  assert.equal(payload.operationBatch.syncOnly, true);
+  assert.equal(payload.operationBatch.operationBatchCode, "EZT260010");
+  assert.equal(payload.operationBatch.created.batchName, "运控实际批次名");
+  assert.equal(payload.operationBatch.scheduleStatus, "pending");
+  assert.deepEqual(sequence, ["locate"]);
+});
+
 test("POST /operation-batch/create stops schedule writes when the actual batch name is missing", async (t) => {
   const sequence = [];
   const detailPage = {

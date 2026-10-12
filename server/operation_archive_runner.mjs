@@ -1,6 +1,9 @@
 import path from "node:path";
 
+import { normalizeOperationBillingBasis } from "./operation_batch.mjs";
 import {
+  operationConsoleNavigationCanRetry,
+  operationConsolePage,
   operationConsoleBatchListUrl,
   operationConsoleNeedsLogin,
   operationConsoleLoginMessage,
@@ -119,7 +122,9 @@ export function operationArchiveShouldFillInputValue(key, current, expected) {
 }
 
 export function operationArchiveDesiredSelectValue(draft, key) {
-  return key === "examType" ? "机考" : fieldValue(draft, key);
+  if (key === "examType") return "机考";
+  if (key === "billingBasis") return normalizeOperationBillingBasis(fieldValue(draft, key));
+  return fieldValue(draft, key);
 }
 
 async function ensureBatchListReady(page, batchListUrl, options = {}) {
@@ -142,16 +147,7 @@ async function ensureBatchListReady(page, batchListUrl, options = {}) {
 }
 
 export async function operationArchiveConsolePage(context, batchListUrl) {
-  const pages = typeof context?.pages === "function" ? context.pages() : [];
-  const expectedOrigin = new URL(batchListUrl).origin;
-  const matching = pages.find((page) => {
-    try {
-      return new URL(page.url()).origin === expectedOrigin;
-    } catch {
-      return false;
-    }
-  });
-  return matching || await context.newPage();
+  return await operationConsolePage(context, batchListUrl);
 }
 
 async function visibleLocators(locator) {
@@ -703,9 +699,16 @@ async function launchContext(options = {}) {
 async function withArchivePage(draft, options, operation) {
   const { context, owned } = await launchContext(options);
   const batchListUrl = operationConsoleBatchListUrl(options);
-  const page = await operationArchiveConsolePage(context, batchListUrl);
+  let page = await operationArchiveConsolePage(context, batchListUrl);
   try {
-    const identity = await openExactBatch(page, draft, batchListUrl, options);
+    let identity;
+    try {
+      identity = await openExactBatch(page, draft, batchListUrl, options);
+    } catch (error) {
+      if (!operationConsoleNavigationCanRetry(error)) throw error;
+      page = await context.newPage();
+      identity = await openExactBatch(page, draft, batchListUrl, options);
+    }
     return await operation(page, identity);
   } finally {
     if (owned || options.closeContext !== false) await context.close();

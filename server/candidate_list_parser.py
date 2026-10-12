@@ -13,18 +13,22 @@ PERMIT_ALIASES = {"准考证号", "考号", "考生编号", "permit"}
 COURSE_CODE_ALIASES = {"科目编号", "易考科目编号", "course_code"}
 MOBILE_ALIASES = {"手机号码", "手机号", "手机", "联系电话", "电话", "mobile", "phone"}
 EMAIL_ALIASES = {"邮箱", "邮箱地址", "电子邮箱", "电子邮件", "邮件", "email", "mail"}
+GENDER_ALIASES = {"性别", "gender", "sex"}
 REQUIRED_FIELDS = ("permit", "full_name")
-TARGET_FIELDS = ("permit", "full_name", "identity_id", "course_code", "mobile", "email")
+TARGET_FIELDS = ("permit", "full_name", "identity_id", "gender", "course_code", "mobile", "email")
 FIELD_LABELS = {
     "permit": "准考证号",
     "full_name": "姓名",
     "identity_id": "身份证号",
+    "gender": "性别",
     "course_code": "科目编号",
     "mobile": "手机号",
     "email": "邮箱",
 }
-TEMPLATE_HEADERS = ("准考证号", "姓名", "身份证号", "科目编号", "手机号码", "邮箱")
-DISALLOWED_CUSTOM_FIELD_NAMES = {"姓名", "身份证号", "证件号", "准考证号", "科目编号", "科目名称"}
+TEMPLATE_HEADERS = ("准考证号", "姓名", "身份证号", "性别", "科目编号", "手机号码", "邮箱")
+DISALLOWED_CUSTOM_FIELD_NAMES = {
+    "姓名", "身份证号", "证件号", "准考证号", "性别", "gender", "sex", "科目编号", "科目名称"
+}
 MAX_CUSTOM_FIELDS = 30
 SCIENTIFIC_RE = re.compile(r"^\s*\d+(?:\.\d+)?[eE]\+?\d+\s*$")
 CANDIDATE_PERMIT_RE = re.compile(r"^[A-Za-z0-9]+$")
@@ -74,6 +78,7 @@ def detect_mapping(columns):
         "course_code": pick(COURSE_CODE_ALIASES),
         "mobile": pick(MOBILE_ALIASES),
         "email": pick(EMAIL_ALIASES),
+        "gender": pick(GENDER_ALIASES),
     }
 
 
@@ -280,6 +285,7 @@ def build_candidates(raw_rows, mapping, custom_fields=None):
                 "permit": permit_value,
                 "full_name": cell_to_text(row.get(mapping.get("full_name", ""), "")),
                 "identity_id": normalize_identity_id(row.get(mapping.get("identity_id", ""), "")),
+                "gender": cell_to_text(row.get(mapping.get("gender", ""), "")),
                 "course_code": cell_to_text(row.get(mapping.get("course_code", ""), "")),
                 "mobile": mobile_value,
                 "email": cell_to_text(row.get(mapping.get("email", ""), "")),
@@ -382,7 +388,7 @@ def write_template(payload_path, output_path):
     for row in candidates:
         sheet.append([cell_to_text(row.get(field)) for field in TARGET_FIELDS])
 
-    for col in ("A", "B", "C", "D", "E", "F"):
+    for col in ("A", "B", "C", "D", "E", "F", "G"):
         for cell in sheet[col]:
             cell.number_format = "@"
 

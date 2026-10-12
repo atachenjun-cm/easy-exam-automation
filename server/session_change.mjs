@@ -765,12 +765,18 @@ export function tenantSessionChangeErrorMessage(error = {}) {
 
 export async function fetchTenantSessionDetail({ apiBase, sessionId, requestJson, login }) {
   const base = String(apiBase || "").replace(/\/+$/, "");
-  return await requestJson(
+  const targetId = String(sessionId || "").trim();
+  const payload = await requestJson(
     login,
-    `${base}/tenant/api/session/${encodeURIComponent(sessionId)}/`,
+    `${base}/tenant/api/session/?session_ids=${encodeURIComponent(targetId)}`,
     { method: "GET" },
-    `读取场次详情 ${sessionId}`,
+    `从场次列表读取 ${targetId}`,
   );
+  const detail = tenantSessionList(payload).find((item) => tenantSessionId(item) === targetId);
+  if (detail) return detail;
+  const error = new Error(`租户 API 场次列表中未找到 ${targetId}`);
+  error.status = 404;
+  throw error;
 }
 
 function tenantSessionId(value = {}) {
@@ -779,28 +785,16 @@ function tenantSessionId(value = {}) {
 
 function tenantSessionList(payload) {
   if (Array.isArray(payload)) return payload;
-  for (const key of ["sessions", "results", "data", "items"]) {
-    if (Array.isArray(payload?.[key])) return payload[key];
+  for (const container of [payload, payload?.data, payload?.result]) {
+    for (const key of ["sessions", "results", "data", "items", "list"]) {
+      if (Array.isArray(container?.[key])) return container[key];
+    }
   }
   return [];
 }
 
 export async function fetchTenantSessionDetailWithListFallback(options = {}) {
-  try {
-    return await fetchTenantSessionDetail(options);
-  } catch (detailError) {
-    const base = String(options.apiBase || "").replace(/\/+$/, "");
-    const sessionId = String(options.sessionId || "").trim();
-    const payload = await options.requestJson(
-      options.login,
-      `${base}/tenant/api/session/?session_ids=${encodeURIComponent(sessionId)}`,
-      { method: "GET" },
-      `从场次列表读取 ${sessionId}`,
-    );
-    const detail = tenantSessionList(payload).find((item) => tenantSessionId(item) === sessionId);
-    if (detail) return detail;
-    throw detailError;
-  }
+  return await fetchTenantSessionDetail(options);
 }
 
 export async function putTenantSessionDetail({ apiBase, sessionId, payload, requestJson, login }) {
@@ -820,11 +814,15 @@ export async function putTenantSessionDetail({ apiBase, sessionId, payload, requ
 }
 
 export function sessionCreationCriticalOptions(sessionPayload = {}) {
+  const manualScoreEnabled = comparableBoolean(sessionPayload.manual_score) === true;
   const monitorEnabled = comparableBoolean(sessionPayload.monitor) === true;
-  const replayRequested = comparableBoolean(sessionPayload.monitor_replay) === true;
+  const newMarkEnabled = manualScoreEnabled && comparableBoolean(sessionPayload.new_mark) === true;
+  const monitorReplayEnabled = monitorEnabled && comparableBoolean(sessionPayload.monitor_replay) === true;
   return {
-    new_mark: comparableBoolean(sessionPayload.new_mark) === true,
-    monitor_replay: monitorEnabled && replayRequested,
+    manual_score: manualScoreEnabled,
+    new_mark: newMarkEnabled,
+    monitor: monitorEnabled,
+    monitor_replay: monitorReplayEnabled,
   };
 }
 
@@ -835,11 +833,15 @@ export async function ensureSessionCreationOptions({
   requestJson,
   login,
 }) {
-  const expected = sessionCreationCriticalOptions(sessionPayload);
+  const updatePayload = sessionCreationCriticalOptions(sessionPayload);
+  const expected = {
+    new_mark: updatePayload.new_mark,
+    monitor_replay: updatePayload.monitor_replay,
+  };
   const result = await putTenantSessionDetail({
     apiBase,
     sessionId,
-    payload: expected,
+    payload: updatePayload,
     requestJson,
     login,
   });

@@ -3,11 +3,13 @@ import { createHash } from "node:crypto";
 import {
   CONTENT_PERSON_EMAIL_DIRECTORY,
   DEFAULT_CONTENT_EMAIL_CC,
+  PROJECT_IMPLEMENTATION_EMAIL_GROUPS,
+  PROJECT_IMPLEMENTATION_EMAIL_PEOPLE,
   contentEmailDefaultsForTask,
 } from "./content_email_directory.mjs";
 import {
   normalizeOperationProjectDepartment,
-  operationProjectDepartmentForOwner,
+  operationProjectDepartmentForManager,
 } from "./operation_batch.mjs";
 
 function text(value) {
@@ -64,11 +66,9 @@ export function buildOperationContentDispatchTarget(task = {}, input = {}) {
   if (!recipients.length) {
     dispatchTargetError("OPERATION_CONTENT_RECIPIENTS_REQUIRED", "内容任务单至少需要一个收件人");
   }
-  const recipientSet = new Set(recipients);
   const cc = (Object.hasOwn(input, "cc") && input.cc !== undefined
     ? emailList(input.cc)
-    : emailList(defaults.cc))
-    .filter((email) => !recipientSet.has(email));
+    : emailList(defaults.cc));
   const projectCode = text(
     task.config?.businessRequirement?.project_code
     || task.config?.projectCode
@@ -79,15 +79,23 @@ export function buildOperationContentDispatchTarget(task = {}, input = {}) {
   }
   const projectOwnerEmail = text(task.ownerEmail).toLowerCase();
   const contentEmails = new Set(Object.values(CONTENT_PERSON_EMAIL_DIRECTORY).map((email) => email.toLowerCase()));
-  const contentRecipients = recipients.filter((email) => email !== projectOwnerEmail && contentEmails.has(email));
-  const projectRecipients = recipients.filter((email) => email === projectOwnerEmail);
+  const projectPeopleByEmail = new Map(PROJECT_IMPLEMENTATION_EMAIL_PEOPLE.map((person) => (
+    [person.email.toLowerCase(), person]
+  )));
+  const contentRecipients = recipients.filter((email) => contentEmails.has(email));
+  const projectDirectoryRecipients = recipients.filter((email) => projectPeopleByEmail.has(email));
+  const projectOwnerRecipients = recipients.filter((email) => (
+    email === projectOwnerEmail && !contentEmails.has(email) && !projectPeopleByEmail.has(email)
+  ));
   const unassignedRecipients = recipients.filter((email) => (
-    !contentRecipients.includes(email) && !projectRecipients.includes(email)
+    !contentRecipients.includes(email)
+    && !projectDirectoryRecipients.includes(email)
+    && !projectOwnerRecipients.includes(email)
   ));
   if (unassignedRecipients.length) {
     dispatchTargetError(
       "OPERATION_CONTENT_RECIPIENT_GROUP_UNKNOWN",
-      `收件人无法匹配内容开发部或项目经理分组：${unassignedRecipients.join("、")}`,
+      `收件人无法匹配内容开发部或项目实施部门：${unassignedRecipients.join("、")}`,
     );
   }
   const allowedCc = new Set(DEFAULT_CONTENT_EMAIL_CC.map((email) => email.toLowerCase()));
@@ -98,14 +106,31 @@ export function buildOperationContentDispatchTarget(task = {}, input = {}) {
       `抄送人无法匹配内容开发部抄送分组：${unassignedCc.join("、")}`,
     );
   }
-  const projectDepartment = normalizeOperationProjectDepartment(
-    task.config?.operationBatch?.draft?.fields?.projectDepartment?.value
-    || task.config?.operationBatch?.projectDepartmentDefault
-    || operationProjectDepartmentForOwner(projectOwnerEmail),
+  const mappedProjectDepartment = operationProjectDepartmentForManager(
+    task.config?.businessRequirement?.project_manager
+    || task.config?.fanweiSource?.raw?.fields?.["选择项目经理"]
+    || task.config?.fanweiSource?.raw?.fields?.["项目经理"],
   );
-  if (projectRecipients.length && !projectDepartment) {
+  const manuallySelectedProjectDepartment = task.config?.fanweiSource?.projectDepartmentMode === "manual"
+    ? task.config?.fanweiSource?.raw?.fields?.["项目部归属"]
+    : "";
+  const projectDepartment = normalizeOperationProjectDepartment(
+    manuallySelectedProjectDepartment
+    || mappedProjectDepartment
+    || task.config?.operationBatch?.draft?.fields?.projectDepartment?.value
+    || task.config?.operationBatch?.projectDepartmentDefault
+  );
+  if (projectOwnerRecipients.length && !projectDepartment) {
     dispatchTargetError("OPERATION_CONTENT_PROJECT_GROUP_REQUIRED", "缺少项目经理所属项目实施部门");
   }
+  const projectDirectoryGroups = PROJECT_IMPLEMENTATION_EMAIL_GROUPS
+    .map((group) => ({
+      name: projectManagerDirectoryGroup(group.name),
+      emails: projectDirectoryRecipients.filter((email) => (
+        projectPeopleByEmail.get(email)?.group === group.name
+      )),
+    }))
+    .filter((group) => group.emails.length);
   return {
     projectCode,
     recipients,
@@ -113,9 +138,10 @@ export function buildOperationContentDispatchTarget(task = {}, input = {}) {
     directoryGroups: {
       recipients: [
         ...(contentRecipients.length ? [{ name: "内容开发部", emails: contentRecipients }] : []),
-        ...(projectRecipients.length ? [{
+        ...projectDirectoryGroups,
+        ...(projectOwnerRecipients.length ? [{
           name: projectManagerDirectoryGroup(projectDepartment),
-          emails: projectRecipients,
+          emails: projectOwnerRecipients,
         }] : []),
       ],
       cc: cc.length ? [{ name: "内容开发部抄送", emails: cc }] : [],
@@ -282,14 +308,25 @@ function opaDurationForSubject(subjectName, business = {}) {
   return durations.length === 1 ? durations[0] : "";
 }
 
-function subjectRemark(task = {}, requirement = {}, requirementIndex = 0, course = {}) {
+function stripCourseCodeRemark(value) {
+  return text(value)
+    .split(/[；;\n]+/)
+    .map(text)
+    .filter((item) => item && !/^科目编号\s*[：:]/.test(item))
+    .join("；");
+}
+
+function subjectRemark(task = {}, requirement = {}, requirementIndex = 0) {
   const remarks = task.config?.contentTaskRemarks || {};
   const remarkKey = `formal:${requirementIndex}`;
-  if (Object.hasOwn(remarks, remarkKey)) return text(remarks[remarkKey]);
   const tenantId = text(requirement.config?.tenantId || task.config?.tenantId);
-  const base = tenantId ? `租户 ID：${tenantId}` : text(requirement.fields?.["备注"] || requirement.config?.remark);
-  if (!course.code || base.includes(course.code)) return base;
-  return [base, `科目编号：${course.name ? `${course.name}（${course.code}）` : course.code}`].filter(Boolean).join("；");
+  const base = stripCourseCodeRemark(Object.hasOwn(remarks, remarkKey)
+    ? text(remarks[remarkKey])
+    : (tenantId ? `租户 ID：${tenantId}` : text(requirement.fields?.["备注"] || requirement.config?.remark)));
+  const examName = text(requirement.fields?.["考试名称"] || requirement.config?.examName || task.projectName);
+  const examRemark = examName ? `考试名：${examName}` : "";
+  const parts = examRemark && !base.includes(examRemark) ? [examRemark, base] : [base];
+  return parts.filter(Boolean).join("；");
 }
 
 function operationSubjects(task = {}, requirements = [], business = {}) {
@@ -304,7 +341,7 @@ function operationSubjects(task = {}, requirements = [], business = {}) {
       rows.push({
         name: course.name,
         durationMinutes: text(course.duration || opaDurationForSubject(course.name, business) || fallbackDuration),
-        remark: subjectRemark(task, requirement, requirementIndex, course),
+        remark: subjectRemark(task, requirement, requirementIndex),
       });
     }
   });
@@ -494,7 +531,9 @@ export function buildOperationContentDraft(task = {}) {
       background: task.config?.interfaceBackground || "ATA通用模板",
       loginMode: task.config?.loginMethod || "准考证号",
       itemTypes: splitOptions(business.question_types),
-      contentSources: splitOptions(business.content_source),
+      contentSources: unique(splitOptions(business.content_source).map((source) => (
+        source === "使用ATA历史试卷" ? "ATA现有内容" : source
+      ))),
       closePaper: yesNo(business.closed_item_writing_required),
       reviewPaper: yesNo(business.manual_marking_required),
       singleMaxSubjects: maximumSubjectCount(task, business),

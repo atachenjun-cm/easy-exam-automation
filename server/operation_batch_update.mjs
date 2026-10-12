@@ -99,7 +99,7 @@ function hasInvalidReplacementCharacter(value) {
   return text(value).includes("\uFFFD");
 }
 
-function repairManagedBatchName(value, current = {}) {
+export function repairManagedBatchName(value, current = {}) {
   const managedName = text(value);
   if (!hasInvalidReplacementCharacter(managedName)) return managedName;
   const confirmedName = first(current.batchName, current.name);
@@ -341,6 +341,14 @@ export function operationBatchManagedDiff(applied = {}, desired = {}) {
       after.servicePersonnel,
     ));
   }
+  if (before.schedules.length > after.schedules.length) {
+    changes.push(managedChange(
+      "schedules.length",
+      "日程数量（将全部重建）",
+      before.schedules.length,
+      after.schedules.length,
+    ));
+  }
   const beforeByIndex = new Map(before.schedules.map((schedule) => [
     schedule.requirementIndex,
     schedule,
@@ -408,11 +416,9 @@ export function operationBatchUpdateState(task = {}) {
     const legacyPersonnelService = legacyManagedPersonnelService(task);
     if (legacyPersonnelService) applied.servicePersonnel = legacyPersonnelService;
   }
-  const desiredScheduleCount = examRequirements(task).length;
-  const appliedScheduleCount = Array.isArray(applied.schedules) ? applied.schedules.length : 0;
   const changes = desired.complete ? operationBatchManagedDiff(applied, desired.snapshot) : [];
   let status;
-  if (desiredScheduleCount < appliedScheduleCount || appliedScheduleIdentityConflict(applied)) {
+  if (appliedScheduleIdentityConflict(applied)) {
     status = "update_conflict";
   } else if (!desired.complete) {
     status = "waiting_schedule";

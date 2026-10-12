@@ -58,5 +58,20 @@ test("rejects course_code outside the task courses", () => {
   );
 
   assert.equal(result.errors.length, 1);
-  assert.match(result.errors[0], /不属于当前考试任务/);
+  assert.match(result.errors[0], /不属于本场次/);
+});
+
+test("validates against the selected session courses instead of another task session", () => {
+  const task = {
+    config: { courses: [{ name: "历史科目", code: "OLD" }] },
+    sessions: [{ session_id: "S1", sessionType: "formal" }],
+  };
+  const result = prepareCandidatesForCourseImport(
+    [{ permit: "P001", full_name: "张三", course_code: "OLD" }],
+    task,
+    { sessionId: "S1", courses: [{ name: "本场科目", code: "CURRENT" }] },
+  );
+
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /OLD 不属于本场次/);
 });

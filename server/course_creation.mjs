@@ -14,12 +14,12 @@ function normalizeCourseRecords(config = {}) {
     .map((course, index) => {
       const name = String(course?.name || course?.course_name || course?.title || "").trim();
       const code = String(course?.code || course?.course_code || "").trim();
-      const formCodes = normalizeCourseFormCodes(course?.form_codes || course?.formCodes || code);
+      const formCodes = normalizeCourseFormCodes(course?.form_codes || course?.formCodes);
       const paperName = String(course?.paper_name || course?.paperName || course?.form_name || course?.formName || "").trim();
       return {
         name,
         code,
-        form_codes: formCodes.length ? formCodes : code ? [code] : [],
+        form_codes: sameSingleFormCode(formCodes, code) ? [] : formCodes,
         ...(paperName ? { paper_name: paperName } : {}),
         order: index + 1,
       };
@@ -29,7 +29,7 @@ function normalizeCourseRecords(config = {}) {
 
 function normalizeRequestedCourseRecords(config = {}) {
   const rawCourses = Array.isArray(config.courses) ? config.courses : [];
-  return rawCourses
+  const normalizedCourses = rawCourses
     .map((course, index) => {
       const name = String(course?.name || course?.course_name || course?.title || "").trim();
       const code = String(course?.code || course?.course_code || "").trim();
@@ -44,6 +44,23 @@ function normalizeRequestedCourseRecords(config = {}) {
       };
     })
     .filter((course) => course.name);
+  const subjects = (Array.isArray(config.subjects) ? config.subjects : [])
+    .map((subject) => String(subject?.name || subject || "").trim())
+    .filter(Boolean);
+  if (!subjects.length) return normalizedCourses;
+
+  const unusedCourses = normalizedCourses.map((course, index) => ({ course, index }));
+  return subjects.map((name, order) => {
+    const matchIndex = unusedCourses.findIndex(({ course }) => course.name === name);
+    const matched = matchIndex >= 0 ? unusedCourses.splice(matchIndex, 1)[0].course : {};
+    return {
+      ...matched,
+      name,
+      code: String(matched.code || "").trim(),
+      form_codes: Array.isArray(matched.form_codes) ? matched.form_codes : [],
+      order: order + 1,
+    };
+  });
 }
 
 function compactApiDetail(detail) {
@@ -55,8 +72,8 @@ function normalizeCourseList(payload) {
   if (Array.isArray(payload)) return payload;
   if (Array.isArray(payload?.results)) return payload.results;
   if (Array.isArray(payload?.data)) return payload.data;
-  if (Array.isArray(payload?.res)) return payload.res;
   if (payload && typeof payload === "object" && (payload.name || payload.code || payload.course_code)) return [payload];
+  if (Array.isArray(payload?.res)) return payload.res;
   return [];
 }
 
@@ -95,7 +112,7 @@ function withCourseCode(course, code) {
   return {
     ...course,
     code,
-    form_codes: !formCodes.length || sameSingleFormCode(formCodes, oldCode) ? [code] : formCodes,
+    form_codes: sameSingleFormCode(formCodes, oldCode) ? [] : formCodes,
   };
 }
 
@@ -162,33 +179,116 @@ function existingCourseByNameAndCode(courses, name, code) {
   )) || null;
 }
 
-async function confirmTenantCourseRecord({
-  course,
-  tenantCourses,
+async function readTenantCourseByCode({
+  courseCode,
   login,
   apiBase,
   requestJson,
-  emitLog,
+  cache,
+  action,
 }) {
-  const listed = existingCourseByNameAndCode(tenantCourses, course.name, course.code);
-  if (listed) return listed;
-
-  const encodedCode = encodeURIComponent(course.code);
+  const normalizedCode = String(courseCode || "").trim();
+  if (cache.has(normalizedCode)) return cache.get(normalizedCode);
+  const encodedCode = encodeURIComponent(normalizedCode);
   try {
     const payload = await requestJson(
       login,
       `${apiBase}/tenant/api/courses/${encodedCode}/?apply=session`,
       { method: "GET" },
-      `确认已创建科目 ${course.code}`,
+      action,
     );
-    const confirmed = existingCourseByNameAndCode(normalizeCourseList(payload), course.name, course.code);
-    if (confirmed) return confirmed;
+    const course = normalizeCourseList(payload).find((item) => (
+      String(item?.code || item?.course_code || "").trim() === normalizedCode
+    )) || null;
+    cache.set(normalizedCode, course);
+    return course;
   } catch (error) {
     if (error?.status !== 404) throw error;
+    cache.set(normalizedCode, null);
+    return null;
   }
+}
+
+async function confirmTenantCourseRecord({
+  course,
+  login,
+  apiBase,
+  requestJson,
+  courseReadCache,
+  emitLog,
+}) {
+  const tenantCourse = await readTenantCourseByCode({
+    courseCode: course.code,
+    login,
+    apiBase,
+    requestJson,
+    cache: courseReadCache,
+    action: `确认已创建科目 ${course.code}`,
+  });
+  const confirmed = existingCourseByNameAndCode(tenantCourse ? [tenantCourse] : [], course.name, course.code);
+  if (confirmed) return confirmed;
 
   emitLog(`[API 科目] 项目配置中的科目编号未经租户确认，忽略：${course.name} / ${course.code}`, "warning");
   return null;
+}
+
+async function discoverOccupiedCourseCodes({
+  courses,
+  date,
+  usedCodes,
+  existingProjectCourses,
+  login,
+  apiBase,
+  requestJson,
+  courseReadCache,
+}) {
+  if (!courses.length) return;
+  const projectGroup = normalizeCourseRecords({ courses: existingProjectCourses })
+    .map((course) => parseCourseCode(course.code))
+    .find(Boolean);
+  if (projectGroup) {
+    let freeCount = 0;
+    for (let subjectSerial = 1; subjectSerial <= 99 && freeCount < courses.length; subjectSerial += 1) {
+      const code = buildCourseCode(projectGroup.date, projectGroup.examSerial, subjectSerial);
+      if (usedCodes.has(code)) continue;
+      const existing = await readTenantCourseByCode({
+        courseCode: code,
+        login,
+        apiBase,
+        requestJson,
+        cache: courseReadCache,
+        action: `查询科目 ${code}`,
+      });
+      if (existing) usedCodes.add(code);
+      else freeCount += 1;
+    }
+    return;
+  }
+
+  if (!date) throw new Error("正式考试日期缺失，无法在创建科目时生成编号。");
+  for (let examSerial = 1; examSerial <= 99; examSerial += 1) {
+    const codes = courses.map((_, index) => buildCourseCode(date, examSerial, index + 1));
+    let occupied = false;
+    for (const code of codes) {
+      if (usedCodes.has(code)) {
+        occupied = true;
+        break;
+      }
+      const existing = await readTenantCourseByCode({
+        courseCode: code,
+        login,
+        apiBase,
+        requestJson,
+        cache: courseReadCache,
+        action: `查询科目 ${code}`,
+      });
+      if (!existing) continue;
+      usedCodes.add(code);
+      occupied = true;
+      break;
+    }
+    if (!occupied) return;
+  }
 }
 
 function allocateCourseCodesAtCreation({ courses, date, usedCodes, existingProjectCourses = [] }) {
@@ -297,6 +397,7 @@ export async function ensureFormalCoursesCreated({
   existingProjectCourses = [],
   emitLog,
   requestJson,
+  onCourseCreated = async () => {},
 }) {
   const courses = normalizeRequestedCourseRecords(config);
   if (!courses.length) {
@@ -305,37 +406,27 @@ export async function ensureFormalCoursesCreated({
   }
 
   emitLog(`[API 科目] 准备创建/确认 ${courses.length} 个科目`);
-  let tenantCourses = [];
-  try {
-    const payload = await requestJson(
-      login,
-      `${apiBase}/tenant/api/courses/?apply=session`,
-      { method: "GET" },
-      "查询科目列表",
-    );
-    tenantCourses = normalizeCourseList(payload);
-    emitLog(`[API 科目] 已读取科目列表：${tenantCourses.length} 个`);
-  } catch (error) {
-    emitLog(
-      `[API 科目] 查询科目列表失败，改用逐个编号确认：状态码=${error?.status || "未知"}，响应=${compactApiDetail(error?.detail)}`,
-      "warning",
-    );
-  }
-
-  const usedCodes = new Set(
-    tenantCourses.map((course) => String(course?.code || course?.course_code || "").trim()).filter(Boolean),
-  );
+  const usedCodes = new Set();
+  const courseReadCache = new Map();
   const confirmedCourses = new Array(courses.length);
   const pendingCourses = [];
-  const knownProjectCourses = normalizeCourseRecords({ courses: existingProjectCourses });
+  const requestedCourseByName = new Map(
+    courses.map((course) => [normalizeCourseName(course.name), course]),
+  );
+  const knownProjectCourses = normalizeCourseRecords({ courses: existingProjectCourses })
+    .filter((course) => {
+      const requestedCourse = requestedCourseByName.get(normalizeCourseName(course.name));
+      if (!requestedCourse) return false;
+      return !requestedCourse.code || requestedCourse.code === course.code;
+    });
   const verifiedProjectCourses = [];
   for (const knownCourse of knownProjectCourses) {
     const tenantCourse = await confirmTenantCourseRecord({
       course: knownCourse,
-      tenantCourses,
       login,
       apiBase,
       requestJson,
+      courseReadCache,
       emitLog,
     });
     if (!tenantCourse) continue;
@@ -356,16 +447,37 @@ export async function ensureFormalCoursesCreated({
       };
       continue;
     }
-    const existing = course.code ? existingCourseByNameAndCode(tenantCourses, course.name, course.code) : null;
-    if (!existing) {
-      pendingCourses.push({ index, course });
-      continue;
+    if (course.code) {
+      const tenantCourse = await readTenantCourseByCode({
+        courseCode: course.code,
+        login,
+        apiBase,
+        requestJson,
+        cache: courseReadCache,
+        action: `确认需求科目 ${course.code}`,
+      });
+      if (tenantCourse) usedCodes.add(course.code);
+      const existing = existingCourseByNameAndCode(tenantCourse ? [tenantCourse] : [], course.name, course.code);
+      if (existing) {
+        emitLog(`[API 科目] 同项目科目已存在，复用编号：${course.name} / ${course.code}`);
+        confirmedCourses[index] = withCourseCode(course, course.code);
+        continue;
+      }
     }
-    emitLog(`[API 科目] 同项目科目已存在，复用编号：${course.name} / ${course.code}`);
-    confirmedCourses[index] = course;
+    pendingCourses.push({ index, course });
   }
 
   const creationDate = extractExamDate(config.startTimeDisplay || config.startTime || config.examStartTime);
+  await discoverOccupiedCourseCodes({
+    courses: pendingCourses.map((item) => item.course),
+    date: creationDate,
+    usedCodes,
+    existingProjectCourses: verifiedProjectCourses,
+    login,
+    apiBase,
+    requestJson,
+    courseReadCache,
+  });
   const coursesToCreate = allocateCourseCodesAtCreation({
     courses: pendingCourses.map((item) => item.course),
     date: creationDate,
@@ -381,36 +493,6 @@ export async function ensureFormalCoursesCreated({
       emitLog(`[API 科目] 科目编号已占用，改用：${createCode}`);
     }
 
-    let existsByCode = false;
-    if (!tenantCourses.length) {
-      const encodedCode = encodeURIComponent(createCode);
-      try {
-        const existingByCode = await requestJson(
-          login,
-          `${apiBase}/tenant/api/courses/${encodedCode}/?apply=session`,
-          { method: "GET" },
-          `查询科目 ${createCode}`,
-        );
-        existsByCode = normalizeCourseList(existingByCode).length > 0;
-        emitLog(`[API 科目] 查询科目：${createCode}，exists=${existsByCode}`);
-      } catch (error) {
-        if (error?.status === 404) {
-          existsByCode = false;
-          emitLog(`[API 科目] 科目不存在，准备创建：${createCode}`);
-        } else {
-          emitLog(
-            `[API 科目] 查询科目失败：${createCode}，状态码=${error?.status || "未知"}，响应=${compactApiDetail(error?.detail)}`,
-            "warning",
-          );
-          throw error;
-        }
-      }
-      if (existsByCode) {
-        createCode = nextAvailableCourseCode(createCode, new Set([...usedCodes, createCode]));
-        emitLog(`[API 科目] 科目编号已存在但名称不同，改用：${createCode}`);
-      }
-    }
-
     emitLog(`[API 科目] 科目名称不存在，准备创建：${course.name} / ${createCode}`);
 
     const created = await createCourseWithAutoIncrement({
@@ -422,7 +504,9 @@ export async function ensureFormalCoursesCreated({
       emitLog,
     });
     usedCodes.add(created.finalCourseCode);
+    courseReadCache.set(created.finalCourseCode, { name: course.name, code: created.finalCourseCode });
     confirmedCourses[originalIndex] = withCourseCode(course, created.finalCourseCode);
+    await onCourseCreated(confirmedCourses.filter(Boolean));
   }
 
   return confirmedCourses.filter(Boolean);

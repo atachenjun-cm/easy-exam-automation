@@ -1,5 +1,6 @@
 import path from "node:path";
 
+import { normalizeOperationBillingBasis } from "./operation_batch.mjs";
 import {
   assertOperationBatchDetailIdentityResult,
   openOperationBatchIdentityByCode,
@@ -128,12 +129,8 @@ export function operationDropdownValueCandidates(label, value) {
     && (normalizedValue.includes("办事处") || normalizedValue.includes("代表处"))) {
     return [normalizedValue, "地方业务中心"];
   }
-  const aliases = {
-    结算依据: {
-      按报名科次结算: ["按开考科次结算"],
-    },
-  };
-  return [normalizedValue, ...(aliases[normalizedLabel]?.[normalizedValue] || [])];
+  if (normalizedLabel === "结算依据") return [normalizeOperationBillingBasis(normalizedValue)];
+  return [normalizedValue];
 }
 
 export function operationBatchCodeFromText(value) {
@@ -292,14 +289,21 @@ async function selectOperationTask(page, serial) {
 async function ensureBatchListReady(page, batchListUrl, options = {}) {
   const loginWaitMinutes = Number(options.loginWaitMinutes || process.env.OPERATION_CONSOLE_LOGIN_WAIT_MINUTES || 10);
   const waitMs = Math.max(1, loginWaitMinutes) * 60 * 1000;
-  const createButton = page.getByRole("button", { name: /创建批次/ });
-  try {
-    await createButton.waitFor({ state: "visible", timeout: 30000 });
-    return;
-  } catch {}
+  const readyControl = operationBatchListReadyControl(page, options);
+  if (operationConsoleUrlsMatch(page.url(), batchListUrl)) {
+    try {
+      await readyControl.waitFor({ state: "visible", timeout: 30000 });
+      return;
+    } catch {}
+  }
 
   if (!operationConsoleNeedsLogin(page.url())) {
-    throw new Error(`未找到“创建批次”按钮，当前页面：${page.url()}`);
+    try {
+      await navigateOperationBatchListFromMenu(page, batchListUrl, options);
+      return;
+    } catch (error) {
+      throw new Error(`未找到运营批次列表入口，当前页面：${page.url()}`, { cause: error });
+    }
   }
 
   // Keep the headed browser open so the user can finish SSO login manually.
@@ -307,7 +311,33 @@ async function ensureBatchListReady(page, batchListUrl, options = {}) {
     throw new Error(operationConsoleLoginMessage(loginWaitMinutes));
   });
   await page.goto(batchListUrl, { waitUntil: "domcontentloaded" });
-  await createButton.waitFor({ state: "visible", timeout: 30000 });
+  if (!operationConsoleUrlsMatch(page.url(), batchListUrl)) {
+    await navigateOperationBatchListFromMenu(page, batchListUrl, options);
+    return;
+  }
+  await readyControl.waitFor({ state: "visible", timeout: 30000 });
+}
+
+function operationBatchListReadyControl(page, options = {}) {
+  if (options.readOnlyBatchLookup === true) {
+    return page.locator("input[placeholder*=批次代码], input[placeholder*=批次名称]").first();
+  }
+  return page.getByRole("button", { name: /创建批次/ });
+}
+
+export async function navigateOperationBatchListFromMenu(page, batchListUrl, options = {}) {
+  const timeout = Number(options.batchListMenuTimeoutMs || 15000);
+  const batchMenu = page.getByText("批次", { exact: true }).first();
+  await batchMenu.waitFor({ state: "visible", timeout });
+  await batchMenu.click();
+  const batchListLink = page.getByRole("link", { name: "批次列表", exact: true }).first();
+  await batchListLink.waitFor({ state: "visible", timeout });
+  await batchListLink.click();
+  await page.waitForURL(
+    (url) => operationConsoleUrlsMatch(String(url), batchListUrl),
+    { timeout },
+  );
+  await operationBatchListReadyControl(page, options).waitFor({ state: "visible", timeout: 30000 });
 }
 
 function operationConsolePageIsUsable(page) {

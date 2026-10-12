@@ -130,24 +130,14 @@ function requirementSubjects(requirement = {}) {
   return [...new Set(values)];
 }
 
-function successfulStepResult(task = {}, stepKey, requirementIndex, requirementCount) {
-  const step = (Array.isArray(task.steps) ? task.steps : []).find((item) => item?.stepKey === stepKey);
-  const progress = step?.requirementProgress?.[String(requirementIndex)];
-  if (progress) return progress.status === "success" ? (progress.result || {}) : null;
-  return requirementCount === 1 && step?.status === "success" ? (step.result || {}) : null;
-}
-
-function contentTaskRemarkWithCourseCodes(remark = "", courses = []) {
-  const base = text(remark);
-  const seen = new Set();
-  const items = (Array.isArray(courses) ? courses : []).flatMap((course) => {
-    const code = text(course?.code || course?.course_code);
-    if (!code || seen.has(code) || base.includes(code)) return [];
-    seen.add(code);
-    const name = text(course?.name || course?.courseName);
-    return [name ? `${name}（${code}）` : code];
-  });
-  return [base, items.length ? `科目编号：${items.join("、")}` : ""].filter(Boolean).join("；");
+function contentTaskRemark(remark = "", examName = "") {
+  const base = text(remark)
+    .split(/[；;\n]+/)
+    .map(text)
+    .filter((item) => item && !/^科目编号\s*[：:]/.test(item))
+    .join("；");
+  const examRemark = text(examName) ? `考试名：${text(examName)}` : "";
+  return [examRemark && !base.includes(examRemark) ? examRemark : "", base].filter(Boolean).join("；");
 }
 
 function contentExamRows({ task = {}, subjects = [], projectName = "", formalExamTime = "", trialExamTime = "" } = {}) {
@@ -173,21 +163,16 @@ function contentExamRows({ task = {}, subjects = [], projectName = "", formalExa
       formalSession?.start && formalSession?.end ? `${formalSession.start}-${formalSession.end}` : "",
       requirementIndex === 0 ? formalExamTime : "",
     );
-    const formalCourses = successfulStepResult(task, "course_create", requirementIndex, requirements.length)?.courses;
     const formalRemark = savedRemark(`formal:${requirementIndex}`) ?? firstValue(tenantRemark, fields["备注"], config.remark);
+    const formalExamName = firstValue(fields["考试名称"], config.examName, formalSession?.name, projectName, `考试 ${requirementIndex + 1}`);
     const requirementSubjectNames = requirementSubjects(requirement);
     (requirementSubjectNames.length ? requirementSubjectNames : [""]).forEach((subject, subjectIndex) => {
-      const matchingCourses = (Array.isArray(formalCourses) ? formalCourses : [])
-        .filter((course) => text(course?.name || course?.courseName) === subject);
-      const subjectCourses = matchingCourses.length
-        ? matchingCourses
-        : (formalCourses?.length === requirementSubjectNames.length ? [formalCourses[subjectIndex]] : []);
       rows.push({
-        examName: firstValue(fields["考试名称"], config.examName, formalSession?.name, projectName, `考试 ${requirementIndex + 1}`),
+        examName: formalExamName,
         time: formalTime,
         subject,
         duration: durationMinutes(formalTime),
-        remark: contentTaskRemarkWithCourseCodes(formalRemark, subjectCourses),
+        remark: contentTaskRemark(formalRemark, formalExamName),
         order: requirementIndex * 1_000 + subjectIndex,
         start: dateTimeTimestamp(dateTimeRange(formalTime).start),
       });
@@ -202,12 +187,13 @@ function contentExamRows({ task = {}, subjects = [], projectName = "", formalExa
       formalSession?.start && formalSession?.end ? `${formalSession.start}-${formalSession.end}` : "",
     );
     const fallbackSubjects = subjects.length ? subjects : [{ name: "" }];
+    const fallbackExamName = firstValue(formalSession?.name, projectName);
     return fallbackSubjects.map((subject, index) => ({
-      examName: firstValue(formalSession?.name, projectName),
+      examName: fallbackExamName,
       time,
       subject: subject.name,
       duration: firstValue(subject.duration, durationMinutes(time)),
-      remark: firstValue(subject.remark, savedRemark("formal:0"), tenantRemark),
+      remark: contentTaskRemark(firstValue(subject.remark, savedRemark("formal:0"), tenantRemark), fallbackExamName),
       order: index,
       start: dateTimeTimestamp(dateTimeRange(time).start),
     }));
@@ -596,7 +582,7 @@ export async function sendContentRequirementEmail({
 } = {}) {
   const to = parseEmailRecipients(recipients);
   if (!to.length) throw new Error("请填写收件人");
-  const cc = parseEmailRecipients(ccRecipients).filter((email) => !to.includes(email));
+  const cc = parseEmailRecipients(ccRecipients);
   const settings = normalizeEmailSettings(emailSettings);
   if (!settings.fromEmail) throw new Error("请先配置发件邮箱");
   if (!settings.username) throw new Error("请先配置 SMTP 用户名");

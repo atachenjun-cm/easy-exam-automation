@@ -8,7 +8,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { FANWEI_LOCAL_HELPER_VERSION } from "./fanwei_local_helper_version.mjs";
+import {
+  FANWEI_LOCAL_HELPER_SERVER_FILES,
+  FANWEI_LOCAL_HELPER_VERSION,
+} from "./fanwei_local_helper_version.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const nodeBin = process.execPath;
@@ -69,6 +72,13 @@ test("Windows installer uses the current user profile, autostarts, records a PID
   assert.match(install, /CONFIG_SOURCE=%SOURCE_DIR%config\.env/i);
   assert.match(install, /findstr \/B "YIKAO_CONSOLE_ORIGINS="/i);
   assert.match(install, /copy \/Y "%CONFIG_SOURCE%" "%INSTALL_DIR%\\config\.env"/i);
+  assert.match(install, /setlocal EnableExtensions EnableDelayedExpansion/i);
+  assert.match(install, /pidText='!OLD_PID!'/i);
+  assert.match(install, /Get-CimInstance Win32_Process/i);
+  assert.match(install, /ExecutablePath/i);
+  assert.match(install, /AddSeconds\(10\)/i);
+  assert.match(install, /for \/L %%I in \(1,1,5\)/i);
+  assert.match(install, /goto copy_complete/i);
   assert.match(install, /start-windows\.bat/i);
   assert.match(install, /start "" "%CONSOLE_ORIGIN%\/fanwei-test"/i);
   assert.match(start, /helper\.pid/i);
@@ -92,6 +102,20 @@ test("macOS installer uses Application Support and bootstraps its own LaunchAgen
   assert.match(plist, /__HELPER_DIR__/);
 });
 
+test("helper package server-file manifest covers every local module import", () => {
+  const packagedFiles = new Set(FANWEI_LOCAL_HELPER_SERVER_FILES);
+  for (const fileName of packagedFiles) {
+    const source = fs.readFileSync(path.join(rootDir, "server", fileName), "utf8");
+    const localImports = source.matchAll(/(?:from\s*|import\(\s*)["']\.\/([^"']+\.mjs)["']/g);
+    for (const match of localImports) {
+      assert.ok(
+        packagedFiles.has(match[1]),
+        `${fileName} imports ${match[1]}, but the dependency is missing from the helper package manifest`,
+      );
+    }
+  }
+});
+
 for (const platform of ["win-x64", "darwin-x64", "darwin-arm64"]) {
   test(`package builder creates a complete ${platform} folder and zip`, () => {
     const { tempDir, outputDir, output } = buildFixturePackage(platform);
@@ -105,18 +129,7 @@ for (const platform of ["win-x64", "darwin-x64", "darwin-arm64"]) {
         "helper-package.json",
         installerName,
         runtimeName,
-        "server/fanwei_auto_read.mjs",
-        "server/fanwei_local_helper.mjs",
-        "server/fanwei_local_helper_cli.mjs",
-        "server/fanwei_local_helper_update.mjs",
-        "server/fanwei_local_helper_version.mjs",
-        "server/operation_batch_runner.mjs",
-        "server/operation_batch_update_runner.mjs",
-        "server/operation_personnel_console_runner.mjs",
-        "server/operation_archive_runner.mjs",
-        "server/operation_content.mjs",
-        "server/operation_content_runner.mjs",
-        "server/score_stamp_application.mjs",
+        ...FANWEI_LOCAL_HELPER_SERVER_FILES.map((fileName) => `server/${fileName}`),
         "node_modules/playwright/package.json",
         "node_modules/playwright-core/package.json",
       ];
@@ -238,8 +251,14 @@ test("authenticated server downloads a prebuilt helper zip and validates platfor
     assert.equal(updatePackageResponse.status, 200);
     const updatePackage = Buffer.from(await updatePackageResponse.arrayBuffer());
     assert.equal(createHash("sha256").update(updatePackage).digest("hex"), updateManifest.sha256);
+    assert.ok(updatePackage.length < 5 * 1024 * 1024, "helper update package should stay below 5 MB");
     const updateZip = path.join(tempDir, "auto-update.zip");
     fs.writeFileSync(updateZip, updatePackage);
+    const updateEntries = execFileSync("unzip", ["-Z1", updateZip], { encoding: "utf8" })
+      .trim()
+      .split("\n");
+    assert.equal(updateEntries.some((entry) => /\/node(?:\.exe)?$/.test(entry)), false);
+    assert.equal(updateEntries.some((entry) => entry.includes("/node_modules/")), false);
     assert.deepEqual(JSON.parse(execFileSync(
       "unzip",
       ["-p", updateZip, `${packageName}/helper-package.json`],
@@ -250,6 +269,12 @@ test("authenticated server downloads a prebuilt helper zip and validates platfor
       platform: "win-x64",
       updateStrategy: "server-files-v1",
     });
+    for (const fileName of FANWEI_LOCAL_HELPER_SERVER_FILES) {
+      assert.doesNotThrow(
+        () => execFileSync("unzip", ["-p", updateZip, `${packageName}/server/${fileName}`]),
+        `${fileName} is missing from the update package`,
+      );
+    }
     assert.equal((await fetch(updateManifest.packageUrl)).status, 404);
 
     const download = await fetch(`${base}/api/fanwei/helper-installer?platform=windows`, {

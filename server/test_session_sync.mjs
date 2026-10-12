@@ -8,6 +8,7 @@ import {
   sessionOptionSnapshotFromDetail,
   sessionSyncBaselineForTaskSession,
   sessionSyncErrorMessage,
+  sessionSyncListCacheFromPreview,
   sessionSyncSnapshotFromDetail,
 } from "./session_sync.mjs";
 
@@ -171,6 +172,54 @@ test("session sync reads subjects, bound papers, and documented configuration it
   assert.deepEqual(patch.examRequirements[0].config.sessionOptions.pendingInternal, [
     { id: "ai_gaze", label: "视线追踪", value: "开启" },
   ]);
+});
+
+test("complete course readback reports extra and missing EasyExam subjects", () => {
+  const task = sampleTask();
+  task.config.examRequirements[0].config.courses = [
+    { code: "C-01", name: "基础物业岗" },
+  ];
+  const detail = {
+    name: "平台场次名称",
+    start: "2026/08/10 19:00",
+    end: "2026/08/10 20:30",
+    early: 30,
+    later: 20,
+    message: "欢迎参加考试",
+    notice: "请等待开考",
+  };
+
+  const extra = buildSessionSyncPreview(task, task.sessions[0], detail, "", {
+    courses: [
+      { code: "C-01", name: "基础物业岗" },
+      { code: "C-02", name: "物业运营管理岗" },
+    ],
+    courseReadComplete: true,
+  });
+  assert.deepEqual(extra.diff.filter((item) => item.group === "courses").map((item) => item.after), [
+    ["基础物业岗（C-01）", "物业运营管理岗（C-02）"],
+  ]);
+
+  const missing = buildSessionSyncPreview(task, task.sessions[0], detail, "", {
+    courses: [],
+    courseReadComplete: true,
+  });
+  assert.deepEqual(missing.diff.filter((item) => item.group === "courses").map((item) => item.after), [[]]);
+  assert.deepEqual(missing.coursesForSync, []);
+});
+
+test("list cache preserves incomplete course readback warnings", () => {
+  const cache = sessionSyncListCacheFromPreview({
+    checkedAt: "2026-09-01T05:29:48.532Z",
+    sessions: [{
+      sessionId: "437214",
+      sessionType: "formal",
+      diff: [],
+      readbackWarning: "科目差异检查可能不完整",
+    }],
+  });
+
+  assert.equal(cache.sessions[0].readbackWarning, "科目差异检查可能不完整");
 });
 
 test("test-session extra configuration is read without inventing missing subjects or papers", () => {

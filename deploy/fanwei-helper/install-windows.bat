@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 
 set "SOURCE_DIR=%~dp0"
 set "INSTALL_DIR=%LOCALAPPDATA%\YikaoFanweiHelper"
@@ -18,12 +18,36 @@ if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 
 if exist "%INSTALL_DIR%\helper.pid" (
   set /p OLD_PID=<"%INSTALL_DIR%\helper.pid"
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$pidText='%OLD_PID%'; if ($pidText -match '^\d+$') { Stop-Process -Id ([int]$pidText) -Force -ErrorAction SilentlyContinue }"
-  del /q "%INSTALL_DIR%\helper.pid" >nul 2>&1
 )
 
-xcopy "%SOURCE_DIR%*" "%INSTALL_DIR%\" /E /I /Y /Q >nul
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$install=Join-Path $env:LOCALAPPDATA 'YikaoFanweiHelper';" ^
+  "$node=[IO.Path]::GetFullPath((Join-Path $install 'node.exe'));" ^
+  "$pidText='!OLD_PID!';" ^
+  "$ids=@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -ieq 'node.exe' -and $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq $node } | Select-Object -ExpandProperty ProcessId);" ^
+  "if ($pidText -match '^\d+$') { $pidProcess=Get-Process -Id ([int]$pidText) -ErrorAction SilentlyContinue; if ($pidProcess -and $pidProcess.Path -and [IO.Path]::GetFullPath($pidProcess.Path) -ieq $node) { $ids += $pidProcess.Id } };" ^
+  "$ids | Select-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue };" ^
+  "$deadline=[DateTime]::UtcNow.AddSeconds(10);" ^
+  "do { $running=@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -ieq 'node.exe' -and $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq $node }); if (-not $running) { exit 0 }; Start-Sleep -Milliseconds 200 } while ([DateTime]::UtcNow -lt $deadline);" ^
+  "exit 1"
 if errorlevel 1 (
+  echo Installation failed while stopping the old helper.
+  pause
+  exit /b 1
+)
+del /q "%INSTALL_DIR%\helper.pid" >nul 2>&1
+
+set "COPY_OK="
+for /L %%I in (1,1,5) do (
+  xcopy "%SOURCE_DIR%*" "%INSTALL_DIR%\" /E /I /Y /Q >nul
+  if not errorlevel 1 (
+    set "COPY_OK=1"
+    goto copy_complete
+  )
+  timeout /t 1 /nobreak >nul
+)
+:copy_complete
+if not defined COPY_OK (
   echo Installation failed while copying files.
   pause
   exit /b 1

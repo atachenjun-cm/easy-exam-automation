@@ -1,5 +1,6 @@
 const COLUMN_COUNT = 30;
 const SESSION_ID_COLUMN = 15;
+const COLLECTION_RULE_COLUMN = 16;
 const READ_END_COLUMN = "AD";
 const READ_BATCH_ROWS = 200;
 const READ_MAX_ROWS = 1000;
@@ -18,6 +19,15 @@ export function projectManagerFromPlatformAccount(value) {
     "chenjun@ata.net.cn": "陈军",
     "siyuanyuan@ata.net.cn": "司园园",
   }[account] || "";
+}
+
+function projectManagerText(config = {}, platformAccountEmail = "") {
+  return text(
+    config.businessRequirement?.project_manager
+    || config.fanweiSource?.raw?.fields?.["选择项目经理"]
+    || config.fanweiSource?.raw?.fields?.["项目经理"]
+    || config.projectManager,
+  ) || projectManagerFromPlatformAccount(platformAccountEmail);
 }
 
 function parseDate(value) {
@@ -75,6 +85,19 @@ function monthDayTime(value) {
   const normalized = normalizeDisplayTime(value);
   const match = normalized.match(/^\d{4}\/(\d{1,2})\/(\d{1,2})\s+(\d{1,2}:\d{2})/);
   return match ? `${Number(match[1])}月${Number(match[2])}日${match[3]}` : "";
+}
+
+function notificationRangeEnd(start, end) {
+  const startDate = parseDate(start);
+  const endDate = parseDate(end);
+  if (!startDate || !endDate) return timeOnly(end);
+  if (
+    startDate.getFullYear() === endDate.getFullYear()
+    && startDate.getMonth() === endDate.getMonth()
+    && startDate.getDate() === endDate.getDate()
+  ) return timeOnly(end);
+  if (startDate.getFullYear() === endDate.getFullYear()) return monthDayTime(end);
+  return fullDateTimeText(end);
 }
 
 function notificationExamTitle(value) {
@@ -181,19 +204,28 @@ function invigilatorText(config = {}) {
     config.businessRequirement?.ata_invigilator_arrangement
     || config.fanweiSource?.raw?.fields?.["是否需要ATA安排人工监考"],
   );
-  if (fanweiArrangement.includes("分散")) return "ATA监考";
+  if (config.videoMonitor || fanweiArrangement.includes("分散")) return "ATA监考";
   return text(config.invigilatorText);
 }
 
 function leaveLimitText(config, session, deviceText) {
   const isClientExam = deviceText === "客户端";
   const isTrial = session?.kind === "mock" || session?.sessionType === "trial";
-  const count = Number(
-    isClientExam
-      ? session?.clientLoginLimit || session?.login_times || session?.loginTimes || (isTrial ? 20 : config?.clientLoginLimit || 10)
-      : session?.leaveLimit || session?.lock_screen_time || session?.lockScreenTime || config?.leaveLimit || 10,
-  ) || 10;
+  const fallbackCount = isClientExam ? (isTrial ? 20 : 10) : (isTrial ? 10 : 5);
+  const configuredCount = isClientExam
+    ? (isTrial ? 20 : config?.clientLoginLimit)
+    : config?.leaveLimit;
+  const parsedCount = configuredCount === null || configuredCount === undefined || configuredCount === ""
+    ? Number.NaN
+    : Number(configuredCount);
+  const count = Number.isFinite(parsedCount) && parsedCount >= 0 ? parsedCount : fallbackCount;
   return `${deviceText}，${count}次`;
+}
+
+function collectionRuleText(config, session) {
+  if (sessionIsTrial(session)) return "不准点收卷，无迟到扣时";
+  const timeRule = text(config?.timeRule) || "迟到及离开扣时";
+  return `准点收卷，${timeRule === "不扣时" ? "无迟到扣时" : timeRule}`;
 }
 
 function sessionIsTrial(session = {}) {
@@ -234,7 +266,7 @@ function notificationText(config, session, requirementSessions = []) {
   const trialStart = text(trialSession.start || config.mockStartTimeDisplay);
   const trialEnd = text(trialSession.end || config.mockEndTimeDisplay);
   const examTitle = notificationExamTitle(config.examName || formalSession.name || session.name);
-  const formalRange = `${fullDateTimeText(formalStart, true)}-${timeOnly(formalEnd)}`;
+  const formalRange = `${fullDateTimeText(formalStart, true)}-${notificationRangeEnd(formalStart, formalEnd)}`;
   const trialRange = trialStart && trialEnd
     ? `${fullDateTimeText(trialStart)}-${monthDayTime(trialEnd)}`
     : "XXX年XX月XX日XX:XX-X月XX日XX:XX";
@@ -248,7 +280,7 @@ function notificationText(config, session, requirementSessions = []) {
     config.clientDownloadUrl ||
     config.clientDownload ||
     (sessionId
-      ? `https://eztest.org/exam/session/${encodeURIComponent(sessionId)}/client/download`
+      ? `https://eztest.cn/exam/session/${encodeURIComponent(sessionId)}/client/download`
       : "【客户端下载】"),
   );
   return `考生您好！${examTitle}将于北京时间${formalRange}举行。本次考试为在线考试，要求使用电脑下载安装考试客户端作答，并自行准备第二台移动设备作为第二视角监控，客户端下载地址：${clientDownload} 。${trialNotice}打开考试客户端输入口令和您的准考证号即可登录参加考试，考试口令统一为：${examCode}，准考证号均为个人手机号。正式考试可提前30分钟登录系统，迟到20分钟后系统将无法登录。若遇系统问题，请联系考试系统界面上的技术支持。祝您考试顺利！（蜀道集团）`;
@@ -288,7 +320,7 @@ function sessionRow(config, session, template = [], created = [], platformAccoun
     : "";
   const projectCode = text(config.businessRequirement?.project_code || config.projectCode);
   const customerName = text(config.fanweiSource?.raw?.fields?.["客户名称（仅供参考）"]) || "蜀道集团";
-  const projectManager = projectManagerFromPlatformAccount(platformAccountEmail);
+  const projectManager = projectManagerText(config, platformAccountEmail);
 
   const row = applyTemplate([
     text(session.name || (isTrial ? config.mockExamName : config.examName)),
@@ -307,7 +339,7 @@ function sessionRow(config, session, template = [], created = [], platformAccoun
     answerTimeRange(config, duration, isTrial),
     text(config.loginMode) || "准考证号",
     tencentDocExamPasswordText(config, session),
-    isTrial ? "不准点收卷，无迟到扣时" : "准点收卷，迟到及离开扣时",
+    collectionRuleText(config, session),
     monitorRule(config),
     isTrial ? "不需要" : "考中侦测",
     "不需要",
@@ -363,6 +395,15 @@ function rowIsBlank(row = []) {
 
 function cellValue(cell = {}) {
   const value = cell?.cellValue || {};
+  const select = value.select;
+  if (select && Array.isArray(select.value)) {
+    const options = Array.isArray(select.options) ? select.options : [];
+    return select.value
+      .map((selectedId) => options.find((option) => text(option?.id) === text(selectedId))?.text ?? selectedId)
+      .map(text)
+      .filter(Boolean)
+      .join("，");
+  }
   return value.text ?? value.number ?? value.boolValue ?? "";
 }
 
@@ -370,12 +411,35 @@ export function remoteGridRows(payload = {}) {
   return (payload?.gridData?.rows || []).map((row) => (row?.values || []).map(cellValue));
 }
 
+function collectSelectOptionsByColumn(payload = {}, catalog = new Map()) {
+  const startColumn = Number(payload?.gridData?.startColumn || 0);
+  for (const row of payload?.gridData?.rows || []) {
+    for (const [relativeColumn, cell] of (row?.values || []).entries()) {
+      const select = cell?.cellValue?.select;
+      const options = Array.isArray(select?.options)
+        ? select.options.filter((option) => text(option?.id) && text(option?.text))
+        : [];
+      if (!options.length) continue;
+      const column = startColumn + relativeColumn;
+      const current = catalog.get(column);
+      if (!current || options.length > current.options.length) {
+        catalog.set(column, {
+          multiple: Boolean(select.multiple),
+          options,
+        });
+      }
+    }
+  }
+  return catalog;
+}
+
 function hasAnyGridValue(payload = {}) {
   return remoteGridRows(payload).some((row) => row.some((value) => text(value)));
 }
 
-export async function readTencentDocRows({ base, sheetId, settings, fetchImpl = fetch } = {}) {
+async function readTencentDocSnapshot({ base, sheetId, settings, fetchImpl = fetch } = {}) {
   const rows = [];
+  const selectOptionsByColumn = new Map();
   for (let startRow = 1; startRow <= READ_MAX_ROWS; startRow += READ_BATCH_ROWS) {
     const endRow = Math.min(startRow + READ_BATCH_ROWS - 1, READ_MAX_ROWS);
     const rangeUrl = `${base}/${encodeURIComponent(sheetId)}/A${startRow}:${READ_END_COLUMN}${endRow}`;
@@ -388,12 +452,33 @@ export async function readTencentDocRows({ base, sheetId, settings, fetchImpl = 
       throw error;
     }
     rows.push(...remoteGridRows(payload));
+    collectSelectOptionsByColumn(payload, selectOptionsByColumn);
     if (!hasAnyGridValue(payload)) break;
   }
-  return rows;
+  return { rows, selectOptionsByColumn };
 }
 
-function requestForRow(sheetId, rowIndex, values) {
+export async function readTencentDocRows(options = {}) {
+  return (await readTencentDocSnapshot(options)).rows;
+}
+
+function requestCellValue(value, column, selectOptionsByColumn = new Map()) {
+  const normalized = text(value);
+  const select = column === COLLECTION_RULE_COLUMN
+    ? selectOptionsByColumn.get(column)
+    : null;
+  if (!select || !normalized) return { text: normalized };
+
+  const option = select.options.find((item) => text(item?.text) === normalized);
+  if (!option) {
+    throw new Error(`腾讯文档Q列下拉选项中找不到“${normalized}”`);
+  }
+  // Tencent Docs accepts the exact option label when updating a SELECT cell.
+  // Sending the SELECT object itself returns success but persists an empty option.
+  return { text: option.text };
+}
+
+function requestForRow(sheetId, rowIndex, values, selectOptionsByColumn) {
   return {
     updateRangeRequest: {
       sheetId,
@@ -401,8 +486,8 @@ function requestForRow(sheetId, rowIndex, values) {
         startRow: rowIndex,
         startColumn: 0,
         rows: [{
-          values: values.slice(0, COLUMN_COUNT).map((value) => ({
-            cellValue: { text: text(value) },
+          values: values.slice(0, COLUMN_COUNT).map((value, column) => ({
+            cellValue: requestCellValue(value, column, selectOptionsByColumn),
             cellFormat: {
               textFormat: {
                 fontSize: DEFAULT_FONT_SIZE,
@@ -418,7 +503,12 @@ function requestForRow(sheetId, rowIndex, values) {
   };
 }
 
-export function buildBatchUpdateRequests({ sheetId, remoteRows = [], rows = [] } = {}) {
+export function buildBatchUpdateRequests({
+  sheetId,
+  remoteRows = [],
+  rows = [],
+  selectOptionsByColumn = new Map(),
+} = {}) {
   const lastContentRow = remoteRows.reduce(
     (lastIndex, remoteRow, index) => (rowIsBlank(remoteRow) ? lastIndex : index),
     -1,
@@ -426,7 +516,7 @@ export function buildBatchUpdateRequests({ sheetId, remoteRows = [], rows = [] }
   let target = Math.max(1, lastContentRow + 1);
   const requests = [];
   for (const row of rows) {
-    requests.push(requestForRow(sheetId, target, row));
+    requests.push(requestForRow(sheetId, target, row, selectOptionsByColumn));
     target += 1;
   }
   return requests;
@@ -439,6 +529,24 @@ async function appendTargetIsBlank({ base, sheetId, settings, requests, fetchImp
   const rangeUrl = `${base}/${encodeURIComponent(sheetId)}/A${startRowIndex + 1}:${READ_END_COLUMN}${endRowIndex + 1}`;
   const payload = await readJson(await fetchImpl(rangeUrl, { headers: headers(settings) }), "追加位置复核");
   return remoteGridRows(payload).every(rowIsBlank);
+}
+
+async function verifyCollectionRules({ base, sheetId, settings, requests, fetchImpl }) {
+  if (!requests.length) return;
+  const startRowIndex = requests[0].updateRangeRequest.gridData.startRow;
+  const endRowIndex = requests.at(-1).updateRangeRequest.gridData.startRow;
+  const rangeUrl = `${base}/${encodeURIComponent(sheetId)}/Q${startRowIndex + 1}:Q${endRowIndex + 1}`;
+  const payload = await readJson(await fetchImpl(rangeUrl, { headers: headers(settings) }), "Q列写入后回查");
+  const actualValues = remoteGridRows(payload).map((row) => text(row?.[0]));
+  const expectedValues = requests.map((request) => text(
+    request.updateRangeRequest.gridData.rows?.[0]?.values?.[COLLECTION_RULE_COLUMN]?.cellValue?.text,
+  ));
+  const mismatchIndex = expectedValues.findIndex((expected, index) => actualValues[index] !== expected);
+  if (mismatchIndex >= 0) {
+    const rowNumber = startRowIndex + mismatchIndex + 1;
+    const actual = actualValues[mismatchIndex] || "空值";
+    throw new Error(`腾讯文档Q列写入后回查不一致：Q${rowNumber} 期望“${expectedValues[mismatchIndex]}”，实际为“${actual}”`);
+  }
 }
 
 async function readJson(response, action) {
@@ -481,7 +589,7 @@ async function runTencentDocsSync({
   const base = `https://docs.qq.com/openapi/spreadsheet/v3/files/${encodeURIComponent(settings.fileId)}`;
   let requests = [];
   for (let attempt = 0; attempt < APPEND_RECHECK_ATTEMPTS; attempt += 1) {
-    const remoteRows = await readTencentDocRows({
+    const { rows: remoteRows, selectOptionsByColumn } = await readTencentDocSnapshot({
       base,
       sheetId: settings.sheetId,
       settings,
@@ -492,6 +600,7 @@ async function runTencentDocsSync({
       sheetId: settings.sheetId,
       remoteRows,
       rows,
+      selectOptionsByColumn,
     });
     if (!requests.length) return { updatedRows: 0, requests: [] };
     if (await appendTargetIsBlank({
@@ -512,6 +621,7 @@ async function runTencentDocsSync({
     headers: headers(settings, true),
     body: JSON.stringify({ requests }),
   }), "写入");
+  await verifyCollectionRules({ base, sheetId: settings.sheetId, settings, requests, fetchImpl });
   return { updatedRows: requests.length, requests, response: updatePayload };
 }
 

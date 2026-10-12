@@ -48,6 +48,11 @@ def text(value):
     return str(value)
 
 
+def normalized_gender(value):
+    raw = text(value).strip()
+    return {"M": "男", "F": "女"}.get(raw.upper(), raw)
+
+
 def normalized_status(value):
     raw = text(value).strip()
     if not raw:
@@ -310,7 +315,7 @@ def write_row(sheet, row_index, row, default_course):
         score = "--"
     values = [
         text(row.get("name")),
-        text(row.get("gender")),
+        normalized_gender(row.get("gender")),
         text(row.get("identity_id")),
         text(row.get("mobile")),
         text(row.get("email")),

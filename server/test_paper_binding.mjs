@@ -5,10 +5,37 @@ import {
   bindPapersToFormalSession,
   buildSessionSubjectPaperSnapshot,
   detectSessionPaperBindings,
+  fetchSessionSubjectPaperSnapshot,
+  fetchTenantCoursesForSession,
   validatePaperBinding,
 } from "./paper_binding.mjs";
 
 const MISSING_FORM_CODES_MESSAGE = "科目已创建成功，但未获取到有效试卷 code，无法绑定到考试场次";
+
+test("reads course options only from course details associated with the requested session", async () => {
+  const result = await fetchTenantCoursesForSession({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "S-CURRENT",
+    requestJson: async (_login, url) => {
+      if (String(url).includes("/course_list/")) {
+        return {
+          data: [
+            { code: "CURRENT", name: "本场科目" },
+            { code: "HISTORY", name: "历史科目" },
+          ],
+        };
+      }
+      if (String(url).includes("/courses/CURRENT/")) {
+        return { code: "CURRENT", name: "本场科目", sessions: [{ id: "S-CURRENT" }] };
+      }
+      return { code: "HISTORY", name: "历史科目", sessions: [{ id: "S-OLD" }] };
+    },
+  });
+
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.courses.map((course) => course.code), ["CURRENT"]);
+});
 
 test("readback matches bound papers to tenant subjects without changing EasyExam", () => {
   const snapshot = buildSessionSubjectPaperSnapshot({
@@ -44,6 +71,199 @@ test("readback keeps a paper visible when its subject cannot be identified", () 
   });
   assert.deepEqual(snapshot.courses, []);
   assert.deepEqual(snapshot.unmatchedPapers, [{ code: "FORM-X", name: "无法关联的试卷" }]);
+});
+
+test("readback enumerates every course associated with a session when no paper is bound", async () => {
+  const calls = [];
+  const requestJson = async (_login, url) => {
+    calls.push(String(url));
+    if (String(url).endsWith("/session/S-01/forms/")) return { session: "S-01", forms: [] };
+    if (String(url).includes("/course_list/")) {
+      return {
+        data: [
+          { code: "C-01", name: "基础物业岗" },
+          { code: "C-02", name: "物业运营管理岗" },
+          { code: "C-03", name: "其他场次科目" },
+        ],
+      };
+    }
+    if (String(url).includes("/courses/C-01/")) return { code: "C-01", name: "基础物业岗", res: [{ id: "S-01" }] };
+    if (String(url).includes("/courses/C-02/")) return { code: "C-02", name: "物业运营管理岗", res: [{ id: "S-01" }] };
+    if (String(url).includes("/courses/C-03/")) return { code: "C-03", name: "其他场次科目", res: [{ id: "S-02" }] };
+    if (String(url).includes("/tenant/api/session/")) return { sessions: [{ id: "S-01", name: "商管公司市场化选聘笔试" }] };
+    throw new Error(`unexpected URL: ${url}`);
+  };
+
+  const snapshot = await fetchSessionSubjectPaperSnapshot({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "S-01",
+    sessionDetail: { id: "S-01", name: "商管公司市场化选聘笔试" },
+    knownCourses: [{ code: "C-01", name: "基础物业岗" }],
+    requestJson,
+  });
+
+  assert.equal(snapshot.courseReadComplete, true);
+  assert.equal(snapshot.courseReadMode, "tenant_course_associations");
+  assert.deepEqual(snapshot.courses.map((course) => [course.code, course.name]), [
+    ["C-01", "基础物业岗"],
+    ["C-02", "物业运营管理岗"],
+  ]);
+  assert.ok(calls.includes("https://eztest.cn/tenant/api/course_list/1/1000/"));
+  assert.ok(calls.includes("https://eztest.cn/tenant/api/courses/C-02/?apply=session"));
+});
+
+test("complete readback does not match a bound paper to a similarly named historical course", async () => {
+  const requestJson = async (_login, url) => {
+    if (String(url).endsWith("/session/437826/forms/")) {
+      return {
+        session: "437826",
+        forms: [{
+          code: "FORM-CURRENT",
+          name: "20260806;湖北三鑫金铜股份有限公司性格测评（中智）",
+        }],
+      };
+    }
+    if (String(url).includes("/course_list/")) {
+      return {
+        data: [
+          { code: "20260902-01-01", name: "湖北三鑫金铜股份有限公司性格测评" },
+          { code: "20260807-01-01", name: "湖北三鑫金铜股份有限公司性格测评（中智）" },
+        ],
+      };
+    }
+    if (String(url).includes("/courses/20260902-01-01/")) {
+      return {
+        code: "20260902-01-01",
+        name: "湖北三鑫金铜股份有限公司性格测评",
+        res: [{ id: "437826" }],
+      };
+    }
+    if (String(url).includes("/courses/20260807-01-01/")) {
+      return {
+        code: "20260807-01-01",
+        name: "湖北三鑫金铜股份有限公司性格测评（中智）",
+        res: [{ id: "HISTORICAL-SESSION" }],
+      };
+    }
+    if (String(url).includes("/tenant/api/session/")) return { results: [] };
+    throw new Error(`unexpected URL: ${url}`);
+  };
+
+  const snapshot = await fetchSessionSubjectPaperSnapshot({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "437826",
+    sessionDetail: { id: "437826", name: "湖北三鑫金铜股份有限公司性格测评" },
+    knownCourses: [
+      { code: "20260902-01-01", name: "湖北三鑫金铜股份有限公司性格测评" },
+      { code: "20260807-01-01", name: "湖北三鑫金铜股份有限公司性格测评（中智）" },
+    ],
+    requestJson,
+  });
+
+  assert.equal(snapshot.courseReadComplete, true);
+  assert.deepEqual(snapshot.courses.map((course) => [course.code, course.name, course.form_codes]), [
+    [
+      "20260902-01-01",
+      "湖北三鑫金铜股份有限公司性格测评",
+      ["FORM-CURRENT"],
+    ],
+  ]);
+  assert.deepEqual(snapshot.unmatchedPapers, []);
+});
+
+test("a locally stored course is excluded unless its associations contain the current session id", async () => {
+  const requestJson = async (_login, url) => {
+    if (String(url).endsWith("/session/437826/forms/")) {
+      return {
+        forms: [{
+          code: "FORM-HISTORICAL",
+          name: "20260806;湖北三鑫金铜股份有限公司性格测评（中智）",
+        }],
+      };
+    }
+    if (String(url).includes("/course_list/")) {
+      return {
+        data: [{
+          code: "20260807-01-01",
+          name: "湖北三鑫金铜股份有限公司性格测评（中智）",
+        }],
+      };
+    }
+    if (String(url).includes("/courses/20260807-01-01/")) {
+      return {
+        code: "20260807-01-01",
+        name: "湖北三鑫金铜股份有限公司性格测评（中智）",
+        res: [{ id: "HISTORICAL-SESSION" }],
+      };
+    }
+    if (String(url).includes("/tenant/api/session/")) return { results: [] };
+    throw new Error(`unexpected URL: ${url}`);
+  };
+
+  const snapshot = await fetchSessionSubjectPaperSnapshot({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "437826",
+    sessionDetail: { id: "437826", name: "湖北三鑫金铜股份有限公司性格测评" },
+    knownCourses: [{
+      code: "20260807-01-01",
+      name: "湖北三鑫金铜股份有限公司性格测评（中智）",
+    }],
+    requestJson,
+  });
+
+  assert.equal(snapshot.courseReadComplete, true);
+  assert.deepEqual(snapshot.courses, []);
+  assert.deepEqual(snapshot.unmatchedPapers, [{
+    code: "FORM-HISTORICAL",
+    name: "20260806;湖北三鑫金铜股份有限公司性格测评（中智）",
+  }]);
+});
+
+test("partial readback also does not infer a historical course from the tenant catalog", async () => {
+  const requestJson = async (_login, url) => {
+    if (String(url).endsWith("/session/437826/forms/")) {
+      return {
+        forms: [{
+          code: "FORM-CURRENT",
+          name: "20260806;湖北三鑫金铜股份有限公司性格测评（中智）",
+        }],
+      };
+    }
+    if (String(url).includes("/course_list/")) {
+      return {
+        data: [
+          { code: "20260902-01-01", name: "湖北三鑫金铜股份有限公司性格测评" },
+          { code: "20260807-01-01", name: "湖北三鑫金铜股份有限公司性格测评（中智）" },
+        ],
+      };
+    }
+    if (String(url).includes("/courses/20260902-01-01/")) {
+      return {
+        code: "20260902-01-01",
+        name: "湖北三鑫金铜股份有限公司性格测评",
+        res: [{ id: "437826" }],
+      };
+    }
+    if (String(url).includes("/courses/20260807-01-01/")) throw new Error("historical course lookup failed");
+    if (String(url).includes("/tenant/api/session/")) return { results: [] };
+    throw new Error(`unexpected URL: ${url}`);
+  };
+
+  const snapshot = await fetchSessionSubjectPaperSnapshot({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "437826",
+    sessionDetail: { id: "437826", name: "湖北三鑫金铜股份有限公司性格测评" },
+    knownCourses: [{ code: "20260902-01-01", name: "湖北三鑫金铜股份有限公司性格测评" }],
+    requestJson,
+  });
+
+  assert.equal(snapshot.courseReadComplete, false);
+  assert.deepEqual(snapshot.courses.map((course) => course.code), ["20260902-01-01"]);
+  assert.match(snapshot.readbackWarning, /1 个科目/);
 });
 
 test("matches the active paper by course code before posting it to the formal session", async () => {
@@ -552,6 +772,97 @@ test("falls back to a unique Fanwei serial when course code and course name do n
   assert.deepEqual(result.results[0].form_codes, ["FORM-TARGET"]);
 });
 
+test("uses the formal exam name only after the existing paper match rules miss", async () => {
+  const calls = [];
+  const logs = [];
+  const requestJson = async (_login, url, options) => {
+    calls.push({ url: String(url), options });
+    if (String(url).includes("/tenant/api/form/list/")) {
+      return {
+        form_list: [
+          { code: "FORM-TARGET", name: "20260903_R0043376_蜀道城乡集团2026年校园招聘考试" },
+          { code: "FORM-OTHER", name: "其他考试试卷" },
+        ],
+      };
+    }
+    return { __tenantResponse: true, httpStatus: 200, body: { ok: true } };
+  };
+
+  const result = await bindPapersToFormalSession({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "437800",
+    courses: [{ name: "行政职业能力测验", code: "20260903-01-01" }],
+    workflowSerial: "R0049999",
+    examName: "蜀道城乡集团2026年校园招聘考试",
+    requestJson,
+    emitLog: (message) => logs.push(message),
+  });
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.results[0].form_codes, ["FORM-TARGET"]);
+  assert.deepEqual(JSON.parse(calls.at(-1).options.body), {
+    course_code: "20260903-01-01",
+    form_codes: ["FORM-TARGET"],
+  });
+  assert.ok(logs.includes("[试卷绑定] 已按考试名称“蜀道城乡集团2026年校园招聘考试”匹配活跃试卷“20260903_R0043376_蜀道城乡集团2026年校园招聘考试”"));
+});
+
+test("keeps course-name matching ahead of the formal exam-name fallback", async () => {
+  const requestJson = async (_login, url) => {
+    if (String(url).includes("/tenant/api/form/list/")) {
+      return {
+        form_list: [
+          { code: "FORM-COURSE", name: "行政职业能力测验正式卷" },
+          { code: "FORM-EXAM", name: "蜀道城乡集团2026年校园招聘考试" },
+        ],
+      };
+    }
+    return { __tenantResponse: true, httpStatus: 200, body: { ok: true } };
+  };
+
+  const result = await bindPapersToFormalSession({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "437800",
+    courses: [{ name: "行政职业能力测验", code: "20260903-01-01" }],
+    examName: "蜀道城乡集团2026年校园招聘考试",
+    requestJson,
+    emitLog: () => {},
+  });
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.results[0].form_codes, ["FORM-COURSE"]);
+});
+
+test("does not guess when the final exam-name fallback matches multiple papers", async () => {
+  const calls = [];
+  const requestJson = async (_login, url, options) => {
+    calls.push({ url: String(url), options });
+    return {
+      form_list: [
+        { code: "FORM-A", name: "蜀道城乡集团2026年校园招聘考试-A卷" },
+        { code: "FORM-B", name: "蜀道城乡集团2026年校园招聘考试-B卷" },
+      ],
+    };
+  };
+
+  const result = await bindPapersToFormalSession({
+    login: {},
+    apiBase: "https://eztest.cn",
+    sessionId: "437800",
+    courses: [{ name: "行政职业能力测验", code: "20260903-01-01" }],
+    examName: "蜀道城乡集团2026年校园招聘考试",
+    requestJson,
+    emitLog: () => {},
+  });
+
+  assert.equal(result.status, "waiting_manual");
+  assert.equal(result.duplicatePaperMatches[0].matched_by, "exam_name");
+  assert.deepEqual(result.duplicatePaperMatches[0].candidates.map((paper) => paper.code), ["FORM-A", "FORM-B"]);
+  assert.equal(calls.some((call) => call.options.method === "PUT" || call.options.method === "POST"), false);
+});
+
 test("uses only the active tenant form list when the course has no linked forms", async () => {
   const calls = [];
   const logs = [];
@@ -735,7 +1046,7 @@ test("detects manually bound paper from tenant session detail", async () => {
   ]);
   assert.equal(calls.length, 2);
   assert.equal(calls[0].url, "https://eztest.cn/tenant/api/session/429102/forms/");
-  assert.equal(calls[1].url, "https://eztest.cn/tenant/api/session/429102/");
+  assert.equal(calls[1].url, "https://eztest.cn/tenant/api/session/?session_ids=429102");
   assert.equal(calls[1].options.method, "GET");
   assert.ok(logs.includes("[试卷绑定] 已检查正式场次，当前已绑定 0 份试卷"));
   assert.ok(logs.includes("[试卷绑定] 人工绑定回查确认正式场次已有试卷"));
@@ -842,16 +1153,11 @@ test("detects manually bound single-subject paper even when task has no configur
   ]);
 });
 
-test("falls back to tenant session list when session detail lookup fails during manual detection", async () => {
+test("manual detection reads the standard tenant session list without a detail URL", async () => {
   const calls = [];
   const requestJson = async (_login, url) => {
     calls.push(String(url));
     if (String(url).endsWith("/forms/")) return [];
-    if (String(url).includes("/tenant/api/session/429514/")) {
-      const error = new Error("租户 API 回查正式场次试卷 429514失败：500");
-      error.status = 500;
-      throw error;
-    }
     return {
       results: [
         {
@@ -880,8 +1186,8 @@ test("falls back to tenant session list when session detail lookup fails during 
 
   assert.equal(result.status, "success");
   assert.equal(calls[0], "https://eztest.cn/tenant/api/session/429514/forms/");
-  assert.equal(calls[1], "https://eztest.cn/tenant/api/session/429514/");
-  assert.equal(calls[2], "https://eztest.cn/tenant/api/session/?session_ids=429514");
+  assert.equal(calls[1], "https://eztest.cn/tenant/api/session/?session_ids=429514");
+  assert.equal(calls.length, 2);
   assert.deepEqual(result.results[0].form_codes, ["FORM-MANUAL"]);
 });
 

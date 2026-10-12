@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 const FIXED_PERSONAL_KEYS = new Set(["full_name", "email", "phone", "gender", "identity_id", "id_number"]);
-const RESERVED_LABELS = new Set(["姓名", "身份证号", "证件号", "准考证号", "科目编号", "科目名称"]);
+const RESERVED_LABELS = new Set(["姓名", "身份证号", "证件号", "准考证号", "性别", "科目编号", "科目名称"]);
 const BASE_FIELD_CODES = new Map([
   ["姓名", "full_name"],
   ["准考证号", "permit"],
@@ -19,6 +19,7 @@ const BASE_FIELD_CODES = new Map([
   ["邮件", "email"],
   ["科目编号", "course_code"],
   ["科目名称", "course_name"],
+  ["性别", "gender"],
 ]);
 const CANONICAL_FIELD_NAMES = new Map([
   ["手机", "手机号码"],
@@ -35,6 +36,9 @@ const CANONICAL_FIELD_NAMES = new Map([
   ["邮件", "邮箱"],
   ["email", "邮箱"],
   ["mail", "邮箱"],
+  ["性别", "性别"],
+  ["gender", "性别"],
+  ["sex", "性别"],
 ]);
 
 export function customFieldKey(fieldName = "") {
@@ -127,9 +131,19 @@ function existingPersonalEntry(personal = {}, fieldName = "", fieldCode = "") {
   });
 }
 
-export function syncImportPersonalFields(personal = {}, fields = []) {
+export function syncImportPersonalFields(personal = {}, fields = [], options = {}) {
   const next = { ...(personal && typeof personal === "object" && !Array.isArray(personal) ? personal : {}) };
   const requests = normalizeImportPersonalFieldRequests(fields);
+  if (options?.syncIdentityVisibility === true && !requests.some((field) => field.field_code === "identity_id")) {
+    const identity = existingPersonalEntry(next, "身份证号", "identity_id");
+    if (identity && identity[1] && typeof identity[1] === "object") {
+      next[identity[0]] = {
+        ...identity[1],
+        candidate_visible: false,
+        visible: false,
+      };
+    }
+  }
   const startOrder = Math.max(
     6,
     ...Object.values(next)
@@ -170,6 +184,39 @@ export function syncImportPersonalFields(personal = {}, fields = []) {
     personal: next,
     mappings,
     names: requests.map((field) => field.field_name),
+  };
+}
+
+export function resolveSessionPersonalSnapshot(
+  config = {},
+  sessionId = "",
+  fallbackPersonal = {},
+  storedMappings = [],
+) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  const snapshots = config?.sessionPersonalById && typeof config.sessionPersonalById === "object"
+    && !Array.isArray(config.sessionPersonalById)
+    ? config.sessionPersonalById
+    : {};
+  const stored = snapshots[normalizedSessionId];
+  const base = stored && typeof stored === "object" && !Array.isArray(stored)
+    ? stored
+    : fallbackPersonal;
+  return syncImportPersonalFields(base, storedMappings).personal;
+}
+
+export function setSessionPersonalSnapshot(config = {}, sessionId = "", personal = {}) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) throw new Error("缺少场次 ID，无法保存考生信息项快照");
+  const snapshots = config?.sessionPersonalById && typeof config.sessionPersonalById === "object"
+    && !Array.isArray(config.sessionPersonalById)
+    ? config.sessionPersonalById
+    : {};
+  return {
+    ...snapshots,
+    [normalizedSessionId]: personal && typeof personal === "object" && !Array.isArray(personal)
+      ? { ...personal }
+      : {},
   };
 }
 

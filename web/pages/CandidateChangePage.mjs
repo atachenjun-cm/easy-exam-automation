@@ -56,8 +56,39 @@ function statusBadge(status) {
   return `<span class="ccm-status is-${escapeHtml(status)}">${escapeHtml(statusLabels[status] || status || "未知")}</span>`;
 }
 
+function changeSetActionCount(changeSet = {}) {
+  const itemCount = Number(changeSet.items?.length || 0);
+  return itemCount || (changeSet.impact?.room_assignment === "clear_all" ? 1 : 0);
+}
+
 function contactText(candidate = {}) {
   return candidate.email || candidate.mobile || "--";
+}
+
+export function candidateExamStatusText(status) {
+  return String(status || "").trim().toLowerCase() === "completed" ? "已完成" : status || "未开考";
+}
+
+function candidateMatchesSearch(data, candidate = {}, search = "") {
+  const query = String(search || "").trim().toLowerCase();
+  if (!query) return true;
+  return [
+    candidate.full_name,
+    candidate.permit,
+    candidate.email,
+    candidate.mobile,
+    candidateCourseText(data, candidate),
+  ].some((value) => String(value || "").toLowerCase().includes(query));
+}
+
+function candidateCourseText(data, candidate = {}) {
+  const code = String(candidate.course_code || "").trim();
+  const course = (Array.isArray(data?.courses) ? data.courses : []).find((item) => (
+    String(item?.code || item?.course_code || "").trim() === code
+  ));
+  const name = String(course?.name || course?.course_name || candidate.course_name || "").trim();
+  if (name && code) return `${name}（${code}）`;
+  return name || code || "--";
 }
 
 function editorFields(data = {}) {
@@ -74,15 +105,38 @@ function editorFieldValue(candidate = {}, field = {}) {
   return candidate.custom_fields?.[field.field_name] || "";
 }
 
+function editorFieldOptions(field = {}) {
+  const options = Array.isArray(field.options) ? field.options : [];
+  if (options.length) {
+    return options
+      .map((option) => ({
+        value: String(option?.value ?? "").trim(),
+        label: String(option?.label ?? option?.value ?? "").trim(),
+      }))
+      .filter((option) => option.value);
+  }
+  return (Array.isArray(field.choices) ? field.choices : [])
+    .map((choice) => ({ value: String(choice ?? "").trim(), label: String(choice ?? "").trim() }))
+    .filter((option) => option.value);
+}
+
 function editorControlHtml(field, index) {
   const name = `editor_field_${index}`;
   const required = field.required ? "required" : "";
-  const choices = Array.isArray(field.choices) ? field.choices : [];
-  if (choices.length) {
-    return `<select class="field-input" name="${name}" ${required}><option value="">请选择</option>${choices.map((choice) => `<option value="${escapeHtml(choice)}">${escapeHtml(choice)}</option>`).join("")}</select>`;
+  const options = editorFieldOptions(field);
+  if (field.type === "select" || options.length) {
+    return `<select class="field-input" name="${name}" ${required}><option value="">请选择</option>${options.map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`).join("")}</select>`;
   }
   const inputType = field.type === "email" ? "email" : field.type === "date" ? "date" : "text";
   return `<input class="field-input" name="${name}" type="${inputType}" ${required}>`;
+}
+
+function invalidCandidateCourseMessage(data, courseCode) {
+  const value = String(courseCode || "").trim();
+  const courseField = editorFields(data).find((field) => field.field_code === "course_code");
+  const validCodes = new Set(editorFieldOptions(courseField).map((option) => option.value));
+  if (!value || validCodes.has(value)) return "";
+  return `科目编号 ${value} 不属于本场次，请从下拉选项中选择。`;
 }
 
 function mappingOptionsHtml(columns = [], selected = "", required = false) {
@@ -108,14 +162,17 @@ export function CandidateChangePage({
   navigate = () => {},
   showError = (message) => window.alert(message),
   showConfirm = async (message) => window.confirm(message),
+  canUseTouch = () => false,
+  prepareTouchSend = async () => {},
 } = {}) {
   const state = {
     taskId: "",
     sessionId: "",
     data: null,
     activeTab: "roster",
-    mode: "full_list",
+    mode: "append_list",
     search: "",
+    workingSearch: "",
     workingRoster: [],
     parsedFileName: "",
     parseSummary: null,
@@ -126,6 +183,9 @@ export function CandidateChangePage({
     changeSet: null,
     canApply: false,
     busy: false,
+    selectedPermits: new Set(),
+    clearRooms: false,
+    syncAddedToTrial: false,
   };
 
   async function request(path, options = {}) {
@@ -164,12 +224,17 @@ export function CandidateChangePage({
     const session = state.data?.session || {};
     const task = state.data?.task || {};
     const phase = state.data?.phase;
+    const pendingCount = (state.data?.changes || []).filter((change) => change.status === "waiting_review").length;
     return `
       <section class="ccm-context" aria-label="当前考试场次">
         <div><span>考试项目</span><strong>${escapeHtml(task.examName || task.projectName || "--")}</strong></div>
         <div><span>目标场次</span><strong>${escapeHtml(session.sessionType === "trial" ? "试考" : "正式考试")}</strong></div>
         <div><span>考试时间</span><strong>${escapeHtml(session.start || "--")}</strong></div>
         <div><span>当前阶段</span><strong class="${phase === "not_started" ? "ccm-ok" : "ccm-danger"}">${phase === "not_started" ? "未开考" : phase === "started" ? "考试进行中" : "考试已结束"}</strong></div>
+        <div><span>线上考生</span><strong>${Number(state.data?.candidates?.length || 0)}</strong></div>
+        <div><span>已分班</span><strong>${Number(session.roomCount || 0)} 班</strong></div>
+        <div><span>待审核变更</span><strong class="ccm-warn">${pendingCount}</strong></div>
+        <div><span>名单版本</span><strong>${escapeHtml(String(state.data?.rosterHash || "").slice(0, 8).toUpperCase() || "--")}</strong></div>
       </section>`;
   }
 
@@ -185,20 +250,9 @@ export function CandidateChangePage({
   }
 
   function rosterHtml() {
-    const rows = (state.data?.candidates || []).filter((candidate) => {
-      const query = state.search.trim().toLowerCase();
-      if (!query) return true;
-      return [candidate.full_name, candidate.permit, candidate.email, candidate.mobile]
-        .some((value) => String(value || "").toLowerCase().includes(query));
-    });
-    const pendingCount = (state.data?.changes || []).filter((change) => change.status === "waiting_review").length;
+    const rows = (state.data?.candidates || [])
+      .filter((candidate) => candidateMatchesSearch(state.data, candidate, state.search));
     return `
-      <div class="ccm-summary">
-        <div><span>线上考生</span><strong>${Number(state.data?.candidates?.length || 0)}</strong></div>
-        <div><span>已分班</span><strong>${Number(state.data?.session?.roomCount || 0)} 班</strong></div>
-        <div><span>待审核变更</span><strong class="ccm-warn">${pendingCount}</strong></div>
-        <div><span>名单版本</span><strong>${escapeHtml(String(state.data?.rosterHash || "").slice(0, 8).toUpperCase())}</strong></div>
-      </div>
       <div class="ccm-toolbar">
         <label class="ccm-search">
           <svg class="ccm-search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2.4"></circle><path d="m16.2 16.2 4.2 4.2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"></path></svg>
@@ -216,32 +270,75 @@ export function CandidateChangePage({
             <tr>
               <td><strong>${escapeHtml(candidate.full_name || "--")}</strong></td>
               <td><code>${escapeHtml(candidate.permit)}</code></td>
-              <td>${escapeHtml(candidate.course_name || candidate.course_code || "--")}</td>
+              <td>${escapeHtml(candidateCourseText(state.data, candidate))}</td>
               <td>${escapeHtml(contactText(candidate))}</td>
-              <td>${escapeHtml(candidate.exam_status || "未开考")}</td>
+              <td>${escapeHtml(candidateExamStatusText(candidate.exam_status))}</td>
             </tr>`).join("") : '<tr><td colspan="5" class="ccm-empty">没有符合条件的考生</td></tr>'}</tbody>
         </table>
       </div>
       <p class="ccm-footnote">线上校验时间：${escapeHtml(formatTime(state.data?.checkedAt))}。名单数据来自当前易考场次，不使用文件缓存生成变更。</p>`;
   }
 
+  function appendListStats(rows = state.workingRoster) {
+    const currentPermits = new Set((state.data?.candidates || []).map((candidate) => String(candidate.permit || "").trim()));
+    const uniquePermits = new Set();
+    let skippedExisting = 0;
+    let additions = 0;
+    for (const candidate of rows || []) {
+      const permit = String(candidate?.permit || "").trim();
+      if (!permit || uniquePermits.has(permit)) continue;
+      uniquePermits.add(permit);
+      if (currentPermits.has(permit)) skippedExisting += 1;
+      else additions += 1;
+    }
+    return { total: uniquePermits.size, additions, skippedExisting, currentPermits };
+  }
+
   function workingRosterTable() {
     const rows = state.workingRoster || [];
+    const query = state.workingSearch.trim().toLowerCase();
+    const filteredRows = rows.filter((candidate) => candidateMatchesSearch(state.data, candidate, query));
+    const visibleRows = filteredRows.slice(0, 100);
+    const selectedCount = state.selectedPermits.size;
+    const allSelected = filteredRows.length > 0 && filteredRows.every((candidate) => state.selectedPermits.has(candidate.permit));
+    const appendOnly = state.mode === "append_list";
+    const appendStats = appendListStats(rows);
+    const footnote = query
+      ? `当前名单共 ${rows.length} 人，搜索结果 ${filteredRows.length} 人${filteredRows.length > 100 ? "，表格先显示前 100 人" : ""}；差异计算仍包含全部考生。`
+      : rows.length > 100
+        ? `当前共 ${rows.length} 人，表格先显示前 100 人；差异计算仍包含全部考生。`
+        : "";
     return `
+      <div class="ccm-batch-toolbar">
+        <div class="ccm-batch-summary">
+          <label class="ccm-search ccm-working-search">
+            <svg class="ccm-search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2.4"></circle><path d="m16.2 16.2 4.2 4.2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"></path></svg>
+            <input class="field-input" type="search" data-ccm-working-search value="${escapeHtml(state.workingSearch)}" aria-label="搜索变更名单考生" placeholder="姓名或准考证号">
+          </label>
+          <span>${appendOnly ? `文件 ${appendStats.total} 人 · 待新增 ${appendStats.additions} 人 · 已存在跳过 ${appendStats.skippedExisting} 人` : `已选 ${selectedCount} 人`}</span>
+        </div>
+        <div class="view-actions">
+          <button type="button" class="btn danger" data-ccm-delete-selected ${selectedCount ? "" : "disabled"}>${appendOnly ? "批量移除" : "批量删除"}</button>
+          ${state.mode === "manual" ? `<button type="button" class="btn danger" data-ccm-clear-session ${state.data?.candidates?.length || state.data?.session?.roomCount ? "" : "disabled"}>清空本场次考生及分班</button>` : ""}
+        </div>
+      </div>
+      ${state.clearRooms ? '<div class="ccm-notice is-danger">已将本场次全部考生和分班列入清空草稿。生成差异后仍需人工确认才会执行。</div>' : ""}
       <div class="ccm-table-wrap ccm-working-table">
         <table class="ccm-table">
-          <thead><tr><th>考生</th><th>准考证号</th><th>科目编号</th><th>联系方式</th><th>操作</th></tr></thead>
-          <tbody>${rows.length ? rows.slice(0, 100).map((candidate) => `
+          <thead><tr><th class="ccm-select-cell"><input type="checkbox" data-ccm-select-all aria-label="${query ? "全选搜索结果" : "全选本名单"}" ${allSelected ? "checked" : ""}></th><th>考生</th><th>准考证号</th><th>科目编号</th><th>联系方式</th>${appendOnly ? "<th>处理结果</th>" : ""}<th>操作</th></tr></thead>
+          <tbody>${visibleRows.length ? visibleRows.map((candidate) => `
             <tr>
+              <td class="ccm-select-cell"><input type="checkbox" data-ccm-select-permit="${escapeHtml(candidate.permit)}" aria-label="选择 ${escapeHtml(candidate.full_name || candidate.permit)}" ${state.selectedPermits.has(candidate.permit) ? "checked" : ""}></td>
               <td><strong>${escapeHtml(candidate.full_name || "--")}</strong></td>
               <td><code>${escapeHtml(candidate.permit)}</code></td>
-              <td>${escapeHtml(candidate.course_code || "--")}</td>
+              <td>${escapeHtml(candidateCourseText(state.data, candidate))}</td>
               <td>${escapeHtml(contactText(candidate))}</td>
-              <td><div class="ccm-row-actions"><button type="button" class="btn" data-ccm-edit="${escapeHtml(candidate.permit)}">编辑</button><button type="button" class="btn danger" data-ccm-delete="${escapeHtml(candidate.permit)}">删除</button></div></td>
-            </tr>`).join("") : '<tr><td colspan="5" class="ccm-empty">名单为空</td></tr>'}</tbody>
+              ${appendOnly ? `<td><span class="ccm-status ${appendStats.currentPermits.has(candidate.permit) ? "is-skipped" : "is-applied"}">${appendStats.currentPermits.has(candidate.permit) ? "已存在，跳过" : "待新增"}</span></td>` : ""}
+              <td><div class="ccm-row-actions"><button type="button" class="btn" data-ccm-edit="${escapeHtml(candidate.permit)}">编辑</button><button type="button" class="btn danger" data-ccm-delete="${escapeHtml(candidate.permit)}">${appendOnly ? "移除" : "删除"}</button></div></td>
+            </tr>`).join("") : `<tr><td colspan="${appendOnly ? 7 : 6}" class="ccm-empty">${rows.length ? "没有符合条件的考生" : "名单为空"}</td></tr>`}</tbody>
         </table>
       </div>
-      ${rows.length > 100 ? `<p class="ccm-footnote">当前共 ${rows.length} 人，表格先显示前 100 人；差异计算仍包含全部考生。</p>` : ""}`;
+      ${footnote ? `<p class="ccm-footnote">${footnote}</p>` : ""}`;
   }
 
   function rebuildMappedRoster() {
@@ -254,6 +351,8 @@ export function CandidateChangePage({
       total: state.workingRoster.length,
       missingFields: candidateChangeMissingMappings(editorFields(state.data), state.fieldMapping),
     };
+    state.selectedPermits.clear();
+    state.clearRooms = false;
   }
 
   function resetUploadedRoster() {
@@ -288,33 +387,44 @@ export function CandidateChangePage({
   }
 
   function canGeneratePreview() {
+    if (state.mode === "manual") return Boolean(state.workingRoster.length || state.data?.candidates?.length || state.clearRooms);
     if (!state.workingRoster.length) return false;
-    if (state.mode === "manual") return true;
     return Boolean(state.parsedFileName) && !(state.parseSummary?.missingFields || []).length;
   }
 
   function createHtml() {
     const parsed = state.parseSummary;
+    const uploadMode = state.mode !== "manual";
+    const appendOnly = state.mode === "append_list";
+    const appendStats = appendListStats();
+    const sectionTitle = appendOnly ? "只新增名单" : state.mode === "full_list" ? "最新版完整名单" : "变更后的完整名单";
     return `
       <div class="ccm-create-head">
         <div class="ccm-segmented" aria-label="变更录入方式">
-          <button type="button" class="${state.mode === "full_list" ? "is-active" : ""}" data-ccm-mode="full_list">上传最新版名单</button>
+          <button type="button" class="${appendOnly ? "is-active" : ""}" data-ccm-mode="append_list">只新增名单</button>
+          <button type="button" class="${state.mode === "full_list" ? "is-active" : ""}" data-ccm-mode="full_list">完整名单对比</button>
           <button type="button" class="${state.mode === "manual" ? "is-active" : ""}" data-ccm-mode="manual">逐条增删改</button>
         </div>
         <span>基线：线上名单 ${Number(state.data?.candidates?.length || 0)} 人</span>
       </div>
       <div class="ccm-create-grid">
         <section class="ccm-section">
-          <div class="ccm-section-head"><h2>${state.mode === "full_list" ? "最新版完整名单" : "变更后的完整名单"}</h2>${state.mode === "manual" ? '<button type="button" class="btn" data-ccm-add>新增考生</button>' : ""}</div>
+          <div class="ccm-section-head"><h2>${sectionTitle}</h2>${state.mode === "manual" ? '<button type="button" class="btn" data-ccm-add>新增考生</button>' : ""}</div>
           <div class="ccm-section-body">
-            ${state.mode === "full_list" ? `
+            ${uploadMode ? `
               <label class="ccm-upload ${state.parsedFileName ? "has-file" : ""}" data-ccm-upload>
                 <input type="file" data-ccm-file accept=".xlsx,.xls,.csv">
-                <strong>${escapeHtml(state.parsedFileName || "点击选择或拖拽最新版完整名单到此处")}</strong>
-                <span>${parsed ? `已读取 ${parsed.total} 人，请确认下方字段对应` : "支持 .xlsx、.xls、.csv；松开后只生成差异，不直接导入。"}</span>
+                <strong>${escapeHtml(state.parsedFileName || (appendOnly ? "点击选择或拖拽待新增名单到此处" : "点击选择或拖拽最新版完整名单到此处"))}</strong>
+                <span>${parsed
+                  ? appendOnly
+                    ? `已读取 ${appendStats.total} 人，其中待新增 ${appendStats.additions} 人、已存在跳过 ${appendStats.skippedExisting} 人`
+                    : `已读取 ${parsed.total} 人，请确认下方字段对应`
+                  : appendOnly
+                    ? "可包含已有考生或全部为新考生；只按准考证号追加，不修改原名单。"
+                    : "支持 .xlsx、.xls、.csv；缺失考生会列为拟删除。"}</span>
               </label>` : `
               <div class="ccm-notice">在当前线上名单副本中编辑。保存后先生成差异，不会立即修改易考。</div>`}
-            ${state.mode === "full_list" ? mappingHtml() : ""}
+            ${uploadMode ? mappingHtml() : ""}
             ${state.mode === "manual" || state.parsedFileName ? workingRosterTable() : ""}
           </div>
         </section>
@@ -323,7 +433,16 @@ export function CandidateChangePage({
           <div class="ccm-section-body">
             <label class="ccm-field"><span>目标场次</span><input class="field-input" value="${escapeHtml(state.data?.session?.name || "")}" disabled></label>
             <label class="ccm-field"><span>变更原因</span><textarea class="field-input" rows="4" data-ccm-reason placeholder="填写本次增删改原因">${escapeHtml(state.reason)}</textarea></label>
-            <div class="ccm-notice is-warning">最新版名单中缺失的考生只会列为“拟删除”；必须在差异页逐项核对后才能执行。</div>
+            ${state.data?.trialSession ? `
+              <label class="ccm-option-check">
+                <input type="checkbox" data-ccm-sync-trial ${state.syncAddedToTrial ? "checked" : ""}>
+                <span><strong>同步新增考生到试考</strong><small>仅复制本次新增考生，科目编号自动替换为 SKTY；试考中已有的准考证号会跳过。</small></span>
+              </label>` : ""}
+            <div class="ccm-notice ${appendOnly ? "" : "is-warning"}">${appendOnly
+              ? "按准考证号与易考当前名单比对：已有考生整行跳过，只新增不存在的考生，不修改、不删除原名单。"
+              : state.mode === "full_list"
+                ? "完整名单中缺失的考生会列为“拟删除”，已有考生字段变化会列为“拟修改”；必须在差异页逐项核对。"
+                : "逐条编辑会按草稿生成新增、修改或删除差异；必须在差异页逐项核对。"}</div>
             <button type="button" class="btn primary ccm-block" data-ccm-preview ${canGeneratePreview() ? "" : "disabled"}>生成差异预览</button>
           </div>
         </aside>
@@ -339,6 +458,7 @@ export function CandidateChangePage({
     const items = changeSet.items || [];
     const allConfirmed = state.canApply && Number(summary.blocked || 0) === 0;
     return `
+      ${changeSet.sourceType === "append_list" ? `<div class="ccm-notice">只新增名单共 ${Number(changeSet.impact?.append_upload?.uploaded_count || 0)} 人：待新增 ${Number(changeSet.impact?.append_upload?.added_count || 0)} 人，易考已存在并跳过 ${Number(changeSet.impact?.append_upload?.skipped_existing_count || 0)} 人；不会修改或删除原考生。</div>` : ""}
       <div class="ccm-summary">
         <div><span>新增</span><strong class="ccm-ok">${Number(summary.add || 0)}</strong></div>
         <div><span>修改</span><strong>${Number(summary.edit || 0)}</strong></div>
@@ -362,20 +482,21 @@ export function CandidateChangePage({
         <section class="ccm-section">
           <div class="ccm-section-head"><h2>下游影响</h2><span>只标记待处理，不自动发送</span></div>
           <div class="ccm-impact-list">
-            <div><strong>班级分配</strong><span>${changeSet.impact?.room_assignment === "append_to_existing" ? "新增考生将自动加入当前人数最少的现有班级" : changeSet.impact?.room_assignment === "needs_preview" ? "执行后需要重新预览分班" : "不受影响"}</span></div>
+            <div><strong>班级分配</strong><span>${changeSet.impact?.room_assignment === "clear_all" ? "正式执行并确认全部考生删除后，清空本场次全部分班" : changeSet.impact?.room_assignment === "append_to_existing" ? "新增考生将自动加入当前人数最少的现有班级" : changeSet.impact?.room_assignment === "needs_preview" ? "执行后需要重新预览分班" : "不受影响"}</span></div>
+            ${changeSet.impact?.trial_candidate_sync?.requested ? `<div><strong>试考名单</strong><span>本次成功新增的考生将复制到试考场次，科目编号替换为 SKTY</span></div>` : ""}
             <div><strong>监考人员任务</strong><span>${changeSet.impact?.personnel_task === "pending_review" ? "标记为变更待检查" : "不受影响"}</span></div>
-            <div><strong>考生通知</strong><span>本次不会自动发送短信或邮件</span></div>
+            <div><strong>新增考生短信</strong><span>${Number(summary.add || 0) && canUseTouch() ? `变更完成后可为本次新增的 ${Number(summary.add)} 人创建独立触达任务；不会自动发送` : "本次不会自动发送短信或邮件"}</span></div>
             <div><strong>腾讯文档</strong><span>${changeSet.impact?.tencent_docs === "pending_sync" ? "线上回读后标记待同步" : "不受影响"}</span></div>
           </div>
         </section>
         <aside class="ccm-section">
           <div class="ccm-section-head"><h2>人工确认</h2></div>
           <div class="ccm-section-body ccm-confirm-list">
-            <label><input type="checkbox" data-ccm-confirm-check>已核对全部拟删除考生</label>
+            <label><input type="checkbox" data-ccm-confirm-check>${changeSet.sourceType === "append_list" ? "确认本次只新增考生，不修改或删除原名单" : "已核对全部拟删除考生"}</label>
             <label><input type="checkbox" data-ccm-confirm-check>已核对科目及准考证号变化</label>
-            <label><input type="checkbox" data-ccm-confirm-check>同意执行新增考生分班并重新检查任务单</label>
+            <label><input type="checkbox" data-ccm-confirm-check>${changeSet.impact?.room_assignment === "clear_all" ? "同意在全部考生删除成功后清空本场次分班" : "同意执行新增考生分班并重新检查任务单"}</label>
             ${!allConfirmed ? `<div class="ccm-notice is-danger">${Number(summary.blocked || 0) ? `有 ${Number(summary.blocked)} 项因考试状态被阻止。` : "当前场次已经结束，不能再修改考生名单。"}</div>` : ""}
-            <button type="button" class="btn primary ccm-block" data-ccm-apply ${allConfirmed ? "" : "disabled"}>确认并执行 ${items.length} 项变更</button>
+            <button type="button" class="btn primary ccm-block" data-ccm-apply ${allConfirmed ? "" : "disabled"}>确认并执行 ${changeSetActionCount(changeSet)} 项变更</button>
             <p class="ccm-footnote">执行前会再次读取易考名单并校验版本；名单已变化时自动停止。</p>
           </div>
         </aside>
@@ -384,22 +505,61 @@ export function CandidateChangePage({
 
   function historyHtml() {
     const changes = state.data?.changes || [];
+    const touchEnabled = canUseTouch();
     return `
       <div class="ccm-history-head"><div><h2>变更记录</h2><p>保留提交原因、名单基线、逐项结果和线上回读状态。</p></div><button type="button" class="btn" data-ccm-refresh-history>刷新</button></div>
       <div class="ccm-table-wrap">
         <table class="ccm-table">
-          <thead><tr><th>变更单</th><th>提交时间</th><th>来源</th><th>变更范围</th><th>状态</th><th>操作人</th></tr></thead>
+          <thead><tr><th>变更单</th><th>提交时间</th><th>来源</th><th>变更范围</th><th>状态</th><th>操作人</th>${touchEnabled ? "<th>新增考生短信</th>" : ""}</tr></thead>
           <tbody>${changes.length ? changes.map((change) => `
             <tr>
               <td><code>${escapeHtml(change.id)}</code><div class="ccm-table-sub">${escapeHtml(change.reason || "未填写原因")}</div></td>
               <td>${escapeHtml(formatTime(change.createdAt))}</td>
-              <td>${change.sourceType === "manual" ? "逐条增删改" : "完整名单"}</td>
+              <td>${change.sourceType === "manual" ? "逐条增删改" : change.sourceType === "append_list" ? "只新增名单" : "完整名单对比"}</td>
               <td>新增 ${Number(change.summary?.add || 0)} · 修改 ${Number(change.summary?.edit || 0)} · 删除 ${Number(change.summary?.delete || 0)}</td>
               <td>${statusBadge(change.status)}${change.error ? `<div class="ccm-table-error">${escapeHtml(change.error)}</div>` : ""}</td>
               <td>${escapeHtml(change.createdBy || "--")}</td>
-            </tr>`).join("") : '<tr><td colspan="6" class="ccm-empty">暂无考生变更记录</td></tr>'}</tbody>
+              ${touchEnabled ? `<td>${Number(change.summary?.add || 0) && ["applied", "partial_failed"].includes(change.status)
+                ? `${change.touchTask?.batchId ? `<div class="ccm-table-sub">批次 #${escapeHtml(change.touchTask.batchId)} · ${Number(change.touchTask.count || 0)} 人 · ${change.touchTask.status === "completed" ? "已导入" : "待核对"}${change.touchTask.batchUrl ? ` · <a href="${escapeHtml(change.touchTask.batchUrl)}" target="_blank" rel="noopener noreferrer">查看批次</a>` : ""}</div>` : ""}
+                  <button type="button" class="btn" data-ccm-touch="${escapeHtml(change.id)}" ${change.touchTask?.batchId && change.touchTask.status !== "completed" ? "disabled" : ""}>${change.touchTask?.batchId ? "准备短信发送" : "创建触达任务"}</button>`
+                : "--"}</td>` : ""}
+            </tr>`).join("") : `<tr><td colspan="${touchEnabled ? 7 : 6}" class="ccm-empty">暂无考生变更记录</td></tr>`}</tbody>
         </table>
       </div>`;
+  }
+
+  async function touchNewCandidates(changeSetId) {
+    const basePath = `/api/tasks/${encodeURIComponent(state.taskId)}/sessions/${encodeURIComponent(state.sessionId)}/candidate-changes/${encodeURIComponent(changeSetId)}/message-center`;
+    const preview = await request(`${basePath}/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    if (!preview.alreadyCreated) {
+      const count = Number(preview.summary?.availableSms || 0);
+      const confirmed = await showConfirm(
+        `将为变更单 ${changeSetId} 成功新增的 ${count} 名考生创建独立触达批次“${preview.batchName}”。不会导入原有考生，也不会自动发送短信。确认创建？`,
+        { title: "新增考生触达", confirmText: "创建批次" },
+      );
+      if (!confirmed) return;
+      const imported = await request(`${basePath}/import`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preparationId: preview.preparationId }),
+      });
+      await refreshHistory();
+      if (imported.pending || imported.state?.status !== "completed") {
+        throw new Error("触达批次尚未完成导入，请核对平台状态，勿重复创建。");
+      }
+    }
+    const prepared = await request(`${basePath}/send-preview`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const localHelper = prepared.localHelper || {};
+    if (localHelper.path !== "/message-center/prepare-send" || !localHelper.payload?.batchId) {
+      throw new Error("短信发送确认参数不完整，请刷新后重试。");
+    }
+    const confirmed = await showConfirm(
+      `将先向触达平台当前登录账号发送 1 条测试短信，再为本次新增的 ${Number(prepared.summary?.availableSms || 0)} 名考生打开正式发送确认页；不会自动确认整批发送。确认继续？`,
+      { title: "新增考生短信", confirmText: "测试并继续" },
+    );
+    if (confirmed) await prepareTouchSend(localHelper);
   }
 
   function editorDialogHtml() {
@@ -444,7 +604,10 @@ export function CandidateChangePage({
     form.dataset.originalPermit = candidate?.permit || "";
     dialog.querySelector("[data-ccm-editor-title]").textContent = candidate ? "编辑考生" : "新增考生";
     editorFields(state.data).forEach((field, index) => {
-      form.elements[`editor_field_${index}`].value = editorFieldValue(candidate || {}, field);
+      const value = editorFieldValue(candidate || {}, field);
+      const courseError = field.field_code === "course_code" ? invalidCandidateCourseMessage(state.data, value) : "";
+      form.elements[`editor_field_${index}`].value = courseError ? "" : value;
+      if (courseError) showError(courseError, { title: "科目编号不属于本场次" });
     });
     dialog.showModal();
     form.elements.editor_field_0.focus();
@@ -461,6 +624,9 @@ export function CandidateChangePage({
     resetUploadedRoster();
     state.reason = "";
     state.changeSet = null;
+    state.selectedPermits.clear();
+    state.clearRooms = false;
+    state.syncAddedToTrial = false;
     state.activeTab = "roster";
     render();
   }
@@ -476,11 +642,15 @@ export function CandidateChangePage({
       state.reason = event.target.value;
       return;
     }
-    if (!event.target.matches("[data-ccm-search]")) return;
-    state.search = event.target.value;
+    const isRosterSearch = event.target.matches("[data-ccm-search]");
+    const isWorkingSearch = event.target.matches("[data-ccm-working-search]");
+    if (!isRosterSearch && !isWorkingSearch) return;
+    const selector = isWorkingSearch ? "[data-ccm-working-search]" : "[data-ccm-search]";
+    if (isWorkingSearch) state.workingSearch = event.target.value;
+    else state.search = event.target.value;
     const selection = event.target.selectionStart;
     render();
-    const input = root.querySelector("[data-ccm-search]");
+    const input = root.querySelector(selector);
     input?.focus();
     input?.setSelectionRange(selection, selection);
   });
@@ -521,6 +691,26 @@ export function CandidateChangePage({
   }
 
   root.addEventListener("change", async (event) => {
+    if (event.target.matches("[data-ccm-sync-trial]")) {
+      state.syncAddedToTrial = event.target.checked;
+      return;
+    }
+    if (event.target.matches("[data-ccm-select-all]")) {
+      const filteredPermits = state.workingRoster
+        .filter((candidate) => candidateMatchesSearch(state.data, candidate, state.workingSearch))
+        .map((candidate) => candidate.permit);
+      if (event.target.checked) filteredPermits.forEach((permit) => state.selectedPermits.add(permit));
+      else filteredPermits.forEach((permit) => state.selectedPermits.delete(permit));
+      render();
+      return;
+    }
+    if (event.target.matches("[data-ccm-select-permit]")) {
+      const permit = event.target.dataset.ccmSelectPermit;
+      if (event.target.checked) state.selectedPermits.add(permit);
+      else state.selectedPermits.delete(permit);
+      render();
+      return;
+    }
     const mapping = event.target.closest("[data-ccm-map-field]");
     if (mapping) {
       state.fieldMapping[mapping.dataset.ccmMapField] = mapping.value;
@@ -570,6 +760,11 @@ export function CandidateChangePage({
       if (field.scope === "base" && field.candidate_key) candidate[field.candidate_key] = value;
       else candidate.custom_fields[field.field_name] = value;
     });
+    const courseError = invalidCandidateCourseMessage(state.data, candidate.course_code);
+    if (courseError) {
+      showError(courseError, { title: "科目编号不属于本场次" });
+      return;
+    }
     const duplicate = state.workingRoster.find((row) => row.permit === candidate.permit && row.permit !== originalPermit);
     if (duplicate) {
       showError(`准考证号 ${candidate.permit} 已存在。`);
@@ -577,14 +772,31 @@ export function CandidateChangePage({
     }
     if (originalPermit) {
       state.workingRoster = state.workingRoster.map((row) => row.permit === originalPermit ? { ...row, ...candidate } : row);
+      if (originalPermit !== candidate.permit) state.selectedPermits.delete(originalPermit);
     } else {
       state.workingRoster = [...state.workingRoster, candidate];
     }
+    state.clearRooms = false;
     form.closest("dialog").close();
     render();
   });
 
   root.addEventListener("click", async (event) => {
+    const touch = event.target.closest("[data-ccm-touch]");
+    if (touch) {
+      if (state.busy || !canUseTouch()) return;
+      try {
+        state.busy = true;
+        touch.disabled = true;
+        await touchNewCandidates(touch.dataset.ccmTouch);
+      } catch (error) {
+        showError(error.message || String(error), { title: "新增考生触达未完成" });
+      } finally {
+        state.busy = false;
+        await refreshHistory().catch(() => render());
+      }
+      return;
+    }
     const tab = event.target.closest("[data-ccm-tab]");
     if (tab) {
       state.activeTab = tab.dataset.ccmTab;
@@ -600,6 +812,9 @@ export function CandidateChangePage({
       state.workingRoster = cloneRows(state.data.candidates);
       resetUploadedRoster();
       state.reason = "";
+      state.selectedPermits.clear();
+      state.clearRooms = false;
+      state.syncAddedToTrial = false;
       render();
       return;
     }
@@ -608,11 +823,45 @@ export function CandidateChangePage({
       state.mode = mode.dataset.ccmMode;
       state.workingRoster = cloneRows(state.data.candidates);
       resetUploadedRoster();
+      state.selectedPermits.clear();
+      state.clearRooms = false;
       render();
       return;
     }
     if (event.target.closest("[data-ccm-add]")) {
       openEditor();
+      return;
+    }
+    if (event.target.closest("[data-ccm-delete-selected]")) {
+      const selected = new Set(state.selectedPermits);
+      if (!selected.size) return;
+      const appendOnly = state.mode === "append_list";
+      if (await showConfirm(
+        appendOnly ? `确认从待新增名单移除已选 ${selected.size} 名考生？` : `确认将已选 ${selected.size} 名考生列为拟删除？`,
+        { confirmText: appendOnly ? "从名单移除" : "批量列为拟删除", danger: true },
+      )) {
+        state.workingRoster = state.workingRoster.filter((candidate) => !selected.has(candidate.permit));
+        state.selectedPermits.clear();
+        state.clearRooms = false;
+        render();
+      }
+      return;
+    }
+    if (event.target.closest("[data-ccm-clear-session]")) {
+      const candidateCount = Number(state.data?.candidates?.length || 0);
+      const roomCount = Number(state.data?.session?.roomCount || 0);
+      const confirmed = await showConfirm(
+        `确认将本场次 ${candidateCount} 名线上考生和 ${roomCount} 个班级全部列入清空草稿？生成差异后还需再次人工确认。`,
+        { confirmText: "列入清空草稿", danger: true },
+      );
+      if (confirmed) {
+        state.mode = "manual";
+        state.workingRoster = [];
+        state.selectedPermits.clear();
+        state.clearRooms = true;
+        resetUploadedRoster();
+        render();
+      }
       return;
     }
     const edit = event.target.closest("[data-ccm-edit]");
@@ -623,8 +872,16 @@ export function CandidateChangePage({
     const remove = event.target.closest("[data-ccm-delete]");
     if (remove) {
       const candidate = state.workingRoster.find((row) => row.permit === remove.dataset.ccmDelete);
-      if (await showConfirm(`确认将 ${candidate?.full_name || candidate?.permit} 列为拟删除考生？`, { confirmText: "列为拟删除", danger: true })) {
+      const appendOnly = state.mode === "append_list";
+      if (await showConfirm(
+        appendOnly
+          ? `确认从待新增名单移除 ${candidate?.full_name || candidate?.permit}？`
+          : `确认将 ${candidate?.full_name || candidate?.permit} 列为拟删除考生？`,
+        { confirmText: appendOnly ? "从名单移除" : "列为拟删除", danger: true },
+      )) {
         state.workingRoster = state.workingRoster.filter((row) => row.permit !== remove.dataset.ccmDelete);
+        state.selectedPermits.delete(remove.dataset.ccmDelete);
+        state.clearRooms = false;
         render();
       }
       return;
@@ -660,7 +917,13 @@ export function CandidateChangePage({
         const result = await request(`/api/tasks/${encodeURIComponent(state.taskId)}/sessions/${encodeURIComponent(state.sessionId)}/candidate-changes/preview`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sourceType: state.mode, reason, candidates: state.workingRoster }),
+          body: JSON.stringify({
+            sourceType: state.mode,
+            reason,
+            candidates: state.workingRoster,
+            clearRooms: state.clearRooms,
+            syncAddedToTrial: state.syncAddedToTrial,
+          }),
         });
         state.changeSet = result.changeSet;
         state.canApply = result.canApply;
@@ -680,7 +943,7 @@ export function CandidateChangePage({
         return;
       }
       const confirmed = await showConfirm(
-        `确认执行 ${state.changeSet.items.length} 项考生变更？执行前会再次校验线上名单版本。`,
+        `确认执行 ${changeSetActionCount(state.changeSet)} 项考生变更？执行前会再次校验线上名单版本。`,
         { title: "确认执行考生变更", confirmText: "提交执行", danger: true },
       );
       if (!confirmed) return;

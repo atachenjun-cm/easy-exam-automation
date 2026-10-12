@@ -14,14 +14,29 @@ import test from "node:test";
 
 import {
   applyStagedFanweiHelperUpdate,
+  fanweiHelperWindowsExpandArchiveArgs,
   FanweiHelperUpdateError,
   markFanweiHelperUpdateVerified,
   runFanweiHelperUpdate,
+  validateStagedFanweiHelperPackage,
   validateFanweiHelperUpdateRequest,
 } from "./fanwei_local_helper_update.mjs";
+import { FANWEI_LOCAL_HELPER_SERVER_FILES } from "./fanwei_local_helper_version.mjs";
 
 const allowedOrigin = "http://172.16.13.214:8765";
 const token = "a".repeat(64);
+
+test("Windows update extraction embeds quoted paths inside the final PowerShell command", () => {
+  const args = fanweiHelperWindowsExpandArchiveArgs(
+    "C:\\Users\\O'Brien\\helper update.zip",
+    "C:\\Users\\O'Brien\\extracted",
+  );
+  assert.deepEqual(args.slice(0, 4), ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]);
+  assert.equal(args.length, 5);
+  assert.match(args[4], /-LiteralPath 'C:\\Users\\O''Brien\\helper update\.zip'/);
+  assert.match(args[4], /-DestinationPath 'C:\\Users\\O''Brien\\extracted'/);
+  assert.equal(args[4].includes("$args"), false);
+});
 
 function updatePayload(overrides = {}) {
   return {
@@ -78,16 +93,31 @@ async function writeStagedPackage(packageDir, { version = 10, platform = "darwin
     platform,
     updateStrategy: "server-files-v1",
   }));
-  for (const fileName of [
-    "fanwei_local_helper_cli.mjs",
-    "fanwei_local_helper.mjs",
-    "fanwei_local_helper_update.mjs",
-    "fanwei_local_helper_version.mjs",
-  ]) {
+  for (const fileName of FANWEI_LOCAL_HELPER_SERVER_FILES) {
     await writeFile(path.join(serverDir, fileName), `new ${fileName}\n`);
   }
   await writeFile(path.join(packageDir, "install-macos.command"), "new installer\n");
 }
+
+test("staged update rejects a package missing a content-task runtime dependency", async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "fanwei-helper-update-incomplete-"));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  await writeStagedPackage(tempRoot);
+  await rm(path.join(tempRoot, "server", "content_email_directory.mjs"));
+
+  await assert.rejects(
+    validateStagedFanweiHelperPackage(tempRoot, {
+      platform: "darwin",
+      arch: "arm64",
+      targetVersion: 10,
+    }),
+    (error) => (
+      error instanceof FanweiHelperUpdateError
+      && error.code === "helper_update_package_incomplete"
+      && /content_email_directory\.mjs/.test(error.message)
+    ),
+  );
+});
 
 test("staged update atomically replaces helper code while preserving config, Chrome profile, and logs", async (t) => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "fanwei-helper-update-apply-"));

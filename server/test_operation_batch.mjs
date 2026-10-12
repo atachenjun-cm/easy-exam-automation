@@ -32,6 +32,7 @@ import {
   operationTaskMismatchAllowed,
   operationTaskSearchInputSelector,
   operationSelectControlSelector,
+  navigateOperationBatchListFromMenu,
   runOperationBatchCreation,
 } from "./operation_batch_runner.mjs";
 
@@ -141,6 +142,7 @@ test("operation batch runner reuses the helper browser context", async () => {
   let closeCalls = 0;
   const context = {
     pages: () => [{
+      url: () => "https://dashboard.ata.net.cn/dashboard",
       goto: async () => { throw reachedExistingContext; },
     }],
     close: async () => { closeCalls += 1; },
@@ -496,6 +498,58 @@ test("operation batch runner identifies operation console login redirect", () =>
   assert.equal(operationConsoleNeedsLogin("http://172.16.21.201:9003/OAuth2/authorize?redirect_uri=http%3A%2F%2F172.16.18.198%3A8020%2Fuser%2Flogin"), true);
   assert.equal(operationConsoleNeedsLogin("https://dashboard.ata.net.cn/batch/batchList"), false);
   assert.match(operationConsoleLoginMessage(10), /10 分钟/);
+});
+
+test("operation batch runner opens the batch list through the current dashboard menu", async () => {
+  const calls = [];
+  const first = (name) => ({
+    first: () => ({
+      waitFor: async (options) => calls.push([`${name}-wait`, options]),
+      click: async () => calls.push([`${name}-click`]),
+    }),
+  });
+  const searchInput = {
+    first: () => ({
+      waitFor: async (options) => calls.push(["search-wait", options]),
+    }),
+  };
+  const page = {
+    getByText: (label, options) => {
+      assert.equal(label, "批次");
+      assert.deepEqual(options, { exact: true });
+      return first("menu");
+    },
+    getByRole: (role, options) => {
+      if (role === "link") {
+        assert.deepEqual(options, { name: "批次列表", exact: true });
+        return first("list");
+      }
+      throw new Error(`unexpected role: ${role}`);
+    },
+    locator: (selector) => {
+      assert.equal(selector, "input[placeholder*=批次代码], input[placeholder*=批次名称]");
+      return searchInput;
+    },
+    waitForURL: async (predicate, options) => {
+      assert.equal(predicate(new URL("https://dashboard.ata.net.cn/batch/batchList")), true);
+      calls.push(["url-wait", options]);
+    },
+  };
+
+  await navigateOperationBatchListFromMenu(
+    page,
+    "https://dashboard.ata.net.cn/batch/batchList",
+    { batchListMenuTimeoutMs: 5000, readOnlyBatchLookup: true },
+  );
+
+  assert.deepEqual(calls, [
+    ["menu-wait", { state: "visible", timeout: 5000 }],
+    ["menu-click"],
+    ["list-wait", { state: "visible", timeout: 5000 }],
+    ["list-click"],
+    ["url-wait", { timeout: 5000 }],
+    ["search-wait", { state: "visible", timeout: 30000 }],
+  ]);
 });
 
 test("operation batch runner extracts operation batch code from batch list text", () => {

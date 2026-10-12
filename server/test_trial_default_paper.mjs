@@ -129,7 +129,9 @@ test("does not mark trial paper binding successful when tenant readback has no p
       return { form_list: [{ code: "491519", name: DEFAULT_TRIAL_PAPER_NAME }] };
     }
     if (url.endsWith("/tenant/api/session/429044/forms/")) return { results: [] };
-    if (url.endsWith("/tenant/api/session/429044/")) return { courses: [{ code: "SKTY", name: "试考", forms: [] }] };
+    if (url.endsWith("/tenant/api/session/?session_ids=429044")) {
+      return { results: [{ id: "429044", courses: [{ code: "SKTY", name: "试考", forms: [] }] }] };
+    }
     return { __tenantResponse: true, httpStatus: 200, body: {} };
   };
 
@@ -143,6 +145,8 @@ test("does not mark trial paper binding successful when tenant readback has no p
 
   assert.equal(result.status, "waiting_manual");
   assert.deepEqual(result.missingCourseCodes, ["SKTY"]);
+  assert.ok(calls.some((call) => call.url === "https://eztest.cn/tenant/api/session/?session_ids=429044"));
+  assert.equal(calls.some((call) => call.url === "https://eztest.cn/tenant/api/session/429044/"), false);
   assert.ok(logs.some((message) => message.includes("回查未发现固定试考试卷")));
   assert.equal(logs.includes("[试考默认卷] 试考试卷绑定完成"), false);
 });

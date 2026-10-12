@@ -19,7 +19,8 @@ function resolveSessionType(task, sessionId = "") {
 }
 
 export function prepareCandidatesForCourseImport(candidates = [], task = null, options = {}) {
-  const courses = normalizeCourseRecords(task?.config?.courses || []);
+  const hasSessionCourses = Object.prototype.hasOwnProperty.call(options, "courses");
+  const courses = normalizeCourseRecords(hasSessionCourses ? options.courses : task?.config?.courses || []);
   if (!courses.length) return { candidates, errors: [] };
 
   const validCodes = new Set(courses.map((course) => course.code));
@@ -44,7 +45,7 @@ export function prepareCandidatesForCourseImport(candidates = [], task = null, o
       return;
     }
     if (!validCodes.has(courseCode)) {
-      errors.push(`${rowLabel} 科目编号 ${courseCode} 不属于当前考试任务。`);
+      errors.push(`${rowLabel} 科目编号 ${courseCode} 不属于本场次。`);
     }
   });
 

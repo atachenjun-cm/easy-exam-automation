@@ -6,6 +6,7 @@ import {
   operationContentSectionsChanged,
   operationContentSnapshotFromApi,
   operationContentSubjectFillSteps,
+  operationContentTaskTextHasTimeRange,
 } from "./operation_content_runner.mjs";
 
 function desiredSnapshot() {
@@ -103,6 +104,32 @@ test("operation content fills the existing blank subject row before adding anoth
     { action: "add", index: 1 },
     { action: "fill", index: 1, subject: subjects[1] },
   ]);
+});
+
+test("operation content task date check accepts same-day shorthand and full ranges", () => {
+  assert.equal(operationContentTaskTextHasTimeRange(
+    "封场或试考时间 2026-09-02 14:00~17:00",
+    "2026-09-02 14:00",
+    "2026-09-02 17:00",
+  ), true);
+  assert.equal(operationContentTaskTextHasTimeRange(
+    "封场或试考时间 2026/9/2 14:00 - 2026/9/2 17:00",
+    "2026-09-02 14:00",
+    "2026-09-02 17:00",
+  ), true);
+});
+
+test("operation content task date check requires the real end date for cross-day ranges", () => {
+  assert.equal(operationContentTaskTextHasTimeRange(
+    "封场或试考时间： 2026-09-02 14:00~2026-09-03 17:00",
+    "2026-09-02 14:00",
+    "2026-09-03 17:00",
+  ), true);
+  assert.equal(operationContentTaskTextHasTimeRange(
+    "封场或试考时间 2026-09-02 14:00~17:00",
+    "2026-09-02 14:00",
+    "2026-09-03 17:00",
+  ), false);
 });
 
 test("operation content clears rerendering multi-select choices without locator clicks", async () => {

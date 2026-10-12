@@ -1,8 +1,24 @@
+import { projectImplementationDepartmentForPerson } from "./content_email_directory.mjs";
+
 function text(value) {
   return String(value ?? "").trim();
 }
 
 export const OPERATION_BATCH_RECONCILIATION_REQUIRED = "OPERATION_BATCH_RECONCILIATION_REQUIRED";
+
+const OPERATION_BILLING_BASIS_BY_FANWEI_VALUE = new Map([
+  ["按报名科次结算", "按ATA系统报名科次结算"],
+  ["按ATA系统报名科次结算", "按ATA系统报名科次结算"],
+  ["按参考科次结算", "按参考科次结算"],
+  ["按开考科次结算", "按开考科次结算"],
+  ["其他", "其它"],
+  ["其它", "其它"],
+]);
+
+export function normalizeOperationBillingBasis(value = "") {
+  const normalized = text(value);
+  return OPERATION_BILLING_BASIS_BY_FANWEI_VALUE.get(normalized) || normalized;
+}
 
 function field(value, source, label) {
   return { value: text(value), source, label };
@@ -34,18 +50,12 @@ export const OPERATION_PROJECT_DEPARTMENTS = Object.freeze([
   "项目实施三部",
   "项目实施四部",
   "项目实施五部",
-  "悦考在线运维部",
 ]);
 
 const DEFAULT_OPERATION_PROJECT_DEPARTMENT = "项目实施五部";
-const OPERATION_PROJECT_DEPARTMENT_BY_OWNER = new Map([
-  ["chenjun@ata.net.cn", "项目实施一部"],
-  ["siyuanyuan@ata.net.cn", "项目实施三部"],
-]);
 
-export function operationProjectDepartmentForOwner(ownerEmail = "") {
-  return OPERATION_PROJECT_DEPARTMENT_BY_OWNER.get(text(ownerEmail).toLowerCase())
-    || DEFAULT_OPERATION_PROJECT_DEPARTMENT;
+export function operationProjectDepartmentForManager(projectManager = "") {
+  return normalizeOperationProjectDepartment(projectImplementationDepartmentForPerson(projectManager));
 }
 
 export function normalizeOperationProjectDepartment(value = "") {
@@ -53,15 +63,44 @@ export function normalizeOperationProjectDepartment(value = "") {
   return OPERATION_PROJECT_DEPARTMENTS.includes(normalized) ? normalized : "";
 }
 
-export function initializeOperationBatchDefaults(config = {}, ownerEmail = "") {
+function projectManagerFromConfig(config = {}) {
+  return firstNonEmpty(
+    config?.businessRequirement?.project_manager,
+    config?.fanweiSource?.raw?.fields?.["选择项目经理"],
+    config?.fanweiSource?.raw?.fields?.["项目经理"],
+    config?.projectManager,
+  );
+}
+
+function projectDepartmentResolution(config = {}) {
+  const mappedDepartment = operationProjectDepartmentForManager(projectManagerFromConfig(config));
+  const storedDepartment = firstNonEmpty(
+    normalizeOperationProjectDepartment(config?.fanweiSource?.raw?.fields?.["项目部归属"]),
+    normalizeOperationProjectDepartment(config?.operationBatch?.projectDepartmentDefault),
+  );
+  const manual = config?.fanweiSource?.projectDepartmentMode === "manual";
+  return {
+    mappedDepartment,
+    source: manual && storedDepartment ? "manual" : "default_rule",
+    value: firstNonEmpty(
+      manual ? storedDepartment : "",
+      mappedDepartment,
+      storedDepartment,
+      DEFAULT_OPERATION_PROJECT_DEPARTMENT,
+    ),
+  };
+}
+
+export function initializeOperationBatchDefaults(config = {}) {
   const current = config?.operationBatch && typeof config.operationBatch === "object"
     ? config.operationBatch
     : {};
+  const projectDepartment = projectDepartmentResolution(config);
   return {
     ...config,
     operationBatch: {
       ...current,
-      projectDepartmentDefault: operationProjectDepartmentForOwner(ownerEmail),
+      projectDepartmentDefault: projectDepartment.value,
     },
   };
 }
@@ -214,10 +253,7 @@ export function buildOperationBatchDraft(task = {}, overrides = {}) {
   const businessDepartment = operationBusinessDepartment(business.applicant_department);
   const servicePersonnel = personnelServiceFromInvigilatorArrangement(business.ata_invigilator_arrangement);
   const contentService = contentServiceFromParticipation(business.ata_content_participation);
-  const projectDepartment = firstNonEmpty(
-    task.config?.operationBatch?.projectDepartmentDefault,
-    DEFAULT_OPERATION_PROJECT_DEPARTMENT,
-  );
+  const projectDepartment = projectDepartmentResolution(task.config);
   const projectName = firstNonEmpty(
     business.project_name,
     task.projectName,
@@ -239,7 +275,7 @@ export function buildOperationBatchDraft(task = {}, overrides = {}) {
       batchNameMode === "manual" ? "manual" : (business.batch_name ? "business_requirement" : "default_rule"),
       "批次名称",
     ),
-    projectDepartment: field(projectDepartment, "default_rule", "项目部归属"),
+    projectDepartment: field(projectDepartment.value, projectDepartment.source, "项目部归属"),
     examStartDate: field(dates.start, dateSource, "考试开始日期"),
     examEndDate: field(dates.end, dateSource, "考试结束日期"),
     serviceExam: field(systemType === "易考" ? "易考" : systemType, "default_rule", "考试服务"),
@@ -253,12 +289,16 @@ export function buildOperationBatchDraft(task = {}, overrides = {}) {
     stationUsage: field(noCentralVenue ? "无需考站" : "", noCentralVenue ? "default_rule" : "manual", "使用考站情况"),
     arrangementService: field(systemType === "易考" ? "其它" : "", systemType === "易考" ? "default_rule" : "manual", "编排服务"),
     onlineSettlementArrangementSource: field(systemType === "易考" ? "其它" : "", systemType === "易考" ? "default_rule" : "manual", "在线结算编排来源"),
-    billingBasis: field(business.billing_basis, "business_requirement", "结算依据"),
+    billingBasis: field(normalizeOperationBillingBasis(business.billing_basis), "business_requirement", "结算依据"),
     remark: field("", "manual", "备注"),
   };
   for (const [key, value] of Object.entries(overrides.fields || {})) {
     // Source-owned fields must win over stale persisted draft values.
-    if (["projectName", "batchName", "examStartDate", "examEndDate", "servicePersonnel"].includes(key) || !fields[key]) continue;
+    if (
+      ["projectName", "batchName", "examStartDate", "examEndDate", "servicePersonnel", "billingBasis"].includes(key)
+      || (key === "projectDepartment" && projectDepartment.mappedDepartment && projectDepartment.source !== "manual")
+      || !fields[key]
+    ) continue;
     // A failed clipboard/encoding path can persist replacement characters in a manual override.
     // Keep the source value so the corrupted text cannot reach the operation console.
     if (hasOperationBatchTextReplacementCharacter(value)) continue;
@@ -267,7 +307,11 @@ export function buildOperationBatchDraft(task = {}, overrides = {}) {
       fields[key] = { ...fields[key], ...businessDepartmentOverride };
       continue;
     }
-    fields[key] = { ...fields[key], value: text(value), source: "manual" };
+    fields[key] = {
+      ...fields[key],
+      value: key === "billingBasis" ? normalizeOperationBillingBasis(value) : text(value),
+      source: "manual",
+    };
   }
   fields.operationTaskSerial.required = true;
   fields.batchName.required = true;

@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import { normalizeOperationBillingBasis } from "./operation_batch.mjs";
+
 function text(value) {
   return String(value ?? "").trim();
 }
@@ -126,12 +128,8 @@ export function operationDropdownValueCandidates(label, value) {
   const normalizedLabel = text(label);
   const normalizedValue = text(value);
   if (!normalizedValue) return [];
-  const aliases = {
-    结算依据: {
-      按报名科次结算: ["按开考科次结算"],
-    },
-  };
-  return [normalizedValue, ...(aliases[normalizedLabel]?.[normalizedValue] || [])];
+  if (normalizedLabel === "结算依据") return [normalizeOperationBillingBasis(normalizedValue)];
+  return [normalizedValue];
 }
 
 export function operationBatchCodeFromText(value) {

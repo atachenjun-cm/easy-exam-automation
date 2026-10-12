@@ -53,15 +53,28 @@ export function operationPersonnelRecipientGroupMatches(actual, expected) {
 export function operationPersonnelRecipientRule(options = {}) {
   const batch = options.target?.batch || options.batch || {};
   const recipients = options.recipients || options.target?.recipients || {};
-  const toGroup = text(recipients.toGroup || batch.projectDepartment);
+  const fallbackGroup = text(recipients.toGroup || batch.projectDepartment);
   const toNames = Array.isArray(recipients.toNames) ? recipients.toNames.map(text).filter(Boolean) : [];
-  const toName = text(toNames[0] || batch.projectManager);
-  if (!toGroup || !toName || toNames.length > 1) {
-    throw operationConflict("发送规则必须包含唯一的项目部归属和项目经理");
+  const explicitPeople = Array.isArray(recipients.toPeople) ? recipients.toPeople : [];
+  const toPeople = (explicitPeople.length
+    ? explicitPeople
+    : (toNames.length ? toNames : [batch.projectManager]).map((name) => ({
+        group: fallbackGroup,
+        name,
+      })))
+    .map((person) => ({
+      group: text(person?.group || person?.department || fallbackGroup),
+      name: text(person?.name),
+      email: text(person?.email).toLowerCase(),
+    }))
+    .filter((person) => person.group && person.name);
+  if (!toPeople.length) {
+    throw operationConflict("发送规则必须至少包含一位项目部收件人");
   }
   return {
-    toGroup,
-    toName,
+    toGroup: toPeople[0].group,
+    toName: toPeople[0].name,
+    toPeople,
     ccGroup: PERSONNEL_CC_GROUPS[0],
     ccGroups: [...PERSONNEL_CC_GROUPS],
     ccCount: 0,
@@ -82,14 +95,27 @@ export function operationPersonnelMailSelectionTarget(recipients = {}, rule = {}
     .filter((item) => text(item?.kind) === "group")
     .map((item) => text(item?.name))
     .filter(Boolean);
+  const requestedPeople = Array.isArray(rule.toPeople) ? rule.toPeople : [];
+  const recipientGroups = new Map();
+  for (const item of recipients.to || []) {
+    if (text(item?.kind) === "group") continue;
+    const email = text(item?.id).toLowerCase();
+    const requested = requestedPeople.find((person) => (
+      (person.email && person.email === email) || person.name === text(item?.name)
+    ));
+    const group = text(item?.group || requested?.group || rule.toGroup);
+    if (!email || !group) continue;
+    if (!recipientGroups.has(group)) recipientGroups.set(group, []);
+    recipientGroups.get(group).push(email);
+  }
   return {
     recipients: toEmails,
     cc: ccEmails,
     directoryGroups: {
-      recipients: toEmails.length ? [{
-        name: projectManagerDirectoryGroup(rule.toGroup),
-        emails: toEmails,
-      }] : [],
+      recipients: [...recipientGroups].map(([group, emails]) => ({
+        name: projectManagerDirectoryGroup(group),
+        emails,
+      })),
       cc: ccEmails.length ? [{ name: text(rule.ccGroup), emails: ccEmails }] : [],
     },
     selectedGroups: { recipients: [], cc: ccGroups },
@@ -361,8 +387,12 @@ function exactGroup(groups, name) {
   return resolved[0];
 }
 
-function exactPerson(group, name) {
-  const matches = [...(group.people || [])].filter((person) => text(person?.name) === name);
+function exactPerson(group, name, email = "") {
+  const expectedEmail = text(email).toLowerCase();
+  const matches = [...(group.people || [])].filter((person) => (
+    text(person?.name) === name
+    && (!expectedEmail || text(person?.id).toLowerCase() === expectedEmail)
+  ));
   if (matches.length !== 1) {
     throw new Error(`${text(group.name)}中的“${name}”必须精确匹配 1 人，实际 ${matches.length} 人`);
   }
@@ -384,8 +414,20 @@ function groupRecipient(name) {
 export function matchOperationPersonnelRecipients(options = {}) {
   const rule = operationPersonnelRecipientRule(options);
   const groups = [...(options.groups || [])];
-  const toGroup = exactGroup(groups, rule.toGroup);
-  const to = [recipient(exactPerson(toGroup, rule.toName))];
+  const seen = new Set();
+  const to = rule.toPeople.map((requested) => {
+    const toGroup = exactGroup(groups, requested.group);
+    const matched = {
+      group: requested.group,
+      ...recipient(exactPerson(toGroup, requested.name, requested.email)),
+    };
+    const key = text(matched.id).toLowerCase();
+    if (!key || seen.has(key)) {
+      throw new Error(`人员任务收件人存在重复项：${requested.name}`);
+    }
+    seen.add(key);
+    return matched;
+  });
   if (!rule.ccGroups.length) return { to, cc: [] };
   const ccGroups = rule.ccGroups.map((groupName) => exactGroup(groups, groupName));
   if (rule.ccGroupOnly) return { to, cc: ccGroups.map((group) => groupRecipient(group.name)) };
@@ -403,7 +445,7 @@ export function matchOperationPersonnelRecipients(options = {}) {
 
 function directoryMatch(rule, matched) {
   return {
-    to: matched.to.map((item) => ({ group: rule.toGroup, ...item })),
+    to: matched.to.map((item) => ({ group: text(item.group || rule.toGroup), ...item })),
     cc: matched.cc.map((item) => ({
       group: item.kind === "group" ? item.name : rule.ccGroup,
       ...item,
@@ -2342,6 +2384,14 @@ async function readVisiblePersonnelPageSection(page, key) {
   return snapshot[key];
 }
 
+function visiblePersonnelRequirementValue(value) {
+  return text(value).replace(/\s+/g, " ");
+}
+
+function visiblePersonnelRequirementMatches(actual, expected) {
+  return visiblePersonnelRequirementValue(actual) === visiblePersonnelRequirementValue(expected);
+}
+
 export async function waitForVisiblePersonnelRequirements(page, target = [], options = {}) {
   const expected = target.map((item) => ({
     name: text(item.name),
@@ -2359,12 +2409,18 @@ export async function waitForVisiblePersonnelRequirements(page, target = [], opt
     }));
     actual = operationPersonnelPageFromVisibleRaw(raw).requirements;
     const actualByName = new Map(actual.map((item) => [text(item.name), text(item.value)]));
-    if (expected.every((item) => actualByName.get(item.name) === item.value)) return expected;
+    if (expected.every((item) => visiblePersonnelRequirementMatches(
+      actualByName.get(item.name),
+      item.value,
+    ))) return expected;
     if (attempt + 1 < maxChecks) await page.waitForTimeout(pollMs);
   }
   const actualByName = new Map(actual.map((item) => [text(item.name), text(item.value)]));
   const missing = expected
-    .filter((item) => actualByName.get(item.name) !== item.value)
+    .filter((item) => !visiblePersonnelRequirementMatches(
+      actualByName.get(item.name),
+      item.value,
+    ))
     .map((item) => item.name)
     .join("、");
   throw operationConflict(`考务需求保存后未生效：${missing}`);
@@ -2679,13 +2735,51 @@ export async function fillVisiblePersonnelConfiguration(
   await assertVisiblePersonnelDateInputs(dialog, dates);
 }
 
+async function visiblePersonnelConfigFeedback(page, dialog) {
+  const locators = [
+    dialog.locator(".ant-form-explain:visible"),
+    page.locator(
+      ".ant-message-notice-content:visible, "
+        + ".ant-notification-notice-message:visible, "
+        + ".ant-notification-notice-description:visible",
+    ),
+  ];
+  const values = [];
+  for (const locator of locators) {
+    if (typeof locator?.allTextContents !== "function") continue;
+    values.push(...await locator.allTextContents());
+  }
+  return [...new Set(values.map(text).filter(Boolean))]
+    .filter((value) => value !== "保存成功");
+}
+
+export async function waitForVisiblePersonnelConfigSave(page, dialog, options = {}) {
+  const maxChecks = Math.max(1, Number(options.maxChecks || 101));
+  const pollMs = Math.max(0, Number(options.pollMs ?? 100));
+  for (let attempt = 0; attempt < maxChecks; attempt += 1) {
+    const visible = typeof dialog?.isVisible === "function"
+      ? await dialog.isVisible()
+      : await dialog.count() > 0;
+    if (!visible) return;
+    const feedback = await visiblePersonnelConfigFeedback(page, dialog);
+    if (feedback.length) {
+      throw operationConflict(`配置项保存失败：${feedback.join("；")}`);
+    }
+    if (attempt + 1 < maxChecks && typeof page?.waitForTimeout === "function") {
+      await page.waitForTimeout(pollMs);
+    }
+  }
+  throw operationConflict("配置项点击确定后未关闭，运控未返回可识别的保存结果");
+}
+
 async function confirmVisiblePersonnelConfig(page, dialog) {
+  if (typeof page?.waitForTimeout === "function") await page.waitForTimeout(250);
   await clickUniqueNamedButton(
     dialog,
     ["确 定", "确定"],
     "在线监考配置项确定按钮",
   );
-  await dialog.waitFor({ state: "hidden", timeout: 10_000 });
+  await waitForVisiblePersonnelConfigSave(page, dialog);
   await readVisiblePersonnelPage(page);
 }
 
@@ -3101,7 +3195,7 @@ export async function openVisiblePersonnelMailDialog(page, instruction = {}) {
   const changeSummary = text(
     instruction.changeSummary || instruction.directoryProbeSummary,
   );
-  if (instruction.kind === "resend" || changeSummary) {
+  if (instruction.kind === "resend") {
     await fillVisiblePersonnelTaskChangeSummary(page, changeSummary);
   }
 
@@ -3336,7 +3430,10 @@ const VISIBLE_OPERATION_PERSONNEL_ADAPTER = Object.freeze({
     );
     const currentByName = new Map(current.map((item) => [text(item.name), text(item.value)]));
     for (const item of target) {
-      if (currentByName.get(text(item.name)) === text(item.value)) continue;
+      if (visiblePersonnelRequirementMatches(
+        currentByName.get(text(item.name)),
+        item.value,
+      )) continue;
       const row = await exactVisibleRequirementRow(drawer, item.name);
       const input = await uniqueVisibleControl(
         row.locator("textarea:visible"),

@@ -15,6 +15,40 @@ function text(value) {
   return String(value ?? "").trim();
 }
 
+function operationContentDateTimeParts(value) {
+  const match = text(value).match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{2})(?::\d{2})?/);
+  if (!match) return null;
+  return {
+    year: match[1],
+    month: String(Number(match[2])),
+    day: String(Number(match[3])),
+    time: `${match[4].padStart(2, "0")}:${match[5]}`,
+  };
+}
+
+function operationContentDatePattern(parts) {
+  return `${parts.year}[/-]0?${parts.month}[/-]0?${parts.day}`;
+}
+
+export function operationContentTaskTextHasTimeRange(taskText, startValue, endValue) {
+  const start = operationContentDateTimeParts(startValue);
+  const end = operationContentDateTimeParts(endValue);
+  if (!start || !end) return false;
+  const sameDay = start.year === end.year && start.month === end.month && start.day === end.day;
+  const startPattern = `${operationContentDatePattern(start)}\\s+${start.time}(?::\\d{2})?`;
+  const endDatePattern = `${operationContentDatePattern(end)}\\s+`;
+  const endPattern = `${sameDay ? `(?:${endDatePattern})?` : endDatePattern}${end.time}(?::\\d{2})?`;
+  return new RegExp(`封场或试考时间\\s*[：:]?\\s*${startPattern}\\s*(?:~|～|至|到|-|–|—)\\s*${endPattern}`).test(text(taskText));
+}
+
+function operationContentTimeRangeLabel(startValue, endValue) {
+  const start = operationContentDateTimeParts(startValue);
+  const end = operationContentDateTimeParts(endValue);
+  if (!start || !end) return "";
+  const display = (parts) => `${parts.year}-${parts.month.padStart(2, "0")}-${parts.day.padStart(2, "0")} ${parts.time}`;
+  return `${display(start)}~${display(end)}`;
+}
+
 function runnerError(code, message, status = 409) {
   const error = new Error(message);
   error.code = code;
@@ -423,8 +457,13 @@ function normalizeDispatchDirectoryGroups(value = {}, expectedBySection = {}) {
 
 export function normalizeOperationContentDispatchTarget(input = {}) {
   const recipients = emailList(input.recipients || input.to);
+  const cc = emailList(input.cc);
   const recipientSet = new Set(recipients);
-  const cc = emailList(input.cc).filter((email) => !recipientSet.has(email));
+  for (const group of Array.isArray(input.directoryGroups?.cc) ? input.directoryGroups.cc : []) {
+    for (const email of emailList(group?.emails)) {
+      if (recipientSet.has(email) && !cc.includes(email)) cc.push(email);
+    }
+  }
   const invalid = [...recipients, ...cc].filter((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
   if (!recipients.length) {
     throw runnerError("OPERATION_CONTENT_RECIPIENTS_REQUIRED", "内容任务单至少需要一个收件人", 400);
@@ -885,20 +924,20 @@ export async function prepareOperationContentTaskSheet(draft = {}, targetInput =
   const taskText = await taskDialog.innerText();
   const trialStart = text(draft.configuration?.closureStart);
   const trialEnd = text(draft.configuration?.closureEnd);
-  const trialStartMatch = trialStart.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})/);
-  const trialEndMatch = trialEnd.match(/(\d{2}:\d{2})(?::\d{2})?$/);
-  const expectedTrialRange = trialStartMatch && trialEndMatch
-    ? `${trialStartMatch[1]} ${trialStartMatch[2]}~${trialEndMatch[1]}`
-    : "";
   for (const [label, value] of [
     ["项目编码", target.projectCode],
     ["批次名称", draft.batch.name],
-    ...(expectedTrialRange ? [["封场或试考时间", expectedTrialRange]] : []),
     ...draft.subjects.map((subject) => ["科目", subject.name]),
   ]) {
     if (!value || !taskText.includes(value)) {
       throw runnerError("OPERATION_CONTENT_TASK_IDENTITY_MISMATCH", `内容任务单${label}不匹配：${value || "未提供"}`);
     }
+  }
+  if (!operationContentTaskTextHasTimeRange(taskText, trialStart, trialEnd)) {
+    throw runnerError(
+      "OPERATION_CONTENT_TASK_IDENTITY_MISMATCH",
+      `内容任务单封场或试考时间不匹配：${operationContentTimeRangeLabel(trialStart, trialEnd) || "未提供"}`,
+    );
   }
   const beforeSendRecords = await readOperationContentTaskSendRecords(page);
   const sendKind = options.sendKind === "resend"

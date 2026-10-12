@@ -345,6 +345,56 @@ function paperDisplayValues(papers = []) {
   }).filter(Boolean);
 }
 
+function normalizedDateTimeToken(value) {
+  const match = text(value).match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})\s+(\d{1,2}):(\d{2})/);
+  if (!match) return "";
+  return [
+    match[1],
+    match[2].padStart(2, "0"),
+    match[3].padStart(2, "0"),
+    match[4].padStart(2, "0"),
+    match[5],
+  ].join("");
+}
+
+function normalizedRequirementTimeRange(value) {
+  const source = text(value);
+  const matches = [...source.matchAll(/\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?/g)]
+    .slice(0, 2)
+    .map((match) => normalizedDateTimeToken(match[0]));
+  if (matches.length !== 1) return matches;
+  const firstMatch = source.match(/\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?/);
+  const suffix = firstMatch ? source.slice(Number(firstMatch.index || 0) + firstMatch[0].length) : "";
+  const endTime = suffix.match(/^\s*(?:-|~|至|—|–)\s*(\d{1,2}):(\d{2})(?::\d{2})?/);
+  if (endTime) matches.push(`${matches[0].slice(0, 8)}${endTime[1].padStart(2, "0")}${endTime[2]}`);
+  return matches;
+}
+
+function requirementTimeRange(current = {}) {
+  return `${text(current.start)}-${text(current.end)}`;
+}
+
+function requirementTimeDiff(task = {}, session = {}, current = {}, availableFields = []) {
+  if (!availableFields.includes("start") && !availableFields.includes("end")) return [];
+  const requirement = requirementForSession(task, session);
+  if (!Object.keys(requirement).length) return [];
+  const isTrial = text(session.sessionType || session.session_type) === "trial";
+  const fieldName = isTrial ? "试考日期时间" : "考试日期时间";
+  const before = text(objectValue(requirement.fields)[fieldName]);
+  if (!before) return [];
+  const after = requirementTimeRange(current);
+  const beforeRange = normalizedRequirementTimeRange(before);
+  const afterRange = normalizedRequirementTimeRange(after);
+  if (beforeRange.length === 2 && afterRange.length === 2 && beforeRange.every((value, index) => value === afterRange[index])) return [];
+  return [{
+    field: `requirement.${isTrial ? "trial" : "formal"}_time_range`,
+    label: `需求单 · ${fieldName}`,
+    before,
+    after,
+    group: "requirement",
+  }];
+}
+
 function storedSessionSnapshot(task = {}, sessionId = "") {
   const snapshot = task.config?.sessionSync?.snapshots?.[text(sessionId)];
   return objectValue(snapshot);
@@ -444,6 +494,7 @@ export function buildSessionSyncPreview(task = {}, session = {}, detail = {}, ch
   const sessionDiff = buildSessionChangeDiff(local, current)
     .filter((item) => availableFields.includes(item.field))
     .map((item) => ({ ...item, group: "session" }));
+  const requirementDiff = requirementTimeDiff(task, session, current, availableFields);
   const configuration = sessionConfigurationSnapshotFromDetail(detail);
   const localOptions = effectiveLocalSessionOptions(task, session);
   const configurationDiff = configuration.items
@@ -464,11 +515,14 @@ export function buildSessionSyncPreview(task = {}, session = {}, detail = {}, ch
     name: text(paper?.name || paper?.paper_name),
   })).filter((paper) => paper.code || paper.name);
   const storedCourses = localCourses(task, session);
-  const coursesForSync = mergeCourseRecords(storedCourses, currentCourses);
+  const courseReadComplete = inventory.courseReadComplete === true;
+  const coursesForSync = courseReadComplete
+    ? currentCourses
+    : mergeCourseRecords(storedCourses, currentCourses);
   const boundPapers = boundPaperRecordsForSession(task, session);
   const storedPapers = boundPapers.length ? boundPapers : paperRecordsFromCourses(storedCourses);
   const isFormal = text(session.sessionType || session.session_type) === "formal";
-  const courseDiff = isFormal && currentCourses.length && listSignature(storedCourses, ["code", "name"]) !== listSignature(coursesForSync, ["code", "name"])
+  const courseDiff = isFormal && (courseReadComplete || currentCourses.length) && listSignature(storedCourses, ["code", "name"]) !== listSignature(coursesForSync, ["code", "name"])
     ? [{
         field: "courses",
         label: "科目信息",
@@ -486,7 +540,7 @@ export function buildSessionSyncPreview(task = {}, session = {}, detail = {}, ch
         group: "papers",
       }]
     : [];
-  const diff = [...sessionDiff, ...courseDiff, ...paperDiff, ...configurationDiff];
+  const diff = [...sessionDiff, ...requirementDiff, ...courseDiff, ...paperDiff, ...configurationDiff];
   return {
     sessionId: text(session.session_id || session.id),
     sessionType: text(session.sessionType || session.session_type),
@@ -502,6 +556,7 @@ export function buildSessionSyncPreview(task = {}, session = {}, detail = {}, ch
     papers: currentPapers,
     unmatchedPapers: Array.isArray(inventory.unmatchedPapers) ? structuredClone(inventory.unmatchedPapers) : [],
     courseReadMode: text(inventory.courseReadMode),
+    courseReadComplete,
     readbackSummary: {
       courseCount: currentCourses.length,
       paperCount: currentPapers.length,
@@ -525,6 +580,7 @@ export function sessionSyncListCacheFromPreview(preview = {}) {
       differenceCount,
       changed: differenceCount > 0,
       error: text(session?.error),
+      readbackWarning: text(session?.readbackWarning),
     };
   });
   return {
@@ -574,6 +630,8 @@ export function sessionSyncDetailCacheFromPreview(preview = {}) {
       },
       courses,
       papers,
+      courseReadMode: text(session?.courseReadMode),
+      courseReadComplete: session?.courseReadComplete === true,
       configuration: { items: configurationItems },
       diff,
       changed: diff.length > 0,
@@ -674,6 +732,9 @@ export function buildSessionSyncConfigPatch(task = {}, input = {}) {
   }
   if (availableFields.includes("start")) config[isTrial ? "mockStartTimeDisplay" : "startTimeDisplay"] = current.start;
   if (availableFields.includes("end")) config[isTrial ? "mockEndTimeDisplay" : "endTimeDisplay"] = current.end;
+  if (availableFields.includes("start") || availableFields.includes("end")) {
+    fields[isTrial ? "试考日期时间" : "考试日期时间"] = requirementTimeRange(current);
+  }
   if (!isTrial && availableFields.includes("early")) {
     config.earlyLoginMinutes = current.early;
     fields["提前登录时间"] = current.early === "" ? "" : `${current.early}分钟`;

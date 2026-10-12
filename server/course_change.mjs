@@ -1,3 +1,7 @@
+import { ensureFormalCoursesCreated } from "./course_creation.mjs";
+import { bindCoursesToFormalSession } from "./course_session_binding.mjs";
+import { unbindCoursesFromManagerSession } from "./course_session_unbinding.mjs";
+
 function text(value) {
   return String(value ?? "").trim();
 }
@@ -220,6 +224,23 @@ function formCodesFromDetail(payload) {
   )))];
 }
 
+function sessionBindingsFromDetail(payload) {
+  const detail = unwrapCourseDetail(payload);
+  return (Array.isArray(detail.res) ? detail.res : [])
+    .map((session) => {
+      const sessionId = text(session?.id || session?.session_id || session?.sessionId);
+      if (!sessionId) return null;
+      const entriesCount = Number(session?.entries_count ?? session?.entriesCount);
+      const courseEntries = Number(session?.course_entries ?? session?.courseEntries);
+      return {
+        session_id: sessionId,
+        entries_count: Number.isFinite(entriesCount) ? entriesCount : null,
+        course_entries: Number.isFinite(courseEntries) ? courseEntries : null,
+      };
+    })
+    .filter(Boolean);
+}
+
 export async function fetchTenantCourseSnapshot({ apiBase, code, requestJson, login }) {
   const base = text(apiBase).replace(/\/+$/, "");
   const courseCode = text(code);
@@ -251,11 +272,14 @@ export async function fetchTenantCourseSnapshot({ apiBase, code, requestJson, lo
     error.status = 502;
     throw error;
   }
+  const sessionBindings = sessionBindingsFromDetail(sessionPayload);
   return {
     code: actualCode,
     name,
     form_codes: formCodesFromDetail(formPayload),
-    session_count: Array.isArray(detail.res) ? detail.res.length : 0,
+    session_count: sessionBindings.length,
+    session_ids: sessionBindings.map((session) => session.session_id),
+    session_bindings: sessionBindings,
   };
 }
 
@@ -280,14 +304,74 @@ export function buildCourseChangePlan(snapshots = [], requestedNames = []) {
   const names = normalizeCourseChangeNames(requestedNames);
   if (!names.length) throw validationError("科目信息不能为空。");
   if (!Array.isArray(snapshots) || !snapshots.length) throw validationError("未找到已创建的易考科目。");
-  if (names.length !== snapshots.length) {
-    throw validationError(`当前已创建 ${snapshots.length} 个科目，本次提交 ${names.length} 个；为避免影响现有绑定，仅支持科目数量不变时修改名称。`);
+  if (new Set(names).size !== names.length) {
+    throw validationError("科目名称不能重复。");
   }
-  return snapshots.map((snapshot, index) => ({
-    before: snapshot,
-    afterName: names[index],
-    changed: text(snapshot.name) !== names[index],
-  }));
+
+  const usedSnapshotIndexes = new Set();
+  const items = new Array(names.length);
+  for (const [desiredIndex, name] of names.entries()) {
+    const snapshotIndex = snapshots.findIndex((snapshot, index) => (
+      !usedSnapshotIndexes.has(index) && text(snapshot?.name) === name
+    ));
+    if (snapshotIndex < 0) continue;
+    usedSnapshotIndexes.add(snapshotIndex);
+    items[desiredIndex] = {
+      before: snapshots[snapshotIndex],
+      beforeIndex: snapshotIndex,
+      desiredIndex,
+      afterName: name,
+      changed: false,
+      reordered: snapshotIndex !== desiredIndex,
+      added: false,
+      removed: false,
+    };
+  }
+
+  const remainingSnapshots = snapshots
+    .map((snapshot, index) => ({ snapshot, index }))
+    .filter(({ index }) => !usedSnapshotIndexes.has(index));
+  for (const [desiredIndex, name] of names.entries()) {
+    if (items[desiredIndex]) continue;
+    const next = remainingSnapshots.shift();
+    if (!next) {
+      items[desiredIndex] = {
+        before: null,
+        beforeIndex: -1,
+        desiredIndex,
+        afterName: name,
+        changed: true,
+        reordered: false,
+        added: true,
+        removed: false,
+      };
+      continue;
+    }
+    items[desiredIndex] = {
+      before: next.snapshot,
+      beforeIndex: next.index,
+      desiredIndex,
+      afterName: name,
+      changed: text(next.snapshot?.name) !== name,
+      reordered: next.index !== desiredIndex,
+      added: false,
+      removed: false,
+    };
+  }
+
+  return [
+    ...items,
+    ...remainingSnapshots.map(({ snapshot, index }) => ({
+      before: snapshot,
+      beforeIndex: index,
+      desiredIndex: -1,
+      afterName: "",
+      changed: true,
+      reordered: false,
+      added: false,
+      removed: true,
+    })),
+  ];
 }
 
 function sameStringList(left = [], right = []) {
@@ -303,61 +387,258 @@ export async function applyTenantCourseChanges({
   requestJson,
   login,
   emitLog = () => {},
+  sessionId = "",
+  creationConfig = {},
+  onCoursesEnsured = async () => {},
+  ensureCoursesCreated = ensureFormalCoursesCreated,
+  bindCourses = bindCoursesToFormalSession,
+  unbindCourses = unbindCoursesFromManagerSession,
+  managerFetch = fetch,
 }) {
   const base = text(apiBase).replace(/\/+$/, "");
   const plan = buildCourseChangePlan(snapshots, requestedNames);
-  const verified = [];
-  for (const item of plan) {
-    if (!item.changed) {
-      verified.push(item.before);
-      continue;
+  const desiredPlan = plan.filter((item) => !item.removed);
+  const additions = desiredPlan.filter((item) => item.added);
+  const removals = plan.filter((item) => item.removed);
+  const targetSessionId = text(sessionId);
+  if ((additions.length || removals.length) && !targetSessionId) {
+    throw validationError("缺少正式考试场次编号，不能增减科目。");
+  }
+  for (const item of removals) {
+    const otherSessionIds = (item.before.session_ids || []).filter((id) => text(id) !== targetSessionId);
+    if (otherSessionIds.length) {
+      throw validationError(`科目 ${item.before.name} / ${item.before.code} 还绑定了其他场次，不能自动删除。`);
     }
-    const payload = {
-      code: item.before.code,
-      name: item.afterName,
-      form_codes: item.before.form_codes,
-    };
-    await requestJson(
-      login,
-      `${base}/tenant/api/course/`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      },
-      `修改科目 ${item.before.code}`,
-    );
-    emitLog(`已调用易考接口修改科目：${item.before.name} → ${item.afterName} / ${item.before.code}`);
-    const snapshot = await fetchTenantCourseSnapshot({
+    const targetBinding = (item.before.session_bindings || [])
+      .find((binding) => text(binding.session_id) === targetSessionId);
+    const assignedCount = targetBinding?.course_entries ?? targetBinding?.entries_count ?? 0;
+    if (Number(assignedCount) > 0) {
+      throw validationError(`科目 ${item.before.name} / ${item.before.code} 已有 ${assignedCount} 名考生，不能自动删除。`);
+    }
+  }
+
+  let remoteModified = false;
+  try {
+    const preparedCourses = new Array(desiredPlan.length);
+    for (const item of desiredPlan) {
+      if (item.added) continue;
+      if (!item.changed) {
+        preparedCourses[item.desiredIndex] = item.before;
+        continue;
+      }
+      const payload = {
+        code: item.before.code,
+        name: item.afterName,
+        form_codes: item.before.form_codes,
+      };
+      await requestJson(
+        login,
+        `${base}/tenant/api/course/`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        `修改科目 ${item.before.code}`,
+      );
+      remoteModified = true;
+      emitLog(`已调用易考接口修改科目：${item.before.name} → ${item.afterName} / ${item.before.code}`);
+      const snapshot = await fetchTenantCourseSnapshot({
+        apiBase: base,
+        code: item.before.code,
+        requestJson,
+        login,
+      });
+      if (snapshot.name !== item.afterName) {
+        const error = new Error(`科目 ${item.before.code} 回查名称不一致，修改未确认完成。`);
+        error.status = 502;
+        throw error;
+      }
+      if (!sameStringList(snapshot.form_codes, item.before.form_codes)) {
+        const error = new Error(`科目 ${item.before.code} 的试卷绑定回查不一致，修改未确认完成。`);
+        error.status = 502;
+        throw error;
+      }
+      emitLog(`已回查确认科目：${snapshot.name} / ${snapshot.code}，保留 ${snapshot.form_codes.length} 个试卷绑定`);
+      preparedCourses[item.desiredIndex] = snapshot;
+    }
+    const removalSnapshots = removals.map((item) => item.before);
+    if (desiredPlan.some((item) => item.changed && !item.added)) {
+      await onCoursesEnsured([...preparedCourses.filter(Boolean), ...removalSnapshots]);
+    }
+
+    let ensuredCourses = preparedCourses.filter(Boolean);
+    if (additions.length) {
+      const requestedCourses = desiredPlan.map((item) => (
+        item.added
+          ? { name: item.afterName, order: item.desiredIndex + 1 }
+          : { ...preparedCourses[item.desiredIndex], name: item.afterName, order: item.desiredIndex + 1 }
+      ));
+      ensuredCourses = await ensureCoursesCreated({
+        login,
+        apiBase: base,
+        config: { ...creationConfig, courses: requestedCourses },
+        existingProjectCourses: preparedCourses.filter(Boolean),
+        requestJson,
+        emitLog,
+        onCourseCreated: async (partialCourses) => {
+          remoteModified = true;
+          await onCoursesEnsured([...partialCourses, ...removalSnapshots]);
+        },
+      });
+      if (ensuredCourses.length !== desiredPlan.length) {
+        const error = new Error("新增科目后回传的科目数量不完整，已停止后续绑定。");
+        error.status = 502;
+        throw error;
+      }
+      await onCoursesEnsured([...ensuredCourses, ...removalSnapshots]);
+    }
+
+    let verified = await fetchTenantCourseSnapshots({
       apiBase: base,
-      code: item.before.code,
+      courses: ensuredCourses,
       requestJson,
       login,
+      emitLog,
     });
-    if (snapshot.name !== item.afterName) {
-      const error = new Error(`科目 ${item.before.code} 回查名称不一致，修改未确认完成。`);
+    const missingBindings = targetSessionId
+      ? verified.filter((course) => !course.session_ids.includes(targetSessionId))
+      : [];
+    let bindResult = { status: "success", results: [], skipped: true };
+    if (missingBindings.length) {
+      bindResult = await bindCourses({
+        login,
+        apiBase: base,
+        sessionId: targetSessionId,
+        courses: missingBindings,
+        requestJson,
+        emitLog,
+      });
+      remoteModified = true;
+      verified = await fetchTenantCourseSnapshots({
+        apiBase: base,
+        courses: ensuredCourses,
+        requestJson,
+        login,
+        emitLog,
+      });
+    }
+    const stillUnbound = targetSessionId
+      ? verified.filter((course) => !course.session_ids.includes(targetSessionId))
+      : [];
+    if (stillUnbound.length) {
+      const error = new Error(`科目 ${stillUnbound.map((course) => course.code).join("、")} 未回查到正式场次绑定，已停止更新。`);
       error.status = 502;
       throw error;
     }
-    if (!sameStringList(snapshot.form_codes, item.before.form_codes)) {
-      const error = new Error(`科目 ${item.before.code} 的试卷绑定回查不一致，修改未确认完成。`);
+
+    if (removals.length) {
+      const removedCodes = removals.map((item) => item.before.code);
+      const unbindResult = await unbindCourses({
+        login,
+        sessionId: targetSessionId,
+        courseCodes: removedCodes,
+        fetchImpl: managerFetch,
+        emitLog,
+      });
+      if (unbindResult?.changed) remoteModified = true;
+      for (const item of removals) {
+        const snapshot = await fetchTenantCourseSnapshot({
+          apiBase: base,
+          code: item.before.code,
+          requestJson,
+          login,
+        });
+        if (snapshot.session_ids.includes(targetSessionId)) {
+          const error = new Error(`科目 ${item.before.code} 仍绑定正式考试场次 ${targetSessionId}，已停止删除。`);
+          error.status = 502;
+          throw error;
+        }
+      }
+      emitLog(`已回查确认 ${removedCodes.length} 个科目解除正式场次绑定`);
+      for (const [index, item] of removals.entries()) {
+        const code = item.before.code;
+        await requestJson(
+          login,
+          `${base}/tenant/api/course/`,
+          {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ codes: [code] }),
+          },
+          `删除科目 ${code}`,
+        );
+        remoteModified = true;
+        emitLog(`已调用易考接口删除科目：${code}`);
+        try {
+          await requestJson(
+            login,
+            `${base}/tenant/api/courses/${encodeURIComponent(code)}/?apply=session`,
+            { method: "GET" },
+            `确认科目已删除 ${code}`,
+          );
+          const error = new Error(`科目 ${code} 删除后仍可查询，删除未确认完成。`);
+          error.status = 502;
+          throw error;
+        } catch (error) {
+          if (error?.status !== 404) throw error;
+        }
+        emitLog(`已回查确认删除科目：${code}`);
+        const pendingRemovalSnapshots = removals.slice(index + 1).map((pending) => pending.before);
+        await onCoursesEnsured([...verified, ...pendingRemovalSnapshots]);
+      }
+    }
+
+    const finalNames = verified.map((course) => course.name);
+    const requested = normalizeCourseChangeNames(requestedNames);
+    if (!sameStringList(finalNames, requested)) {
+      const error = new Error("易考科目回查结果与提交内容不一致，已停止更新。");
       error.status = 502;
       throw error;
     }
-    emitLog(`已回查确认科目：${snapshot.name} / ${snapshot.code}，保留 ${snapshot.form_codes.length} 个试卷绑定`);
-    verified.push(snapshot);
+    const orderedCourses = requested.map((name, index) => ({
+      ...verified.find((course) => course.name === name),
+      order: index + 1,
+    }));
+    const diff = [
+      ...desiredPlan.filter((item) => item.changed && !item.added).map((item) => ({
+        field: "course_name",
+        label: "科目信息",
+        code: item.before.code,
+        before: item.before.name,
+        after: item.afterName,
+      })),
+      ...additions.map((item) => {
+        const course = orderedCourses[item.desiredIndex];
+        return {
+          field: "course_add",
+          label: "科目信息",
+          code: course.code,
+          before: "",
+          after: item.afterName,
+        };
+      }),
+      ...removals.map((item) => ({
+        field: "course_remove",
+        label: "科目信息",
+        code: item.before.code,
+        before: item.before.name,
+        after: "",
+      })),
+    ];
+    return {
+      changed: diff.length > 0 || plan.some((item) => item.reordered) || missingBindings.length > 0,
+      diff,
+      courses: orderedCourses,
+      bindResult,
+      boundCourseCodes: missingBindings.map((course) => course.code),
+      createdCourseCodes: additions.map((item) => orderedCourses[item.desiredIndex]?.code).filter(Boolean),
+      deletedCourseCodes: removals.map((item) => item.before.code),
+    };
+  } catch (error) {
+    if (remoteModified) error.remoteModified = true;
+    throw error;
   }
-  return {
-    changed: plan.some((item) => item.changed),
-    diff: plan.filter((item) => item.changed).map((item) => ({
-      field: "course_name",
-      label: "科目信息",
-      code: item.before.code,
-      before: item.before.name,
-      after: item.afterName,
-    })),
-    courses: verified,
-  };
 }
 
 export function appendCourseChangeHistory(existing = [], record = {}) {

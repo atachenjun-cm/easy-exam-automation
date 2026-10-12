@@ -13,6 +13,7 @@ import {
   normalizedOperationBatchManagedSnapshot,
   operationBatchManagedDiff,
   operationBatchUpdateState,
+  repairManagedBatchName,
 } from "./operation_batch_update.mjs";
 import { differingManagedFields } from "./operation_batch_update_service.mjs";
 
@@ -123,10 +124,13 @@ function desiredSnapshot(task = {}) {
 }
 
 function appliedSnapshot(task = {}) {
-  const value = task.config?.operationBatch?.managedSnapshot;
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? normalizedOperationBatchInspectedSnapshot(value)
-    : null;
+  const operationBatch = task.config?.operationBatch || {};
+  const value = operationBatch.managedSnapshot;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return normalizedOperationBatchInspectedSnapshot({
+    ...value,
+    batchName: repairManagedBatchName(value.batchName, operationBatch),
+  });
 }
 
 function taskVersion(task = {}) {
@@ -173,6 +177,43 @@ function replaceAttempt(operationBatch = {}, attemptId, update) {
   }
   attempts[index] = { ...attempts[index], ...structuredClone(update) };
   return attempts;
+}
+
+function recoverableConflictAttempt(operationBatch = {}, applied, inspected) {
+  if (!applied) return null;
+  const attempts = Array.isArray(operationBatch.updateAttempts)
+    ? operationBatch.updateAttempts
+    : [];
+  for (let index = attempts.length - 1; index >= 0; index -= 1) {
+    const attempt = attempts[index];
+    if (
+      attempt?.status !== "conflict"
+      || attempt?.checkpoint !== "manual_review"
+      || ![
+        "OPERATION_BATCH_UPDATE_CONFLICT",
+        "OPERATION_BATCH_READBACK_MISMATCH",
+      ].includes(text(attempt?.error?.code))
+      || !attempt.inspectedBefore
+      || !attempt.inspectedAfter
+      || !attempt.desiredSnapshot
+    ) {
+      continue;
+    }
+    try {
+      const before = normalizedOperationBatchInspectedSnapshot(attempt.inspectedBefore);
+      const after = normalizedOperationBatchInspectedSnapshot(attempt.inspectedAfter);
+      normalizedOperationBatchManagedSnapshot(attempt.desiredSnapshot);
+      if (
+        fingerprint(before) === fingerprint(applied)
+        && fingerprint(after) === fingerprint(inspected)
+      ) {
+        return attempt;
+      }
+    } catch {
+      // Invalid historical attempts remain conflicts and cannot become recovery baselines.
+    }
+  }
+  return null;
 }
 
 export function createOperationBatchLocalUpdateService(dependencies = {}) {
@@ -324,15 +365,10 @@ export function createOperationBatchLocalUpdateService(dependencies = {}) {
     const appliedDifferences = applied
       ? differingManagedFields(applied, comparableInspected)
       : [];
-    if (comparableInspected.schedules.length > desired.schedules.length) {
-      throw serviceError(
-        "OPERATION_BATCH_UPDATE_CONFLICT",
-        409,
-        "不允许减少已存在的运营批次日程数量",
-        { differingFields: differingManagedFields(desired, comparableInspected) },
-      );
-    }
     const current = task.config?.operationBatch || {};
+    const recoveryAttempt = appliedDifferences.length
+      ? recoverableConflictAttempt(current, applied, comparableInspected)
+      : null;
     preparations.delete(preparationId);
     if (!changes.length) {
       const alreadyManuallyAligned = appliedDifferences.length > 0;
@@ -372,7 +408,7 @@ export function createOperationBatchLocalUpdateService(dependencies = {}) {
         task: updatedTask,
       };
     }
-    if (appliedDifferences.length) {
+    if (appliedDifferences.length && !recoveryAttempt) {
       throw serviceError(
         "OPERATION_BATCH_UPDATE_CONFLICT",
         409,
@@ -380,6 +416,19 @@ export function createOperationBatchLocalUpdateService(dependencies = {}) {
         { differingFields: appliedDifferences, inspectedCurrent: comparableInspected },
       );
     }
+    const recoveryPatch = recoveryAttempt
+      ? applyOperationBatchManagedResult(task, {
+        verified: true,
+        snapshot: comparableInspected,
+        action: "failed_update_recovery_baseline",
+        syncedAt: nowIso(now),
+        detailUrl: result.detailUrl,
+        checkpoints: [
+          "matched_failed_attempt_readback",
+          ...(Array.isArray(result.checkpoints) ? result.checkpoints : []),
+        ],
+      })
+      : null;
     const previewToken = text(makePreviewToken());
     const activeUpdatePreview = {
       tokenHash: tokenHash(previewToken),
@@ -389,11 +438,12 @@ export function createOperationBatchLocalUpdateService(dependencies = {}) {
       actorFingerprint: preparation.actorFingerprint,
       changes: structuredClone(changes),
       inspectedCurrent: structuredClone(comparableInspected),
+      ...(recoveryAttempt ? { recoveryAttemptId: recoveryAttempt.attemptId } : {}),
       createdAt: nowIso(now),
       expiresAt: new Date(now() + PREVIEW_TTL_MS).toISOString(),
     };
     const updatedTask = await persistOperationBatch(taskId, {
-      ...current,
+      ...(recoveryPatch?.operationBatch || current),
       status: "update_available",
       activeUpdatePreview,
       updatedAt: nowIso(now),

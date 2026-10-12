@@ -86,7 +86,7 @@ function visibleDateValues(value) {
     .filter(Boolean);
 }
 
-function visibleDateTimeValues(value, compactEndDate = "") {
+function visibleDateTimeValues(value) {
   const source = text(value);
   const matches = [...source.matchAll(
     /\d{4}[/-]\d{1,2}[/-]\d{1,2}[T ]\d{1,2}:\d{2}(?::\d{2})?/g,
@@ -101,7 +101,9 @@ function visibleDateTimeValues(value, compactEndDate = "") {
   );
   if (!compactEnd) return values;
   const startParts = dateTimeParts(values[0]);
-  const endDate = dateString(dateParts(compactEndDate)) || dateString(startParts);
+  // A compact range such as "2026-10-09 10:00~12:00" is same-day.
+  // The batch end date can belong to a later schedule and must not be used here.
+  const endDate = dateString(startParts);
   const endParts = dateTimeParts(`${endDate} ${compactEnd[1]}`);
   const end = visibleDateTime(dateTimeString(endParts));
   return end ? [...values, end] : values;
@@ -225,7 +227,7 @@ export function operationBatchVisibleSchedulesFromRaw(raw = {}) {
     && !row.every((cell) => !text(cell))
   ));
   return rows.map((row, index) => {
-    const values = visibleDateTimeValues(row[dateIndex], raw.examEndDate);
+    const values = visibleDateTimeValues(row[dateIndex]);
     const name = text(row[nameIndex]);
     const expectedDuration = values.length === 2
       ? elapsedMinutes(dateTimeParts(values[0]), dateTimeParts(values[1]))
@@ -902,6 +904,12 @@ async function editScheduleTable(page) {
             "备注",
             "OPERATION_BATCH_UPDATE_CONFLICT",
           ),
+          operation: exactScheduleColumn(
+            headers,
+            ["操作"],
+            "操作",
+            "OPERATION_BATCH_UPDATE_CONFLICT",
+          ),
         },
       });
     } catch {}
@@ -948,6 +956,54 @@ export async function waitForVisibleScheduleRows(
     if (now() >= deadline) {
       throw errorWithCode(
         `等待日程编辑行超时：期望至少 ${expected} 行，实际 ${rows.length} 行`,
+        "OPERATION_BATCH_UPDATE_CONFLICT",
+      );
+    }
+    await wait(pollMs);
+  }
+}
+
+export async function waitForExactVisibleScheduleRows(
+  readRows,
+  expectedCount,
+  options = {},
+) {
+  const expected = Math.max(0, Number(expectedCount) || 0);
+  const rows = await waitForVisibleScheduleRows(readRows, expected, options);
+  if (rows.length !== expected) {
+    throw errorWithCode(
+      `日程编辑行数异常：期望 ${expected} 行，实际 ${rows.length} 行`,
+      "OPERATION_BATCH_UPDATE_CONFLICT",
+    );
+  }
+  return rows;
+}
+
+export async function waitForVisibleScheduleRowCount(
+  readRows,
+  expectedCount,
+  {
+    timeoutMs = 10000,
+    pollMs = 100,
+    now = Date.now,
+    wait = (delay) => new Promise((resolve) => setTimeout(resolve, delay)),
+  } = {},
+) {
+  const expected = Math.max(0, Number(expectedCount) || 0);
+  const deadline = now() + timeoutMs;
+  let rows = [];
+  while (true) {
+    rows = await readRows();
+    if (rows.length === expected) return rows;
+    if (rows.length < expected) {
+      throw errorWithCode(
+        `删除日程后可见行数低于期望：期望 ${expected} 行，实际 ${rows.length} 行`,
+        "OPERATION_BATCH_UPDATE_CONFLICT",
+      );
+    }
+    if (now() >= deadline) {
+      throw errorWithCode(
+        `等待删除日程完成超时：期望 ${expected} 行，实际 ${rows.length} 行`,
         "OPERATION_BATCH_UPDATE_CONFLICT",
       );
     }
@@ -1061,10 +1117,13 @@ export async function fillRangeInputs(
   }
   if (startReadonly) {
     await startInput.click();
-    const picker = await uniqueControl(
-      page.locator(".ant-calendar-picker-container:visible"),
-      "日期范围选择器",
-    );
+    const visiblePickers = page.locator(".ant-calendar-picker-container:visible");
+    if (await visiblePickers.count() === 0) {
+      await visiblePickers.first().waitFor({ state: "visible", timeout: 10000 });
+    }
+    // Ant Design can briefly keep the previous row's closing popup visible.
+    // The popup opened for the current range picker is appended last.
+    const picker = visiblePickers.nth((await visiblePickers.count()) - 1);
     const editors = picker.locator(".ant-calendar-input:visible");
     if (await editors.count() !== 2) {
       throw errorWithCode(
@@ -1080,6 +1139,7 @@ export async function fillRangeInputs(
       picker.locator(".ant-calendar-ok-btn:visible"),
       "日期范围确定控件",
     )).click();
+    await picker.waitFor({ state: "hidden", timeout: 10000 });
     const actualStart = text(await startInput.inputValue());
     const actualEnd = text(await endInput.inputValue());
     if (actualStart !== text(start) || actualEnd !== text(end)) {
@@ -1339,14 +1399,20 @@ const visiblePageAdapter = {
     await clickSectionEdit(page, "考试日程");
     await visibleModal(page, "易考——考试日程");
   },
-  async appendSchedule(page) {
-    const modal = await visibleModal(page, "易考——考试日程");
-    const { table } = await editScheduleTable(page);
-    const before = (await visibleScheduleRows(table)).length;
+  async appendSchedule(page, scheduleIndex) {
     const readRows = async () => {
       const current = await editScheduleTable(page);
       return visibleScheduleRows(current.table);
     };
+    const expectedBefore = Number.isInteger(scheduleIndex) && scheduleIndex >= 0
+      ? scheduleIndex
+      : (await readRows()).length;
+    const beforeRows = await waitForExactVisibleScheduleRows(
+      readRows,
+      expectedBefore,
+      { wait: pageWait(page) },
+    );
+    const modal = await visibleModal(page, "易考——考试日程");
     const rows = await clickScheduleAddButtonAndWait({
       button: await visibleButtonByExactText(modal, "新增", "新增日程"),
       reacquireButton: async () => visibleButtonByExactText(
@@ -1355,14 +1421,48 @@ const visiblePageAdapter = {
         "新增日程",
       ),
       readRows,
-      beforeCount: before,
+      beforeCount: beforeRows.length,
       wait: pageWait(page),
     });
-    if (rows.length !== before + 1) {
+    if (rows.length !== expectedBefore + 1) {
       throw errorWithCode(
-        `新增日程后可见行数异常：${before} → ${rows.length}`,
+        `新增日程后可见行数异常：${expectedBefore} → ${rows.length}`,
         "OPERATION_BATCH_UPDATE_CONFLICT",
       );
+    }
+  },
+  async deleteAllSchedules(page, expectedCount) {
+    const readRows = async () => {
+      const current = await editScheduleTable(page);
+      return visibleScheduleRows(current.table);
+    };
+    const expected = Math.max(0, Number(expectedCount) || 0);
+    await waitForExactVisibleScheduleRows(readRows, expected, { wait: pageWait(page) });
+    for (let remaining = expected; remaining > 0; remaining -= 1) {
+      const current = await editScheduleTable(page);
+      const rows = await waitForExactVisibleScheduleRows(
+        readRows,
+        remaining,
+        { wait: pageWait(page) },
+      );
+      const operationCell = rows[remaining - 1].locator("td").nth(current.columns.operation);
+      const deleteButton = operationCell.locator(
+        '[aria-label="图标: close"]:visible,.anticon-close:visible',
+      );
+      const deleteCount = await deleteButton.count();
+      if (deleteCount !== 1) {
+        throw errorWithCode(
+          `日程 ${remaining} 必须有唯一删除控件，实际 ${deleteCount} 个`,
+          "OPERATION_BATCH_UPDATE_CONFLICT",
+        );
+      }
+      if (typeof deleteButton.first().scrollIntoViewIfNeeded === "function") {
+        await deleteButton.first().scrollIntoViewIfNeeded();
+      }
+      await deleteButton.first().click({ force: true });
+      await waitForVisibleScheduleRowCount(readRows, remaining - 1, {
+        wait: pageWait(page),
+      });
     }
   },
   writeScheduleFields: writeVisibleScheduleFields,
@@ -1425,32 +1525,41 @@ async function inspectOnPage(page, instruction, options = {}) {
   const listUrl = batchListUrl(options);
   const expectedName = text(instruction.batch?.name || instruction.desiredSnapshot?.batchName);
   const persistedDetailUrl = text(instruction.batch?.detailUrl);
+  const openByCode = () => pageAdapter.openBatchByCode(page, {
+    batchCode: code,
+    batchName: expectedName,
+    batchListUrl: listUrl,
+    options,
+  });
   const detailUrl = options.searchByBatchCode
-    ? await pageAdapter.openBatchByCode(page, {
-      batchCode: code,
-      batchName: expectedName,
-      batchListUrl: listUrl,
-      options,
-    })
+    ? await openByCode()
     : persistedDetailUrl
-    ? await openPersistedOperationBatchDetail(page, {
-      detailUrl: persistedDetailUrl,
-      batchCode: code,
-      batchName: expectedName,
-      batchListUrl: listUrl,
-    })
+    ? await (async () => {
+      try {
+        return await openPersistedOperationBatchDetail(page, {
+          detailUrl: persistedDetailUrl,
+          batchCode: code,
+          batchName: expectedName,
+          batchListUrl: listUrl,
+        });
+      } catch (error) {
+        if (![
+          "OPERATION_BATCH_UPDATE_CONFLICT",
+          "OPERATION_ARCHIVE_BATCH_IDENTITY_MISMATCH",
+          "OPERATION_BATCH_ACTUAL_NAME_MISSING",
+        ].includes(error?.code)) {
+          throw error;
+        }
+        return openByCode();
+      }
+    })()
     : options.reuseVerifiedDetail
     ? await assertOperationBatchDetailIdentity(page, {
       batchCode: code,
       batchName: expectedName,
       batchListUrl: listUrl,
     })
-    : await pageAdapter.openBatchByCode(page, {
-      batchCode: code,
-      batchName: expectedName,
-      batchListUrl: listUrl,
-      options,
-    });
+    : await openByCode();
   if (typeof pageAdapter.refreshDetail === "function") {
     await pageAdapter.refreshDetail(page);
   }
@@ -1571,7 +1680,22 @@ function validatedManagedFields(changes, current, desired) {
     services: new Set(),
     schedules: new Map(),
     appended: new Set(),
+    rebuildSchedules: current.schedules.length > desired.schedules.length,
   };
+
+  const scheduleCountChange = changesByPath.get("schedules.length");
+  if (fields.rebuildSchedules) {
+    if (!scheduleCountChange) {
+      invalidChanges("运营批次修改清单缺少字段：schedules.length");
+    }
+    assertExactChange(scheduleCountChange, {
+      before: current.schedules.length,
+      after: desired.schedules.length,
+    });
+    changesByPath.delete("schedules.length");
+  } else if (scheduleCountChange) {
+    invalidChanges("运营批次修改清单包含未变化字段：schedules.length");
+  }
 
   for (const [field] of overviewFields) {
     const change = changesByPath.get(field);
@@ -1604,7 +1728,8 @@ function validatedManagedFields(changes, current, desired) {
     }
   }
 
-  for (let index = 0; index < current.schedules.length; index += 1) {
+  const sharedScheduleCount = Math.min(current.schedules.length, desired.schedules.length);
+  for (let index = 0; index < sharedScheduleCount; index += 1) {
     const wholePath = `schedules[${index}]`;
     if (changesByPath.has(wholePath)) {
       invalidChanges(`已有运营批次日程不接受整行修改声明：${wholePath}`);
@@ -1748,24 +1873,39 @@ async function writeManagedChanges(
   }
 
   const scheduleChanged = initialize
+    || fields.rebuildSchedules
     || fields.appended.size > 0
     || fields.schedules.size > 0;
   if (!scheduleChanged) return writeCount;
   if (typeof pageAdapter.beginScheduleEdit === "function") {
     await pageAdapter.beginScheduleEdit(page);
   }
-  for (let index = 0; index < desired.schedules.length; index += 1) {
-    const isNew = index >= current.schedules.length;
-    const appended = isNew && (initialize || fields.appended.has(index));
-    if (appended) {
-      await pageAdapter.appendSchedule(page, index);
-      writeCount += 1;
+  const existingScheduleCount = fields.rebuildSchedules ? 0 : current.schedules.length;
+  if (fields.rebuildSchedules) {
+    if (typeof pageAdapter.deleteAllSchedules !== "function") {
+      throw errorWithCode(
+        "运营批次页面不支持删除并重建日程",
+        "OPERATION_BATCH_UPDATE_CONFLICT",
+      );
     }
+    await pageAdapter.deleteAllSchedules(page, current.schedules.length);
+    writeCount += current.schedules.length;
+  }
+  for (let index = existingScheduleCount; index < desired.schedules.length; index += 1) {
+    const appended = initialize || fields.rebuildSchedules || fields.appended.has(index);
+    if (!appended) continue;
+    await pageAdapter.appendSchedule(page, index);
+    writeCount += 1;
+  }
+  for (let index = 0; index < desired.schedules.length; index += 1) {
+    const isNew = index >= existingScheduleCount;
+    const appended = isNew
+      && (initialize || fields.rebuildSchedules || fields.appended.has(index));
     const changed = fields.schedules.get(index) || new Set();
     const fieldsToWrite = new Set(
       scheduleFields
         .map(([field]) => field)
-        .filter((field) => initialize || appended || changed.has(field)),
+        .filter((field) => initialize || fields.rebuildSchedules || appended || changed.has(field)),
     );
     if (!fieldsToWrite.size) continue;
     if (typeof pageAdapter.writeScheduleFields === "function") {
@@ -1849,13 +1989,6 @@ export async function runOperationBatchManagedUpdate(instruction, options = {}) 
     };
     const inspected = await inspectOnPage(page, instruction, updateOptions);
     const current = inspected.snapshot;
-    if (desired.schedules.length < current.schedules.length) {
-      throw errorWithCode(
-        "不允许减少已同步的运营批次日程数量",
-        "OPERATION_BATCH_SCHEDULE_COUNT_DECREASE",
-        { currentCount: current.schedules.length, desiredCount: desired.schedules.length },
-      );
-    }
     const comparableDesired = structuredClone(desired);
     if (!includesServiceChange) delete comparableDesired.servicePersonnel;
     if (snapshotsEqual(current, comparableDesired)) {
@@ -1955,6 +2088,7 @@ export async function runOperationBatchScheduleInitialization(instruction, optio
       ),
       schedules: new Map(),
       appended: new Set(desired.schedules.map((_, index) => index)),
+      rebuildSchedules: false,
     };
     await writeManagedChanges(
       page,
@@ -1992,13 +2126,6 @@ export async function synchronizeOperationBatchScheduleForArchive(instruction, o
         { expectedBatchName: desired.batchName, actualBatchName: current.batchName },
       );
     }
-    if (current.schedules.length > desired.schedules.length) {
-      throw errorWithCode(
-        "运营批次现有日程多于正式考试日程，已停止自动归档",
-        "OPERATION_BATCH_SCHEDULE_COUNT_DECREASE",
-        { currentCount: current.schedules.length, desiredCount: desired.schedules.length },
-      );
-    }
     if (snapshotsEqual(current, desired)) {
       return {
         status: "success",
@@ -2017,6 +2144,7 @@ export async function synchronizeOperationBatchScheduleForArchive(instruction, o
       ),
       schedules: new Map(),
       appended: new Set(),
+      rebuildSchedules: current.schedules.length > desired.schedules.length,
     };
     for (let index = 0; index < desired.schedules.length; index += 1) {
       if (index >= current.schedules.length) {

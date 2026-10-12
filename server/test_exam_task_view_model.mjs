@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   aggregateExamSessions,
+  examTaskSyncDifference,
+  examTaskTypeProgress,
   isExamTaskEnded,
   matchesExamTask,
   resolveCandidateTaskContext,
@@ -159,6 +161,47 @@ test("keeps task progress from sessions for exam list status display", () => {
   assert.equal(tasks[0].progress, 50);
 });
 
+test("counts formal paper binding by course instead of requirement", () => {
+  const task = {
+    config: {
+      examRequirements: [{
+        config: {
+          courses: [
+            { name: "基础物业岗", code: "20260904-01-01" },
+            { name: "物业运营管理岗", code: "20260904-01-02" },
+          ],
+        },
+      }],
+      paperFormBinds: [{ status: "success" }],
+    },
+    sessions: [{ sessionType: "formal", requirementIndex: 0, session_id: "437214" }],
+  };
+
+  assert.deepEqual(examTaskTypeProgress(task, "formal").paperBinding, {
+    enabled: true,
+    completed: 2,
+    total: 2,
+    tone: "complete",
+  });
+});
+
+test("uses compact course count for formal paper binding before task detail loads", () => {
+  const task = {
+    config: {
+      examRequirements: [{ config: { courseCount: 2 } }],
+      paperFormBinds: [{ status: "pending" }],
+    },
+    sessions: [{ sessionType: "formal", requirementIndex: 0, session_id: "437214" }],
+  };
+
+  assert.deepEqual(examTaskTypeProgress(task, "formal").paperBinding, {
+    enabled: true,
+    completed: 0,
+    total: 2,
+    tone: "pending",
+  });
+});
+
 test("resolves unified exam code from explicit config or uniform exam url", () => {
   assert.equal(resolveUnifiedExamCode({ config: { unifiedExamCode: "E5678" } }), "E5678");
   assert.equal(
@@ -271,4 +314,44 @@ test("resolves only the valid requested session", () => {
   assert.equal(trial.selectedSession.session_id, "1002");
   assert.deepEqual(resolveCandidateTaskContext(task, "other"), { sessions: [], selectedSession: null });
   assert.deepEqual(resolveCandidateTaskContext(task), { sessions: [], selectedSession: null });
+});
+
+test("shows a readback failure instead of zero when the course comparison is incomplete", () => {
+  const difference = examTaskSyncDifference({
+    examListSyncPreviewLoaded: true,
+    examListSyncPreview: {
+      sessions: [{
+        sessionId: "1001",
+        sessionType: "formal",
+        differenceCount: 0,
+        readbackWarning: "科目差异检查可能不完整",
+      }],
+    },
+    sessions: [{ session_id: "1001", sessionType: "formal" }],
+  });
+
+  assert.deepEqual(difference, {
+    label: "!",
+    tone: "failed",
+    interactive: true,
+    sessionId: "1001",
+  });
+});
+
+test("keeps a confirmed difference count visible alongside a readback warning", () => {
+  const difference = examTaskSyncDifference({
+    examListSyncPreviewLoaded: true,
+    examListSyncPreview: {
+      sessions: [{
+        sessionId: "1001",
+        sessionType: "formal",
+        differenceCount: 1,
+        readbackWarning: "部分科目读取失败",
+      }],
+    },
+  });
+
+  assert.equal(difference.label, "1");
+  assert.equal(difference.tone, "failed");
+  assert.equal(difference.interactive, true);
 });

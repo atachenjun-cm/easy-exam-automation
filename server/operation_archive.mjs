@@ -1,5 +1,24 @@
 import { createHash } from "node:crypto";
 
+import { normalizeOperationBillingBasis } from "./operation_batch.mjs";
+
+export const OPERATION_ARCHIVE_ACTIVE_TIMEOUT_MS = 2 * 60 * 1000;
+
+export function operationArchiveInspectionTransition(helperStatus, options = {}) {
+  if (helperStatus === "already_archived") {
+    return { status: "already_archived", issuePreview: false, errorCode: "", errorMessage: "" };
+  }
+  if (helperStatus === "ready" && options.recheckingUnknownResult === true) {
+    return {
+      status: "result_unknown",
+      issuePreview: false,
+      errorCode: "OPERATION_ARCHIVE_RESULT_UNCONFIRMED",
+      errorMessage: "核对显示运营控制台当前仍为待提交，原提交结果无法确认，请勿重复提交。",
+    };
+  }
+  return { status: "ready", issuePreview: true, errorCode: "", errorMessage: "" };
+}
+
 function text(value) {
   return String(value ?? "").trim();
 }
@@ -405,7 +424,7 @@ export function buildOperationArchiveDraft(task = {}, options = {}) {
     systemType: sourceField(first(batchFields.systemType?.value, business.system_type), "operation_result", "系统类型", { required: true, editable: false }),
     arrangementService: sourceField(batchFields.arrangementService?.value, "operation_result", "编排服务", { required: true, editable: false }),
     settlementArrangementSource: sourceField(batchFields.onlineSettlementArrangementSource?.value, "operation_result", "在线结算编排来源", { required: true, editable: false }),
-    billingBasis: sourceField(first(batchFields.billingBasis?.value, business.billing_basis), "fanwei", "结算依据", { required: true, editable: false }),
+    billingBasis: sourceField(normalizeOperationBillingBasis(first(business.billing_basis, batchFields.billingBasis?.value)), "fanwei", "结算依据", { required: true, editable: false }),
     ataRegistrationSubjects: sourceField(value("ataRegistrationSubjects", registrationMode === "ATA报名系统在线报名" ? plannedSubjects : "0"), "fanwei", "ATA系统报名科次", { control: "number" }),
     ataRegistrationAdjustmentReason: sourceField(value("ataRegistrationAdjustmentReason", ""), "actual_result", "调整说明"),
     registrationSubjects: sourceField(value("registrationSubjects", actualCandidates), "actual_result", "报考科次", { required: true, control: "number" }),
@@ -524,10 +543,24 @@ export function refreshOperationArchiveEvidenceDraft(task = {}, options = {}) {
 export function operationArchiveState(task = {}, options = {}) {
   const persisted = task.config?.operationArchive || {};
   const draft = buildOperationArchiveDraft(task, options);
-  const status = text(persisted.status) || (draft.warnings.length ? "needs_review" : "ready_for_inspection");
+  const persistedStatus = text(persisted.status);
+  const activeStartedAt = text(persisted.activeStartedAt || persisted.updatedAt);
+  const activeStartedAtMs = Date.parse(activeStartedAt);
+  const nowMs = new Date(options.now ?? Date.now()).getTime();
+  const timedOut = ["inspecting", "submitting"].includes(persistedStatus)
+    && Number.isFinite(activeStartedAtMs)
+    && Number.isFinite(nowMs)
+    && nowMs - activeStartedAtMs > OPERATION_ARCHIVE_ACTIVE_TIMEOUT_MS;
+  const status = timedOut
+    ? persistedStatus === "submitting" ? "result_unknown" : "inspection_failed"
+    : persistedStatus || (draft.warnings.length ? "needs_review" : "ready_for_inspection");
+  const timeoutMessage = persistedStatus === "submitting"
+    ? "归档提交超过2分钟未返回，结果待核对，请勿重复提交。"
+    : "归档检查超过2分钟未完成，已结束，请重新检查。";
   return {
     schemaVersion: 1,
     status,
+    timedOut,
     draft,
     draftFingerprint: operationArchiveFingerprint(draft),
     draftVersion: Number(persisted.draftVersion || 0),
@@ -535,7 +568,7 @@ export function operationArchiveState(task = {}, options = {}) {
     inspectedAt: text(persisted.inspectedAt),
     submittedAt: text(persisted.submittedAt),
     externalStatus: text(persisted.externalStatus),
-    errorCode: text(persisted.errorCode),
-    errorMessage: text(persisted.errorMessage),
+    errorCode: timedOut ? "OPERATION_ARCHIVE_TIMEOUT" : text(persisted.errorCode),
+    errorMessage: timedOut ? timeoutMessage : text(persisted.errorMessage),
   };
 }

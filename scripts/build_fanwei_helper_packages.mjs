@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildFanweiHelperPackageManifest } from "../server/fanwei_local_helper_version.mjs";
+import {
+  buildFanweiHelperPackageManifest,
+  FANWEI_LOCAL_HELPER_SERVER_FILES,
+} from "../server/fanwei_local_helper_version.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const supportedPlatforms = new Set(["win-x64", "darwin-x64", "darwin-arm64"]);
@@ -70,22 +73,9 @@ function writePackage({ platform, runtimePath, origin, packageDir }) {
   const runtimeName = platform === "win-x64" ? "node.exe" : "node";
   copyFile(runtimePath, path.join(packageDir, runtimeName), platform === "win-x64" ? undefined : 0o755);
 
-  for (const moduleName of [
-    "fanwei_local_helper_cli.mjs",
-    "fanwei_local_helper.mjs",
-    "fanwei_local_helper_update.mjs",
-    "fanwei_local_helper_version.mjs",
-    "fanwei_auto_read.mjs",
-    "score_stamp_application.mjs",
-    "operation_batch_runner.mjs",
-    "operation_batch_update_runner.mjs",
-    "operation_personnel_console_runner.mjs",
-    "operation_archive_runner.mjs",
-    "operation_content.mjs",
-    "operation_content_runner.mjs",
-  ]) {
+  for (const moduleName of FANWEI_LOCAL_HELPER_SERVER_FILES) {
     const source = path.join(rootDir, "server", moduleName);
-    if (fs.existsSync(source)) copyFile(source, path.join(packageDir, "server", moduleName));
+    copyFile(source, path.join(packageDir, "server", moduleName));
   }
 
   for (const moduleName of ["playwright", "playwright-core"]) {

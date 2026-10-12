@@ -10,6 +10,7 @@ test("flattens selected custom fields into EasyExam candidate entry payload", ()
       full_name: "张三",
       identity_id: "ID001",
       course_code: "20260629-01-01",
+      course_name: "综合能力（仅用于界面显示）",
       mobile: "13800000000",
       email: "a@example.com",
       custom_fields: {
@@ -33,6 +34,7 @@ test("flattens selected custom fields into EasyExam candidate entry payload", ()
     cf_major: "材料学",
     cf_position_name: "炼化技术研发",
   });
+  assert.equal(entry.course_name, undefined);
 });
 
 test("omits empty optional fields and falls back to legacy custom field keys without mappings", () => {

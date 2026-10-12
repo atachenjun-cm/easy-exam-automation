@@ -73,6 +73,22 @@ test("operation content draft matches the content task and uses OPA duration", (
   }]);
 });
 
+test("operation content draft preserves cross-day trial and formal ranges", () => {
+  const task = taskFixture();
+  const requirement = task.config.examRequirements[0];
+  requirement.fields["考试日期时间"] = "2026/9/2 14:00:00-2026/9/3 17:00:00";
+  requirement.fields["试考日期时间"] = "2026/9/1 14:00:00-2026/9/2 17:00:00";
+  requirement.fields["科目信息"] = "综合科目";
+  requirement.config.courses = [{ name: "综合科目", code: "20260902-01-01" }];
+
+  const draft = buildOperationContentDraft(task);
+
+  assert.deepEqual(draft.warnings, []);
+  assert.equal(draft.configuration.closureStart, "2026-09-01 14:00");
+  assert.equal(draft.configuration.closureEnd, "2026-09-02 17:00");
+  assert.equal(draft.subjects[0].durationMinutes, "1620");
+});
+
 test("operation content draft blocks incomplete batch identity and email time", () => {
   const task = taskFixture();
   delete task.config.operationBatch.detailUrl;

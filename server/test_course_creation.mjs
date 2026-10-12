@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ensureFormalCoursesCreated,
   generateNextCourseCode,
+  normalizeCourseRecords,
 } from "./course_creation.mjs";
 
 test("generates the next course code by incrementing the exam serial segment", () => {
@@ -15,6 +16,20 @@ test("generates the next course code by incrementing the exam serial segment", (
 test("rejects invalid or exhausted course codes", () => {
   assert.throws(() => generateNextCourseCode("20260629-99-01"), /科目编号已占满，请手动处理/);
   assert.throws(() => generateNextCourseCode("COURSE-01"), /科目编号格式不正确/);
+});
+
+test("keeps paper bindings empty instead of treating the course code as a paper code", () => {
+  assert.deepEqual(normalizeCourseRecords({
+    courses: [
+      { name: "心理测评", code: "20260904-02-01" },
+      { name: "OPA测评", code: "20260904-02-02", form_codes: ["20260904-02-02"] },
+      { name: "专业知识", code: "20260904-02-03", form_codes: ["FORM-REAL"] },
+    ],
+  }), [
+    { name: "心理测评", code: "20260904-02-01", form_codes: [], order: 1 },
+    { name: "OPA测评", code: "20260904-02-02", form_codes: [], order: 2 },
+    { name: "专业知识", code: "20260904-02-03", form_codes: ["FORM-REAL"], order: 3 },
+  ]);
 });
 
 test("treats empty requirement subjects as completed without tenant course requests", async () => {
@@ -65,18 +80,23 @@ test("creates a course with the next available code when the requested name is n
     emitLog: (message) => logs.push(message),
   });
 
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0].url, "https://eztest.cn/tenant/api/courses/?apply=session");
-  assert.equal(calls[1].url, "https://eztest.cn/tenant/api/course/");
-  assert.equal(calls[1].options.method, "POST");
-  assert.deepEqual(JSON.parse(calls[1].options.body), {
+  assert.equal(calls.length, 4);
+  assert.deepEqual(calls.slice(0, 3).map((call) => call.url), [
+    "https://eztest.cn/tenant/api/courses/20260629-01-01/?apply=session",
+    "https://eztest.cn/tenant/api/courses/20260629-02-01/?apply=session",
+    "https://eztest.cn/tenant/api/courses/20260629-03-01/?apply=session",
+  ]);
+  assert.equal(calls[3].url, "https://eztest.cn/tenant/api/course/");
+  assert.equal(calls[3].options.method, "POST");
+  assert.deepEqual(JSON.parse(calls[3].options.body), {
     name: "美术",
     code: "20260629-03-01",
-    form_codes: ["20260629-03-01"],
+    form_codes: [],
   });
-  assert.deepEqual(courses, [{ name: "美术", code: "20260629-03-01", form_codes: ["20260629-03-01"], paper_name: "第二场美术卷", order: 1 }]);
+  assert.deepEqual(courses, [{ name: "美术", code: "20260629-03-01", form_codes: [], paper_name: "第二场美术卷", order: 1 }]);
   assert.deepEqual(config.courses, [{ name: "美术", paper_name: "第二场美术卷" }]);
   assert.ok(logs.some((message) => message.includes("科目名称不存在，准备创建：美术")));
+  assert.equal(calls.some((call) => call.url.endsWith("/tenant/api/courses/?apply=session")), false);
 });
 
 test("persists the course code returned by the tenant create response", async () => {
@@ -93,10 +113,10 @@ test("persists the course code returned by the tenant create response", async ()
   });
 
   assert.equal(courses[0].code, "TENANT-FINAL-001");
-  assert.deepEqual(courses[0].form_codes, ["TENANT-FINAL-001"]);
+  assert.deepEqual(courses[0].form_codes, []);
 });
 
-test("does not reuse an unconfirmed project code when tenant course listing is unavailable", async () => {
+test("does not reuse an unconfirmed project code when tenant detail does not confirm it", async () => {
   const calls = [];
   const courses = await ensureFormalCoursesCreated({
     login: {},
@@ -105,11 +125,6 @@ test("does not reuse an unconfirmed project code when tenant course listing is u
     existingProjectCourses: [{ name: "综合能力", code: "20260629-02-01" }],
     requestJson: async (_login, url, options) => {
       calls.push({ url, options });
-      if (String(url).endsWith("/tenant/api/courses/?apply=session")) {
-        const error = new Error("temporary failure");
-        error.status = 503;
-        throw error;
-      }
       if (options.method === "GET") {
         const error = new Error("not found");
         error.status = 404;
@@ -174,9 +189,9 @@ test("creates a new code when another project already has the same course name",
     emitLog: () => {},
   });
 
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0].url, "https://eztest.cn/tenant/api/courses/?apply=session");
-  assert.deepEqual(courses, [{ name: "美术", code: "20260629-02-01", form_codes: ["20260629-02-01"], order: 1 }]);
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].url, "https://eztest.cn/tenant/api/courses/20260629-01-01/?apply=session");
+  assert.deepEqual(courses, [{ name: "美术", code: "20260629-02-01", form_codes: [], order: 1 }]);
 });
 
 test("reuses a real course previously created for another requirement in the same project", async () => {
@@ -198,8 +213,8 @@ test("reuses a real course previously created for another requirement in the sam
     emitLog: () => {},
   });
 
-  assert.equal(calls.length, 2);
-  assert.equal(calls[1].url, "https://eztest.cn/tenant/api/courses/20260629-02-01/?apply=session");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://eztest.cn/tenant/api/courses/20260629-02-01/?apply=session");
   assert.deepEqual(courses, [{ name: "美术", code: "20260629-02-01", form_codes: ["FORM-A"], order: 1 }]);
 });
 
@@ -231,8 +246,8 @@ test("retries course creation with incremented codes when tenant reports code al
     .filter((call) => call.url === "https://eztest.cn/tenant/api/course/")
     .map((call) => JSON.parse(call.options.body));
   assert.deepEqual(createBodies.map((body) => body.code), ["20260629-01-01", "20260629-02-01", "20260629-03-01"]);
-  assert.deepEqual(createBodies.map((body) => body.form_codes), [["20260629-01-01"], ["20260629-02-01"], ["20260629-03-01"]]);
-  assert.deepEqual(courses, [{ name: "体育", code: "20260629-03-01", form_codes: ["20260629-03-01"], order: 1 }]);
+  assert.deepEqual(createBodies.map((body) => body.form_codes), [[], [], []]);
+  assert.deepEqual(courses, [{ name: "体育", code: "20260629-03-01", form_codes: [], order: 1 }]);
   assert.ok(logs.includes("[API 科目] 准备创建科目：体育 / 20260629-01-01"));
   assert.ok(logs.includes("[API 科目] 科目编号已存在：20260629-01-01，尝试下一个编号：20260629-02-01"));
   assert.ok(logs.includes("[API 科目] 科目编号已存在：20260629-02-01，尝试下一个编号：20260629-03-01"));
@@ -268,7 +283,7 @@ test("retries to a new unused exam serial when tenant list misses occupied cours
     .filter((call) => call.url === "https://eztest.cn/tenant/api/course/")
     .map((call) => JSON.parse(call.options.body));
   assert.deepEqual(createBodies.map((body) => body.code), ["20260707-01-01", "20260707-02-01", "20260707-03-01"]);
-  assert.deepEqual(courses, [{ name: "天文", code: "20260707-03-01", form_codes: ["20260707-03-01"], order: 1 }]);
+  assert.deepEqual(courses, [{ name: "天文", code: "20260707-03-01", form_codes: [], order: 1 }]);
   assert.ok(logs.includes("[API 科目] 科目编号已存在：20260707-01-01，尝试下一个编号：20260707-02-01"));
   assert.ok(logs.includes("[API 科目] 科目编号已存在：20260707-02-01，尝试下一个编号：20260707-03-01"));
 });

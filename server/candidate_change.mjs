@@ -55,6 +55,7 @@ function editorFieldFromPersonal(fieldCode, config = {}, storedMappings = []) {
 export function buildCandidateChangeEditorFields({
   personal = {},
   storedMappings = [],
+  courses = [],
 } = {}) {
   const fields = [{
     field_code: "permit",
@@ -121,9 +122,19 @@ export function buildCandidateChangeEditorFields({
     label: "科目编号",
     candidate_key: "course_code",
     scope: "base",
-    type: "text",
+    type: "select",
     required: true,
     choices: [],
+    options: (Array.isArray(courses) ? courses : [])
+      .map((course) => {
+        const value = text(course?.code || course?.course_code);
+        const name = text(course?.name || course?.course_name);
+        return {
+          value,
+          label: name ? `${name}（${value}）` : value,
+        };
+      })
+      .filter((option) => option.value),
     order: Number.MAX_SAFE_INTEGER,
   });
   const seen = new Set();
@@ -178,6 +189,48 @@ export function normalizeCandidateRoster(rows = []) {
     seen.add(candidate.permit);
   }
   return { candidates, duplicatePermits: [...new Set(duplicatePermits)] };
+}
+
+export function buildAppendOnlyCandidateRoster(currentRows = [], uploadedRows = []) {
+  const currentRoster = normalizeCandidateRoster(currentRows);
+  const uploadedRoster = normalizeCandidateRoster(uploadedRows);
+  const errors = uploadedRoster.duplicatePermits.length
+    ? [`只新增名单存在重复准考证号：${uploadedRoster.duplicatePermits.join("、")}`]
+    : [];
+  const currentPermits = new Set(currentRoster.candidates.map((candidate) => candidate.permit));
+  const uniqueUploaded = [];
+  const uploadedPermits = new Set();
+  for (const candidate of uploadedRoster.candidates) {
+    if (uploadedPermits.has(candidate.permit)) continue;
+    uploadedPermits.add(candidate.permit);
+    uniqueUploaded.push(candidate);
+  }
+  const additions = uniqueUploaded.filter((candidate) => !currentPermits.has(candidate.permit));
+  const skippedExisting = uniqueUploaded.filter((candidate) => currentPermits.has(candidate.permit));
+  return {
+    candidates: normalizeCandidateRoster([...currentRoster.candidates, ...additions]).candidates,
+    additions,
+    skippedExisting,
+    uploadedCount: uniqueUploaded.length,
+    errors,
+  };
+}
+
+export function buildTrialCandidateSyncPlan(formalRows = [], trialRows = [], courseCode = "") {
+  const normalizedCourseCode = text(courseCode);
+  const requested = normalizeCandidateRoster(formalRows).candidates.map((candidate) => ({
+    ...candidate,
+    course_code: normalizedCourseCode,
+    exam_status: "",
+  }));
+  const existingPermits = new Set(
+    normalizeCandidateRoster(trialRows).candidates.map((candidate) => candidate.permit),
+  );
+  return {
+    requested,
+    pending: requested.filter((candidate) => !existingPermits.has(candidate.permit)),
+    skippedExisting: requested.filter((candidate) => existingPermits.has(candidate.permit)),
+  };
 }
 
 export function candidateRosterForValidation(proposedRows = [], currentRows = []) {

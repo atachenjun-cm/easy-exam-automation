@@ -14,6 +14,36 @@ function text(value) {
   return String(value ?? "").trim();
 }
 
+function operationPersonnelRecipientPeople(recipients = {}) {
+  const explicit = Array.isArray(recipients.toPeople) ? recipients.toPeople : [];
+  const source = explicit.length
+    ? explicit
+    : (Array.isArray(recipients.toNames) ? recipients.toNames : []).map((name) => ({
+        group: recipients.toGroup,
+        name,
+      }));
+  const seen = new Set();
+  return source.map((person) => ({
+    group: text(person?.group || person?.department),
+    name: text(person?.name),
+    ...(text(person?.email).toLowerCase() ? { email: text(person.email).toLowerCase() } : {}),
+  })).filter((person) => {
+    const key = `${person.group}\u0000${person.name}`;
+    if (!person.group || !person.name || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function applyOperationPersonnelRecipientPeople(recipients, people) {
+  const selected = operationPersonnelRecipientPeople({ toPeople: people });
+  const groups = [...new Set(selected.map((person) => person.group))];
+  recipients.toPeople = selected;
+  recipients.toGroup = groups.length === 1 ? groups[0] : "";
+  recipients.toNames = selected.map((person) => person.name);
+  return recipients;
+}
+
 function confirmedTruthy(value) {
   return value === true || ["是", "需要", "true", "1"].includes(text(value).toLowerCase());
 }
@@ -226,7 +256,13 @@ export function operationPersonnelConfirmedEdits(draft = {}) {
     const value = text(storedRequirements[name]);
     if (value) requirements[name] = value;
   }
-  return { dates, personnel: {}, requirements };
+  const toPeople = operationPersonnelRecipientPeople(draft.recipients);
+  return {
+    dates,
+    personnel: {},
+    requirements,
+    recipients: toPeople.length ? { toPeople } : {},
+  };
 }
 
 function confirmedEditsFromTask(task = {}) {
@@ -234,15 +270,20 @@ function confirmedEditsFromTask(task = {}) {
   if (state.confirmedEdits) {
     return operationPersonnelConfirmedEdits(state.confirmedEdits);
   }
-  if (!state.lastSuccessfulFingerprint) return { dates: {}, personnel: {}, requirements: {} };
+  if (!state.lastSuccessfulFingerprint) {
+    return { dates: {}, personnel: {}, requirements: {}, recipients: {} };
+  }
   const stored = operationPersonnelConfirmedEdits(state.draft || {});
   const successfulTarget = state.activeAttempt?.status === "sent"
     ? operationPersonnelConfirmedEdits(state.activeAttempt.target || {})
-    : { dates: {}, personnel: {}, requirements: {} };
+    : { dates: {}, personnel: {}, requirements: {}, recipients: {} };
   return {
     dates: { ...stored.dates, ...successfulTarget.dates },
     personnel: { ...stored.personnel, ...successfulTarget.personnel },
     requirements: { ...stored.requirements, ...successfulTarget.requirements },
+    recipients: successfulTarget.recipients?.toPeople?.length
+      ? successfulTarget.recipients
+      : stored.recipients,
   };
 }
 
@@ -305,6 +346,9 @@ export function buildOperationPersonnelTaskDraft(task = {}, options = {}) {
   const recipients = {
     toGroup: projectDepartment,
     toNames: projectManager ? [projectManager] : [],
+    toPeople: projectDepartment && projectManager
+      ? [{ group: projectDepartment, name: projectManager }]
+      : [],
     ccGroup: PERSONNEL_CC_GROUPS[0],
     ccGroups: [...PERSONNEL_CC_GROUPS],
     ccCount: 0,
@@ -346,6 +390,9 @@ export function buildOperationPersonnelTaskDraft(task = {}, options = {}) {
   const confirmed = confirmedEditsFromTask(task);
   draft.dates = { ...draft.dates, ...confirmed.dates };
   applyConfirmedRequirementEdits(draft, confirmed.requirements);
+  if (confirmed.recipients?.toPeople?.length) {
+    applyOperationPersonnelRecipientPeople(draft.recipients, confirmed.recipients.toPeople);
+  }
   const datesComplete = ["start", "end", "nameListDue"].every(
     (key) => /^\d{4}-\d{2}-\d{2}$/.test(text(draft.dates[key])),
   ) && draft.dates.start <= draft.dates.end;
@@ -374,6 +421,8 @@ export function buildOperationPersonnelTaskDraft(task = {}, options = {}) {
 
 export function operationPersonnelTaskSnapshot(draft = {}) {
   const recipients = draft.recipients || {};
+  const toPeople = operationPersonnelRecipientPeople(recipients);
+  const recipientGroups = [...new Set(toPeople.map((person) => person.group))];
   const managedSchedules = (draft.managedSchedules || []).map(
     ({ requirementIndex, name, start, end }) => ({
       requirementIndex,
@@ -394,6 +443,9 @@ export function operationPersonnelTaskSnapshot(draft = {}) {
       ruleVersion: recipients.ruleVersion,
       toGroup: recipients.toGroup,
       toNames: recipients.toNames,
+      ...(recipientGroups.length > 1 ? {
+        toPeople: toPeople.map(({ group, name }) => ({ group, name })),
+      } : {}),
       ccGroup: recipients.ccGroup,
       ccGroups: recipients.ccGroups,
       ccCount: recipients.ccCount,
@@ -453,6 +505,7 @@ const FIELD_LABELS = {
   "recipients.ruleVersion": "收件规则版本",
   "recipients.toGroup": "收件人分组",
   "recipients.toNames": "收件人",
+  "recipients.toPeople": "收件人",
   "recipients.ccGroup": "抄送分组",
   "recipients.ccGroups": "抄送分组",
   "recipients.ccCount": "抄送人数",
@@ -520,7 +573,7 @@ export function buildOperationPersonnelTaskStatus(task = {}, draft = {}) {
   if (["operation_conflict", "result_unknown", "failed_resumable"].includes(persistent)) {
     return {
       status: persistent,
-      actions: persistent === "result_unknown" ? actions("recheck", "重新核对发送记录") : actions("resume", persistent === "failed_resumable" ? "继续未完成流程" : "检查并发送人员任务单"),
+      actions: persistent === "result_unknown" ? actions("recheck", "重新核对发送记录") : actions("resume", persistent === "failed_resumable" ? "尝试重发" : "检查并发送人员任务单"),
     };
   }
   if (!operationBatchCodeIsValid(draft.batch?.code)) return { status: "waiting_batch", actions: [] };
